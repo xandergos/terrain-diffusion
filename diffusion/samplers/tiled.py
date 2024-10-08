@@ -80,9 +80,9 @@ class TiledSampler(Sampler):
             return None
         
         tile_boundary_left = (self.boundary[0]) // (self.tile_size - self.overlap)
-        tile_boundary_right = (self.boundary[2] - 1) // (self.tile_size - self.overlap)
+        tile_boundary_right = (self.boundary[2] + self.tile_size - 2 * self.overlap - 1) // (self.tile_size - self.overlap)
         tile_boundary_top = (self.boundary[1]) // (self.tile_size - self.overlap)
-        tile_boundary_bottom = (self.boundary[3] - 1) // (self.tile_size - self.overlap)
+        tile_boundary_bottom = (self.boundary[3] + self.tile_size - 2 * self.overlap - 1) // (self.tile_size - self.overlap)
         return tile_boundary_left, tile_boundary_top, tile_boundary_right, tile_boundary_bottom
         
     def is_tile_in_boundary(self, tile_y, tile_x): 
@@ -290,7 +290,7 @@ class TiledSampler(Sampler):
         t = t.to(self.device).repeat(self.batch_size)
         sigmas = sigmas.repeat(self.batch_size)
         x = self.scheduler.precondition_inputs(input_sample, sigmas.view(-1, 1, 1, 1))
-        model_outputs = self.model(x, t, **net_inputs)
+        model_outputs = self.model(x.to(self.device), t.to(self.device), **net_inputs).to('cpu')
         for i in range(len(tiles_y)):
             tile = self.get_tile(tiles_y[i], tiles_x[i])
             tile.model_output = model_outputs[i*self.batch_size:(i+1)*self.batch_size]
@@ -503,12 +503,12 @@ if __name__ == "__main__":
     model = DummyModel(sigma_data=0.5)
     
     # Visualize the effect of overlap on the mean image intensity
-    for overlap in [16]:
+    for overlap in [0, 16, 32]:
         scheduler = EDMDPMSolverMultistepScheduler(sigma_min=0.002, sigma_max=80, sigma_data=0.5, scaling_p=2, scaling_t=0.01)
         sampler = TiledSampler(model, scheduler, overlap=overlap, timesteps=10,
                                boundary=(0, 0, 256, 256), batch_size=4)
         
-        mid_region = sampler.get_region(0, 0, 256, 256, upgrade_batch_size=512)
+        mid_region = sampler.get_region(0, 0, 256, 256)
         import matplotlib.pyplot as plt
 
         for i in range(sampler.batch_size):
