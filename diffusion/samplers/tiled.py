@@ -7,6 +7,7 @@ import torch
 import torch.nn.functional as F
 from collections import deque
 from tqdm import tqdm
+from diffusion.samplers.sampler import Sampler
 from diffusion.scheduler.dpmsolver import EDMDPMSolverMultistepScheduler
 import matplotlib.pyplot as plt
 
@@ -22,9 +23,9 @@ class Tile:
     sampler_prev_model_output: torch.Tensor = None  # For higher order sampling
     level: int = 0
 
-class TiledSampler:
+class TiledSampler(Sampler):
     def __init__(self, model, scheduler, overlap=16, timesteps=15, seed=None, device='cpu',
-                 boundary=None, batch_size=1):
+                 parent_sampler=None, boundary=None, batch_size=1, generation_batch_size=1):
         """Initialize a TiledSampler for efficient large image generation.
 
         This sampler divides the input image into tiles, processes each tile
@@ -39,7 +40,8 @@ class TiledSampler:
                 i.e scale_factor^2 pixels in this image are represented by 1 pixel in the parent image. Unused if parent_sampler is None.
             parent_sampler (Sampler, optional): The sampler to use for the parent (conditional) image. Defaults to None.
             boundary (tuple[int, int, int, int], optional): The boundary of the region to sample. Defaults to None.
-            batch_size (int, optional): The batch size for processing tiles. Defaults to 1.
+            batch_size (int, optional): The batch size of tiles, i.e how many tiles are stacked together.
+            generation_batch_size (int, optional): Maximum number of tiles to process at once. The effective batch size of model inputs is batch_size * generation_batch_size.
         """
         self.model = model
         self.scheduler = scheduler
@@ -49,8 +51,10 @@ class TiledSampler:
         self._seed = seed if seed is not None else random.randint(0, 2**30)
         self.device = device
         self.tiles = {}
+        self.parent_sampler = parent_sampler
         self.boundary = boundary
         self.batch_size = batch_size
+        self.generation_batch_size = generation_batch_size
         
     @property
     def seed(self):
@@ -75,10 +79,10 @@ class TiledSampler:
         if self.boundary is None:
             return None
         
-        tile_boundary_left = (self.boundary[0] - self.overlap) // (self.tile_size - self.overlap)
-        tile_boundary_right = (self.boundary[2] + self.tile_size - self.overlap - 1) // (self.tile_size - self.overlap)
-        tile_boundary_top = (self.boundary[1] - self.overlap) // (self.tile_size - self.overlap)
-        tile_boundary_bottom = (self.boundary[3] + self.tile_size - self.overlap - 1) // (self.tile_size - self.overlap)
+        tile_boundary_left = (self.boundary[0]) // (self.tile_size - self.overlap)
+        tile_boundary_right = (self.boundary[2] - 1) // (self.tile_size - self.overlap)
+        tile_boundary_top = (self.boundary[1]) // (self.tile_size - self.overlap)
+        tile_boundary_bottom = (self.boundary[3] - 1) // (self.tile_size - self.overlap)
         return tile_boundary_left, tile_boundary_top, tile_boundary_right, tile_boundary_bottom
         
     def is_tile_in_boundary(self, tile_y, tile_x): 
@@ -291,7 +295,7 @@ class TiledSampler:
             tile = self.get_tile(tiles_y[i], tiles_x[i])
             tile.model_output = model_outputs[i*self.batch_size:(i+1)*self.batch_size]
 
-    def upgrade_tiles(self, tile_y, tile_x, target_levels, batch_size=256, use_tqdm=True):
+    def upgrade_tiles(self, tile_y, tile_x, target_levels, use_tqdm=True):
         """Upgrades tiles to a higher level.
         
         Args:
@@ -310,6 +314,16 @@ class TiledSampler:
             dependencies: list = field(default_factory=list)  # Tiles that must be upgraded before this one
         
         nodes = {(a, b, c): TileNode(a, b, c) for a, b, c in zip(tile_y, tile_x, target_levels)}
+        
+        # Filter out nodes that are already at target level or not in boundary
+        nodes = {
+            (ty, tx, level): node
+            for (ty, tx, level), node in nodes.items()
+            if self.get_tile(ty, tx) is not None and self.get_tile(ty, tx).level < level
+        }
+        if len(nodes) == 0:
+            return
+        
         S = set(nodes.keys())
         while S:
             tile_y, tile_x, level = S.pop()
@@ -380,7 +394,7 @@ class TiledSampler:
         pbar = tqdm(total=len(nodes), desc="Upgrading tiles", disable=not use_tqdm)
         while queue:
             batch = []
-            for _ in range(min(batch_size, len(queue))):
+            for _ in range(min(self.generation_batch_size, len(queue))):
                 if len(queue[0].dependencies) == 0:
                     batch.append(queue.popleft())
                 else:
@@ -435,29 +449,51 @@ class TiledSampler:
         tile_coord_top = (top - self.overlap) // (self.tile_size - self.overlap)
         tile_coord_bottom = (bottom + self.tile_size - self.overlap - 1) // (self.tile_size - self.overlap)
         
-        return [(i, j) for i in range(tile_coord_top, tile_coord_bottom) for j in range(tile_coord_left, tile_coord_right)]
+        return ((i, j) for i in range(tile_coord_top, tile_coord_bottom) for j in range(tile_coord_left, tile_coord_right)
+                if self.is_tile_in_boundary(i, j))
     
-    def get_region(self, top, left, bottom, right):
+    def get_region(self, top, left, bottom, right, generate=True):
+        """Get a region of the image.
+
+        This method retrieves a specified rectangular region from the generated image.
+        It handles the complexities of tiled generation, including overlaps and boundaries.
+
+        Args:
+            top (int): The top coordinate of the region to retrieve.
+            left (int): The left coordinate of the region to retrieve.
+            bottom (int): The bottom coordinate of the region to retrieve.
+            right (int): The right coordinate of the region to retrieve.
+            upgrade_batch_size (int, optional): Batch size for upgrading tiles if needed.
+                If provided, tiles in the region will be upgraded to the highest level
+                before retrieval.
+
+        Returns:
+            torch.Tensor: A tensor containing the requested region of the image.
+                The shape is (batch_size, channels, height, width), where height
+                and width correspond to the dimensions of the requested region.
+                The image will be black if the region is not fully covered by tiles.
+        """
         assert top < bottom, "Top must be less than bottom"
         assert left < right, "Left must be less than right"
         
         output = torch.zeros(self.batch_size, self.model.config.out_channels, bottom-top, right-left)
         weights = torch.zeros_like(output)
-        tile_coord_left = (left - self.overlap) // (self.tile_size - self.overlap)
-        tile_coord_right = (right + self.tile_size - self.overlap - 1) // (self.tile_size - self.overlap)
-        tile_coord_top = (top - self.overlap) // (self.tile_size - self.overlap)
-        tile_coord_bottom = (bottom + self.tile_size - self.overlap - 1) // (self.tile_size - self.overlap)
         
-        for i in range(tile_coord_top, tile_coord_bottom):
-            for j in range(tile_coord_left, tile_coord_right):
-                tile = self.get_tile(i, j)
+        region_tiles = self.get_tiles_in_region(top, left, bottom, right)
+        if generate:
+            region_tiles = list(region_tiles)
+            self.upgrade_tiles(*zip(*region_tiles), [self.timesteps] * len(region_tiles))
+        for i, j in region_tiles:
+            tile = self.get_tile(i, j)
+            if tile is None:
+                    continue
                 
-                tile_top, tile_left, tile_bottom, tile_right = self.get_tile_bounds(i, j)
-                cropped_top, cropped_left, cropped_bottom, cropped_right = self.crop_region(i, j, top, left, bottom, right)
-                cropped_tile_image = tile.image[..., cropped_top-tile_top:cropped_bottom-tile_top, cropped_left-tile_left:cropped_right-tile_left]
-                cropped_tile_weights = self.weights[..., cropped_top-tile_top:cropped_bottom-tile_top, cropped_left-tile_left:cropped_right-tile_left].unsqueeze(0).unsqueeze(0).expand(self.batch_size, -1, -1, -1)
-                output[..., cropped_top-top:cropped_bottom-top, cropped_left-left:cropped_right-left] += cropped_tile_image * cropped_tile_weights
-                weights[..., cropped_top-top:cropped_bottom-top, cropped_left-left:cropped_right-left] += cropped_tile_weights
+            tile_top, tile_left, tile_bottom, tile_right = self.get_tile_bounds(i, j)
+            cropped_top, cropped_left, cropped_bottom, cropped_right = self.crop_region(i, j, top, left, bottom, right)
+            cropped_tile_image = tile.image[..., cropped_top-tile_top:cropped_bottom-tile_top, cropped_left-tile_left:cropped_right-tile_left]
+            cropped_tile_weights = self.weights[..., cropped_top-tile_top:cropped_bottom-tile_top, cropped_left-tile_left:cropped_right-tile_left].unsqueeze(0).unsqueeze(0).expand(self.batch_size, -1, -1, -1)
+            output[..., cropped_top-top:cropped_bottom-top, cropped_left-left:cropped_right-left] += cropped_tile_image * cropped_tile_weights
+            weights[..., cropped_top-top:cropped_bottom-top, cropped_left-left:cropped_right-left] += cropped_tile_weights
                 
         return output / weights
         
@@ -467,15 +503,12 @@ if __name__ == "__main__":
     model = DummyModel(sigma_data=0.5)
     
     # Visualize the effect of overlap on the mean image intensity
-    for overlap in [32]:
+    for overlap in [16]:
         scheduler = EDMDPMSolverMultistepScheduler(sigma_min=0.002, sigma_max=80, sigma_data=0.5, scaling_p=2, scaling_t=0.01)
         sampler = TiledSampler(model, scheduler, overlap=overlap, timesteps=10,
-                               boundary=(16, 16, 240, 240), batch_size=4)
+                               boundary=(0, 0, 256, 256), batch_size=4)
         
-        region_tiles = sampler.get_tiles_in_region(16, 16, 240, 240)
-        sampler.upgrade_tiles(*zip(*region_tiles), [sampler.timesteps] * len(region_tiles), batch_size=512)
-        
-        mid_region = sampler.get_region(16, 16, 240, 240)
+        mid_region = sampler.get_region(0, 0, 256, 256, upgrade_batch_size=512)
         import matplotlib.pyplot as plt
 
         for i in range(sampler.batch_size):
