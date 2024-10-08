@@ -16,3 +16,17 @@ Key features of Terrain Diffusion include:
 
 6. Integration with wandb: Tracking experiments and visualizing results using Weights & Biases for better model monitoring and analysis.
 
+# Tiled Generation
+To show how tiled generation works, I made a diffusion models that simply predicts a normal distribution with mean 0 and STD 0.5.
+
+Without tiled generation (overlap = 0/64):
+Each "tile" is independent. In this case, each tile takes a normal distribution with STD 0.5
+![No Tiled Generation](https://github.com/user-attachments/assets/d305428e-8a70-455d-86cc-8eb68e33254e)
+
+With some tile overlap (overlap = 16/64):
+Adjacent tiles become vastly more correlated. STD drops significantly.
+![overlap16](https://github.com/user-attachments/assets/fdc03bee-3e6f-42ea-9d60-1549350a0779)
+
+With full tile overlap (overlap = 32/64):
+The image is almost perfectly smooth. Not a significant change in STD, however, telling us this may be overkill for many applications.
+![overlap32](https://github.com/user-attachments/assets/6eeef120-7af4-442b-a740-84008a22a9fb)
