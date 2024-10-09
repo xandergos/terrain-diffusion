@@ -21,6 +21,7 @@ This project implements an infinitely tileable, high-order diffusion sampler for
 
 Here is the output of the base model (generates 64x64 images where 1 pixel is roughly 4km) on a 1024x1024 map. In real terms, the map has about 1/10th the area of all land on earth. Details are lacking because this image generates very large scale features, but it is a good sign that the image contains both deep seas (black) and mountain ranges (white).
 Generating this image on an infinite tiling map takes about 12500 model evaluations, significantly more than the 4410 that would be required for a bounded map. However, on an RTX 3090 Ti this map can still be created in less than a minute, which is not too bad considering the scale of the map.
+
 Note: Pretrained models are WIP but coming soon. Also, there are few seas because this model was trained to generate primarily land, which is more difficult to generate and more interesting to look at. Fine tuning will help generate more/larger oceans if that is desired.
 ![1024x1024_example](https://github.com/user-attachments/assets/8ea21283-0aee-471d-b470-037ad2b8bd92)
 
