@@ -1,12 +1,14 @@
 import torch
 from diffusion.samplers.sampler import Sampler
+from PIL import Image
 
 class ImageSampler(Sampler):
     """
     A simple sampler that retrieves regions from an input image tensor.
     """
 
-    def __init__(self, image: torch.Tensor, translate_x: int = 0, translate_y: int = 0):
+    def __init__(self, image: torch.Tensor, translate_x: int = 0, translate_y: int = 0,
+                 postprocessor = None):
         """
         Initialize the ImageSampler with an input image tensor.
 
@@ -14,10 +16,12 @@ class ImageSampler(Sampler):
             image (torch.Tensor): The input image as a PyTorch tensor.
             translate_x (int, optional): Number of pixels to translate the image horizontally. Default is 0.
             translate_y (int, optional): Number of pixels to translate the image vertically. Default is 0.
+            postprocessor (callable, optional): A function that processes an input image tensor before it is returned. Default is None.
         """
         self.image = image
         self.translate_x = translate_x
         self.translate_y = translate_y
+        self.postprocessor = postprocessor or (lambda x: x)
 
     def get_region(self, top: int, left: int, bottom: int, right: int, generate=True,
                    enforce_bounds=True):
@@ -66,4 +70,12 @@ class ImageSampler(Sampler):
         # Copy the valid region from the image to the output tensor
         output[..., out_top:out_bottom, out_left:out_right] = self.image[..., valid_top:valid_bottom, valid_left:valid_right]
 
-        return output
+        return self.postprocessor(output)
+
+    @classmethod
+    def from_pil(cls, path: str, translate_x: int = 0, translate_y: int = 0, postprocessor = None):
+        """
+        Initialize the ImageSampler with a pil image.
+        """
+        image = Image.open(path)
+        return cls(image, translate_x, translate_y, postprocessor)

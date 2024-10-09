@@ -3,6 +3,9 @@ import torch
 import torch.nn as nn
 from diffusers import ConfigMixin
 
+from diffusers.configuration_utils import ConfigMixin, register_to_config
+from diffusers.models.modeling_utils import ModelMixin
+
 
 def normalize(x, dim=None, eps=1e-4):
     norm = torch.linalg.vector_norm(x, dim=dim, keepdim=True)
@@ -150,7 +153,6 @@ class MPEmbedding(nn.Module):
 
         return torch.nn.functional.embedding(x, self.weight)
 
-
 class UNetBlock(torch.nn.Module):
     def __init__(
         self,
@@ -246,7 +248,8 @@ class UNetBlock(torch.nn.Module):
         return x
 
 
-class EDMUnet2D(nn.Module):
+class EDMUnet2D(ModelMixin, ConfigMixin):
+    @register_to_config
     def __init__(
         self,
         image_size,
@@ -263,7 +266,7 @@ class EDMUnet2D(nn.Module):
         midblock_attention=True,
         concat_balance=0.3,
         logvar_channels=128,
-        **block_kwargs
+        block_kwargs=None
     ):
         """
         Parameters:
@@ -283,11 +286,10 @@ class EDMUnet2D(nn.Module):
             concat_balance (float, optional): Balance factor for concatenation. Default is 0.3.
             logvar_channels (int, optional): The number of channels for uncertainty estimation. Default is 128.
         """
-        super().__init__()
-        self.config = dict(locals())
-        
+        super().__init__()        
         self.concat_balance = concat_balance
-
+        
+        block_kwargs = block_kwargs or {}
         model_channel_mults = model_channel_mults or [1, 2, 3, 4]
         emb_channels = emb_channels or model_channels * max(model_channel_mults)
         noise_emb_dims = noise_emb_dims or model_channels
@@ -341,8 +343,7 @@ class EDMUnet2D(nn.Module):
         self.logvar_fourier = MPFourier(logvar_channels)
         self.logvar_linear = MPConv(logvar_channels, 1, kernel=[])
 
-    def forward(self, x, noise_labels, label_index=None, conditional_embeddings=None,
-                return_logvar=False):
+    def forward(self, x, noise_labels, label_index=None, conditional_embeddings=None, return_logvar=False):
         embeds = []
         embeds.append(self.noise_linear(self.noise_fourier(noise_labels)))
         if self.custom_cond_linear is not None:

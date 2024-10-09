@@ -1,56 +1,31 @@
-import datetime
-import json
-import os
-import random
-import click
-from diffusion.scheduler.dpmsolver import EDMDPMSolverMultistepScheduler
 import catalogue
-from confection import registry, Config
+import click
+import datetime
 import numpy as np
+import os
 import torch
+from accelerate import Accelerator
+from confection import Config, registry
+from diffusers.training_utils import EMAModel
+from diffusion.datasets.datasets import BaseTerrainDataset, LongDataset, MultiDataset, UpsamplingTerrainDataset
+from diffusion.encoder import *
+from diffusion.encoder import encode_postprocess
+from diffusion.loss import SqrtLRScheduler
+from diffusion.samplers.image_sampler import ImageSampler
+from diffusion.samplers.stacked_sampler import StackedSampler
+from diffusion.samplers.tiled import TiledSampler, constant_label_network_inputs
+from diffusion.scheduler.dpmsolver import EDMDPMSolverMultistepScheduler
 from tqdm import tqdm
 import wandb
-from easydict import EasyDict
-
-from diffusion.encoder import denoise_pyramid_layer
-
-from diffusion.datasets.datasets import BaseTerrainDataset, LongDataset, MultiDataset, UpsamplingTerrainDataset
-from diffusion.loss import SqrtLRScheduler
-from diffusion.unet import EDMUnet2D
-
-from diffusers.training_utils import EMAModel
-
 from torch.utils.data import DataLoader
-from accelerate import Accelerator
+from diffusion.unet import EDMUnet2D
+from utils import SerializableEasyDict as EasyDict
 
-@torch.no_grad()
-def generate_images(image_shape, model, scheduler, timesteps, device, generator=None,
-                    cond_image=None, **net_inputs):
-    scheduler.set_timesteps(timesteps)
-
-    batch_size = image_shape[0]
-    sample = torch.randn(*image_shape, generator=generator, device=device) * scheduler.sigmas[0]
-    for t, sigma in tqdm(zip(scheduler.timesteps, scheduler.sigmas), desc="Generating images"):
-        t = t.to(device)
-        x = scheduler.precondition_inputs(sample, sigma)
-        if cond_image is not None:
-            x = torch.cat([sample, cond_image], dim=1)
-        pred_noise = model(x, t.repeat(batch_size).flatten(), **net_inputs)
-        
-        sample = scheduler.step(pred_noise, t, sample).prev_sample
-
-    return sample
-
-def log_samples(samples, config, state, encoder):
+def log_samples(images, config, state, encoder):
     import math
     import matplotlib.pyplot as plt 
     # Convert samples to numpy array and move to CPU
-    samples_np = samples.cpu().numpy()
-    
-    for i in range(samples_np.shape[0]):
-        samples_np[i, 1] = denoise_pyramid_layer(samples_np[i, [1]], encoder, depth=1, maxiter=3)[0]
-        
-    samples_np = samples_np[:, 0, ...] * 155 * 2 + samples_np[:, 1, ...] * 2420 * 2 - 2651  
+    samples_np = images.cpu().numpy()
     
     # Calculate grid size
     bs = samples_np.shape[0]
@@ -63,13 +38,13 @@ def log_samples(samples, config, state, encoder):
         for j in range(grid_size):
             idx = i * grid_size + j
             if idx < bs:
-                im = axs[i, j].imshow(samples_np[idx], cmap='terrain')
+                im = axs[i, j].imshow(samples_np[idx, 0], cmap='terrain')
                 axs[i, j].set_xticks([])
                 axs[i, j].set_yticks([])
                 axs[i, j].axis('off')
                 cbar = fig.colorbar(im, ax=axs[i, j], fraction=0.046, pad=0.04)
-                cbar.set_ticks([samples_np[idx].min(), samples_np[idx].max()])
-                cbar.set_ticklabels([f'{samples_np[idx].min():.2f}', f'{samples_np[idx].max():.2f}'])
+                cbar.set_ticks([samples_np[idx, 0].min(), samples_np[idx, 0].max()])
+                cbar.set_ticklabels([f'{samples_np[idx, 0].min():.2f}', f'{samples_np[idx, 0].max():.2f}'])
             else:
                 axs[i, j].axis('off')   
     # Adjust layout and save
@@ -81,15 +56,7 @@ def log_samples(samples, config, state, encoder):
               commit=False, step=state.epoch)
 
 
-@click.command()
-@click.option("-c", "--config", "config_path", type=click.Path(exists=True), required=False)
-@click.option("--ckpt", "ckpt_path", type=click.Path(exists=True), required=False)
-@click.option("--not-strict", "not_strict_load", is_flag=True, type=bool, default=False, required=False)
-def main(config_path, ckpt_path, not_strict_load):
-    if not config_path and not ckpt_path:
-        click.echo("--config OR --ckpt must be provided.", err=True)
-        raise click.Abort()
-
+def build_registry():
     registry.scheduler = catalogue.create("confection", "schedulers", entry_points=False)
     registry.scheduler.register("edm_dpm", func=EDMDPMSolverMultistepScheduler)
 
@@ -103,30 +70,31 @@ def main(config_path, ckpt_path, not_strict_load):
     registry.dataset.register("base_terrain", func=BaseTerrainDataset)
     registry.dataset.register("upsampling_terrain", func=UpsamplingTerrainDataset)
     registry.dataset.register("multi_dataset", func=MultiDataset)
+    
+    registry.sampler = catalogue.create("confection", "samplers", entry_points=False)
+    registry.sampler.register("image", func=ImageSampler)
+    registry.sampler.register("image_from_pil", func=ImageSampler.from_pil)
+    registry.sampler.register("stacked", func=StackedSampler)
+    
+    registry.postprocessor = catalogue.create("confection", "postprocessor", entry_points=False)
+    registry.postprocessor.register("encode", func=encode_postprocess)
+    registry.postprocessor.register("decode", func=decode_postprocess)
+    
+    registry.encoder = catalogue.create("confection", "encoder", entry_points=False)
+    registry.encoder.register("laplacian_pyramid_encoder", func=LaplacianPyramidEncoder)
+    
+    registry.network_inputs = catalogue.create("confection", "network_inputs", entry_points=False)
+    registry.network_inputs.register("constant_label", func=constant_label_network_inputs)
 
+
+@click.command()
+@click.option("-c", "--config", "config_path", type=click.Path(exists=True), required=True)
+@click.option("--ckpt", "ckpt_path", type=click.Path(exists=True), required=False)
+def main(config_path, ckpt_path):
+    build_registry()
+    
     config = Config().from_disk(config_path) if config_path else None
-    ckpt = None
-
-    if ckpt_path:
-        ckpt = torch.load(ckpt_path, weights_only=False)
-        if 'config' in ckpt:
-            ckpt_config = Config().from_str(ckpt['config'])
             
-            if config:
-                if config['training']['override_checkpoint']:
-                    ckpt_config.update(config)
-                    config = ckpt_config
-                else:
-                    config.update(ckpt_config)
-            else:
-                config = ckpt_config
-        elif config:
-            click.echo("Warning: No config found in checkpoint. Using config from command line arguments.")
-        else:
-            click.echo("No config found in checkpoint or command line arguments.", err=True)
-            raise click.Abort()
-            
-
     resolved = registry.resolve(config, validate=False)
 
     # Load anything that needs to be used for training.
@@ -139,50 +107,6 @@ def main(config_path, ckpt_path, not_strict_load):
     state = EasyDict({'epoch': 0, 'step': 0, 'seen': 0})
     dataloader = DataLoader(LongDataset(train_dataset), batch_size=config['training']['train_batch_size'],
                             **resolved['dataloader_kwargs'])
-    
-    # Loading evaluation data
-    random.seed(config['logging']['seed'])
-    if model.config['label_dim'] > 0:
-        assert len(config['logging']['label_weights']) == model.config['label_dim']
-        labels = random.choices(list(range(model.config['label_dim'])), k=config['training']['eval_batch_size'], 
-                                weights=config['logging']['label_weights'])
-    if 'eval_dataset' in resolved:
-        eval_dataloader = DataLoader(resolved['eval_dataset'], batch_size=config['training']['eval_batch_size'])
-        eval_data = next(iter(eval_dataloader))
-    else:
-        eval_data = None
-
-    # Load from checkpoint if needed
-    if ckpt:
-        click.echo("Loading from checkpoint...")
-        
-        for key in config['checkpoint']['ignore_keys']:
-            if key in ckpt:
-                del ckpt[key]
-        #ckpt['model'] = ckpt['net']
-        #for key in list(ckpt['model'].keys()):
-        #    ckpt['model'][key.replace('unet.', '')] = ckpt['model'][key]
-        #    del ckpt['model'][key]
-        #    
-        #ckpt['model']['noise_fourier.freqs'] = ckpt['model']['emb_fourier.freqs']
-        #ckpt['model']['noise_fourier.phases'] = ckpt['model']['emb_fourier.phases']
-        #ckpt['model']['noise_linear.weight'] = ckpt['model']['emb_noise.weight']
-        #ckpt['model']['label_embeds.weight'] = torch.transpose(ckpt['model']['emb_label.weight'], 0, 1)
-        
-        model.load_state_dict(ckpt['model'], strict=not not_strict_load)
-        if 'optimizer' in ckpt:
-            optimizer.load_state_dict(ckpt['optimizer'])
-        else:
-            click.echo("Warning: No optimizer found in checkpoint.")
-        if 'ema' in ckpt:
-            ema.load_state_dict(ckpt['ema'])
-        else:
-            click.echo("Warning: No EMA found in checkpoint, initializing new EMA model from loaded model.")
-            ema = EMAModel(model.to('cuda').parameters(), **resolved['ema'])
-        if 'state' in ckpt:
-            state = EasyDict(ckpt['state'])
-        else:
-            click.echo("Warning: No state found in checkpoint.")
 
     # Setup accelerate
     accelerator = Accelerator(
@@ -191,29 +115,61 @@ def main(config_path, ckpt_path, not_strict_load):
         log_with=None
     )
     model, dataloader, optimizer, ema = accelerator.prepare(model, dataloader, optimizer, ema)
-
+    accelerator.register_for_checkpointing(state)
+    
+    # Temporary fix for old checkpoints
+    # path = 'checkpoints/64_128x3/latest.pt'
+    # ckpt = torch.load(path)
+    # model.load_state_dict(ckpt['model'])
+    # optimizer.load_state_dict(ckpt['optimizer'])
+    # ema.load_state_dict(ckpt['ema'])
+    # state = EasyDict(ckpt['state'])
+    
+    # Load from checkpoint if needed
+    if ckpt_path:
+        accelerator.load_state(ckpt_path)
     
     if accelerator.is_main_process:
         wandb.init(
             **config['wandb'],
             config=config
         )
+        
+    def safe_rmtree(path):
+        """Removes a tree but only checkpoint files."""
+        for fp in os.listdir(path):
+            if os.path.isdir(os.path.join(path, fp)):
+                safe_rmtree(os.path.join(path, fp))
+            else:
+                legal_extensions = ['.bin', '.safetensors', '.pkl', '.pt', '.json', '.md']
+                for ext in legal_extensions:
+                    if fp.endswith(ext):
+                        os.remove(os.path.join(path, fp))
+                        break
+        os.rmdir(path)
 
-    def save_state(file_path, overwrite=False):
-        if os.path.exists(file_path) and not overwrite:
-            ext = os.path.extsep + os.path.basename(file_path).split(os.path.extsep)[-1]
-            base = file_path[:-len(ext)]
+    def save_checkpoint(base_folder_path, overwrite=False):
+        if os.path.exists(base_folder_path + '_checkpoint') and not overwrite:
             strtime = datetime.now().strftime("_%Y%m%d_%H%M%S")
-            file_path = f"{base}{strtime}{ext}"
-        assert not os.path.exists(file_path) or overwrite
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
-        torch.save({
-            "config": config.to_str(),
-            "model": accelerator.unwrap_model(model).state_dict(),
-            "optimizer": optimizer.state_dict(),
-            "ema": accelerator.unwrap_model(ema).state_dict(),
-            'state': dict(state)
-        }, file_path)
+            base_folder_path = f"{base_folder_path}{strtime}"
+        elif os.path.exists(base_folder_path + '_checkpoint'):
+            safe_rmtree(base_folder_path + '_checkpoint')
+        os.makedirs(base_folder_path + '_checkpoint', exist_ok=False)
+        accelerator.save_state(base_folder_path + '_checkpoint')
+        
+    def save_model(base_folder_path, overwrite=False):
+        if os.path.exists(base_folder_path + '_model') and not overwrite:
+            strtime = datetime.now().strftime("_%Y%m%d_%H%M%S")
+            base_folder_path = f"{base_folder_path}{strtime}"
+        elif os.path.exists(base_folder_path + '_model'):
+            safe_rmtree(base_folder_path + '_model')
+        os.makedirs(base_folder_path + '_model', exist_ok=False)
+        
+        # Saving the EMA model
+        ema.store(model.parameters())
+        ema.copy_to(model.parameters())
+        model.save_pretrained(base_folder_path + '_model')
+        ema.restore(model.parameters())
 
     dataloader_iter = iter(dataloader)
     while state.epoch < config['training']['epochs']:
@@ -283,31 +239,20 @@ def main(config_path, ckpt_path, not_strict_load):
                 "seen": state.seen
             }, step=state.epoch)
             if state.epoch % config['logging']['temp_save_epochs'] == 0:
-                save_state(f"{config['logging']['save_dir']}/latest.pt", overwrite=True)
+                save_checkpoint(f"{config['logging']['save_dir']}/latest", overwrite=True)
+                save_model(f"{config['logging']['save_dir']}/latest", overwrite=True)
             if state.epoch % config['logging']['save_epochs'] == 0:
-                save_state(f"{config['logging']['save_dir']}/{state.seen//1000}kimg.pt")
+                save_checkpoint(f"{config['logging']['save_dir']}/{state.seen//1000}kimg")
+                save_model(f"{config['logging']['save_dir']}/{state.seen//1000}kimg")
             if state.epoch % config['logging']['plot_epochs'] == 0:
                 ema.store(model.parameters())
                 ema.copy_to(model.parameters())
                 
-                bs = config['training']['eval_batch_size']
-                image_size = (bs, model.config['out_channels'], model.config['image_size'], model.config['image_size'])
-                if model.config['label_dim'] > 0:
-                    labels_tensor = torch.tensor(labels, device=accelerator.device)
-                else:
-                    labels_tensor = None
-                if eval_data is not None:
-                    cond_eval_data = dict.copy(eval_data)
-                    if 'image' in cond_eval_data:
-                        del cond_eval_data['image']
-                    samples = generate_images(image_size, model, scheduler, config['logging']['generation_steps'], accelerator.device,
-                                              generator=torch.Generator(device=accelerator.device).manual_seed(43),
-                                              label_index=labels_tensor, **cond_eval_data)
-                else:
-                    samples = generate_images(image_size, model, scheduler, config['logging']['generation_steps'], accelerator.device,
-                                              generator=torch.Generator(device=accelerator.device).manual_seed(43),
-                                              label_index=labels_tensor)
-                log_samples(samples, config, state, train_dataset.sub_datasets[0].encoder)
+                sampler = TiledSampler(model=model, 
+                                       scheduler=scheduler,
+                                       **resolved['sampler']['init'])
+                images = sampler.get_region(*resolved['sampler']['region'])
+                log_samples(images, config, state, train_dataset.sub_datasets[0].encoder)
                 
                 ema.restore(model.parameters())
 

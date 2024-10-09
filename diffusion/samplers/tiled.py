@@ -1,18 +1,27 @@
 from dataclasses import dataclass, field
-from functools import cached_property, lru_cache
+from functools import cached_property, lru_cache, partial
 import random
 import time
 from typing import List
+import numpy as np
 import torch
 import torch.nn.functional as F
 from collections import deque
 from tqdm import tqdm
+from diffusion.encoder import LaplacianPyramidEncoder, denoise_pyramid_layer
 from diffusion.samplers.sampler import Sampler
 from diffusion.scheduler.dpmsolver import EDMDPMSolverMultistepScheduler
 import matplotlib.pyplot as plt
+import catalogue
+from diffusers.training_utils import EMAModel
 
 from dataclasses import dataclass
+from PIL import Image
 import networkx as nx
+
+from confection import registry, Config
+
+from diffusion.unet import EDMUnet2D
 
 @dataclass
 class Tile:
@@ -25,7 +34,8 @@ class Tile:
 
 class TiledSampler(Sampler):
     def __init__(self, model, scheduler, overlap=16, timesteps=15, seed=None, device='cpu',
-                 parent_sampler=None, boundary=None, batch_size=1, generation_batch_size=1):
+                 parent_sampler=None, boundary=None, batch_size=1, generation_batch_size=1,
+                 network_inputs=None, postprocessor=None):
         """Initialize a TiledSampler for efficient large image generation.
 
         This sampler divides the input image into tiles, processes each tile
@@ -42,12 +52,15 @@ class TiledSampler(Sampler):
             boundary (tuple[int, int, int, int], optional): The boundary of the region to sample. Defaults to None.
             batch_size (int, optional): The batch size of tiles, i.e how many tiles are stacked together.
             generation_batch_size (int, optional): Maximum number of tiles to process at once. The effective batch size of model inputs is batch_size * generation_batch_size.
+            network_inputs (tile_y, tile_x, batch_idx) -> dict: A function that takes a list (batch) of (y, x) tile coordinates and returns a dictionary of model inputs for the tiles.
+                For example, this can be used to give each tile a different (or same) label.
+            postprocessor (tile_y, tile_x, tensor) -> tensor: A function that takes tile_y, tile_x, and the tile's image and returns a processed image. Good for denoising, or decoding, a tile.
         """
         self.model = model
         self.scheduler = scheduler
         self.timesteps = timesteps
         self.overlap = overlap
-        self._tile_size = self.model.config.image_size
+        self._tile_size = self.model.config['image_size']
         self._seed = seed if seed is not None else random.randint(0, 2**30)
         self.device = device
         self.tiles = {}
@@ -55,6 +68,9 @@ class TiledSampler(Sampler):
         self.boundary = boundary
         self.batch_size = batch_size
         self.generation_batch_size = generation_batch_size
+        self.network_inputs = network_inputs or (lambda x: {})
+        self.postprocessor = postprocessor or (lambda x: x)
+        self.final_image_channels = model.config['out_channels']
         
     @property
     def seed(self):
@@ -66,6 +82,8 @@ class TiledSampler(Sampler):
         
     @cached_property
     def weights(self):
+        """Weights for merging model outputs from neighboring tiles.
+        These weights are effectively a linear interpolation kernel."""
         s = self.tile_size
         mid = (s - 1) / 2
         y, x = torch.meshgrid(torch.arange(s), torch.arange(s), indexing='ij')
@@ -124,11 +142,11 @@ class TiledSampler(Sampler):
             if not self.is_tile_in_boundary(tile_y, tile_x):
                 return None
             
-            image = torch.zeros(self.batch_size, self.model.config.out_channels, self.tile_size, self.tile_size)
+            image = torch.zeros(self.batch_size, self.model.config['out_channels'], self.tile_size, self.tile_size)
             
             top = tile_y * (self.tile_size - self.overlap)
             left = tile_x * (self.tile_size - self.overlap)
-            center = torch.randn(self.batch_size, self.model.config.out_channels, self.tile_size-self.overlap*2, self.tile_size-self.overlap*2, 
+            center = torch.randn(self.batch_size, self.model.config['out_channels'], self.tile_size-self.overlap*2, self.tile_size-self.overlap*2, 
                                  generator=torch.Generator().manual_seed(self.coord_to_seed(top + self.overlap, left + self.overlap)))
             image[..., self.overlap:self.tile_size-self.overlap, self.overlap:self.tile_size-self.overlap] = center
             
@@ -143,7 +161,7 @@ class TiledSampler(Sampler):
                         patch_top = top + self.overlap * i
                         patch_local_left = self.overlap * j
                         patch_local_top = self.overlap * i
-                        patch = torch.randn(self.batch_size, self.model.config.out_channels, self.overlap, self.overlap, 
+                        patch = torch.randn(self.batch_size, self.model.config['out_channels'], self.overlap, self.overlap, 
                                             generator=torch.Generator().manual_seed(self.coord_to_seed(patch_top, patch_left)))
                         image[..., patch_local_top:patch_local_top+self.overlap, patch_local_left:patch_local_left+self.overlap] = patch
                 
@@ -220,7 +238,6 @@ class TiledSampler(Sampler):
             
         input_sample = torch.stack(input_samples)
         pred_noise = torch.stack(input_preds)
-        t = t.to(self.device)
         
         unique_t = torch.unique(t)
         prev_samples = torch.zeros_like(input_sample)
@@ -270,11 +287,16 @@ class TiledSampler(Sampler):
             tile.model_output = None
             tile.level += 1
 
-    def create_model_output(self, tiles_y, tiles_x, **net_inputs):
+    @torch.no_grad()
+    def create_model_output(self, tiles_y, tiles_x):
         """Get the model output for many tiles, in a batch."""
         assert len(tiles_x) == len(tiles_y)
         if len(tiles_y) == 0:
             return
+        
+        net_inputs = self.network_inputs([y for y in tiles_y for _ in range(self.batch_size)], 
+                                         [x for x in tiles_x for _ in range(self.batch_size)], 
+                                         [i for _ in range(len(tiles_y)) for i in range(self.batch_size)])
         
         input_samples = []
         t = torch.zeros(len(tiles_y), dtype=torch.float32)
@@ -290,7 +312,13 @@ class TiledSampler(Sampler):
         t = t.to(self.device).repeat(self.batch_size)
         sigmas = sigmas.repeat(self.batch_size)
         x = self.scheduler.precondition_inputs(input_sample, sigmas.view(-1, 1, 1, 1))
-        model_outputs = self.model(x.to(self.device), t.to(self.device), **net_inputs).to('cpu')
+        device_network_inputs = {}
+        for k, v in net_inputs.items():
+            if isinstance(v, torch.Tensor):
+                device_network_inputs[k] = v.to(self.device)
+            else:
+                device_network_inputs[k] = v
+        model_outputs = self.model(x.to(self.device), t.to(self.device), **device_network_inputs).to('cpu')
         for i in range(len(tiles_y)):
             tile = self.get_tile(tiles_y[i], tiles_x[i])
             tile.model_output = model_outputs[i*self.batch_size:(i+1)*self.batch_size]
@@ -422,6 +450,12 @@ class TiledSampler(Sampler):
                         queue.append(dependent)
                         
             pbar.update(len(batch))
+            
+        for node in nodes.values():
+            if node.level == self.timesteps:
+                tile = self.get_tile(node.tile_y, node.tile_x)
+                tile.image = self.postprocessor(node.tile_y, node.tile_x, tile.image)
+                self.final_image_channels = tile.image.shape[1]
     
     def crop_region(self, tile_y, tile_x, top, left, bottom, right):
         """Returns a region that is entirely within the tile."""
@@ -476,17 +510,21 @@ class TiledSampler(Sampler):
         assert top < bottom, "Top must be less than bottom"
         assert left < right, "Left must be less than right"
         
-        output = torch.zeros(self.batch_size, self.model.config.out_channels, bottom-top, right-left)
-        weights = torch.zeros_like(output)
-        
         region_tiles = self.get_tiles_in_region(top, left, bottom, right)
         if generate:
             region_tiles = list(region_tiles)
             self.upgrade_tiles(*zip(*region_tiles), [self.timesteps] * len(region_tiles))
+        
+        output = torch.zeros(self.batch_size, self.final_image_channels, bottom-top, right-left)
+        weights = torch.zeros_like(output)
         for i, j in region_tiles:
             tile = self.get_tile(i, j)
+            assert tile.image.shape[1] == self.final_image_channels, \
+                "Tile image does not have the correct number of channels. This can happen if the postprocessor changes the number of channels, " \
+                "and the region is not generated yet. To fix this, either generate the region first, " \
+                "or have the postprocessor output the same number of channels as the model."
             if tile is None:
-                    continue
+                continue
                 
             tile_top, tile_left, tile_bottom, tile_right = self.get_tile_bounds(i, j)
             cropped_top, cropped_left, cropped_bottom, cropped_right = self.crop_region(i, j, top, left, bottom, right)
@@ -496,24 +534,8 @@ class TiledSampler(Sampler):
             weights[..., cropped_top-top:cropped_bottom-top, cropped_left-left:cropped_right-left] += cropped_tile_weights
                 
         return output / weights
-        
-if __name__ == "__main__":
-    from dummy_model import DummyModel
-    
-    model = DummyModel(sigma_data=0.5)
-    
-    # Visualize the effect of overlap on the mean image intensity
-    for overlap in [0, 16, 32]:
-        scheduler = EDMDPMSolverMultistepScheduler(sigma_min=0.002, sigma_max=80, sigma_data=0.5, scaling_p=2, scaling_t=0.01)
-        sampler = TiledSampler(model, scheduler, overlap=overlap, timesteps=10,
-                               boundary=(0, 0, 256, 256), batch_size=4)
-        
-        mid_region = sampler.get_region(0, 0, 256, 256)
-        import matplotlib.pyplot as plt
 
-        for i in range(sampler.batch_size):
-            plt.subplot(1, sampler.batch_size, i+1)
-            plt.imshow(mid_region[i, 0].cpu().numpy())
-            plt.title(f"Batch {i+1}, Std {mid_region[i].std().item():.2f}")
-        plt.suptitle(f"Mid Region with Overlap {overlap}")
-        plt.show()
+def constant_label_network_inputs(label):
+    def func(tiles_y, tiles_x, batch_idx):
+        return {'label_index': torch.full([len(batch_idx)], label, dtype=torch.int64)}
+    return func
