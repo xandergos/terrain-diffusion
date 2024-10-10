@@ -60,7 +60,7 @@ class LaplacianPyramidEncoder(nn.Module):
         Returns:
             torch.Tensor: Image. Shape (..., 1, H, W).
         """
-        encodings = torch.tensor_split(x.to(torch.float32), len(self.scale) + 1, dim=-3)
+        encodings = torch.tensor_split(x.to(torch.float32), len(self.scale), dim=-3)
         out = [torch.zeros_like(encodings[0]) for _ in range(len(encodings))]
         for i, (s, b) in enumerate(zip(self.inv_scale, self.inv_bias)):
             out[i] = out[i] + encodings[i] * torch.full_like(encodings[i], s) + torch.full_like(encodings[i], b)
