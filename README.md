@@ -1,6 +1,7 @@
 # Terrain Diffusion
 
 This is a repository that aims to utilize diffusion models to generate realistic terrain data. It creates high-quality, diverse terrain samples for various applications such as video game development, environmental simulations, and geographical studies.
+Repo is currently unstable while experimenting, changes will occur rapidly and may break things.
 
 Key features of Terrain Diffusion include:
 
@@ -22,8 +23,8 @@ This project implements an infinitely tileable, high-order diffusion sampler for
 Here is the output of the base model (generates 64x64 images where 1 pixel is roughly 4km) on a 1024x1024 map. In real terms, the map has about 1/10th the area of all land on earth. Details are lacking because this image generates very large scale features, but it is a good sign that the image contains both deep seas (black) and mountain ranges (white).
 Generating this image on an infinite tiling map takes about 12500 model evaluations, significantly more than the 4410 that would be required for a bounded map. However, on an RTX 3090 Ti this map can still be created in less than a minute, which is not too bad considering the scale of the map.
 
-Note: Pretrained models are WIP but coming soon. Also, there are few seas because this model was trained to generate primarily land, which is more difficult to generate and more interesting to look at. Fine tuning will help generate more/larger oceans if that is desired.
-![1024x1024_example](https://github.com/user-attachments/assets/8ea21283-0aee-471d-b470-037ad2b8bd92)
+Note: Pretrained models will be released when the codebase is no longer unstable.
+![768x768 Terrain](https://github.com/user-attachments/assets/e2bbe10d-a99d-4727-bee2-e4ffaa6ce70a)
 
 To demonstrate how tiled generation works, I used a toy diffusion model that generates an image sampled from a normal distribution with mean 0 and standard deviation 0.5. In theory, an ideal output would have the entire image being a constant (STD = 0). In practice, adjacent tiles becomes more correlated but do not match exactly, which is exactly what is desired for diverse yet seamless outputs. Indeed, as shown below, adding overlap massively increases the correlation between adjacent tiles (more than I expected, really), and makes the output far smoother. Note that these examples use a bounded sampler, which reduces the overhead around the borders. In fact, in the case where the entire boundary is sampled, it removes the overhead entirely. Infinite (unbounded) generation should look almost identical, except for minor differences at the boundary where outputs are not merged.
 
