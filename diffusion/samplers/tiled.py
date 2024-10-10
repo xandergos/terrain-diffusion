@@ -208,7 +208,7 @@ class TiledSampler(Sampler):
                     other_output = tile.prev_model_output
 
                 other_output_region = other_output[..., top:bottom, left:right]
-                weights_region = self.weights[None, None, top:bottom, left:right].expand(self.batch_size, -1, -1, -1)
+                weights_region = self.weights[None, None, top:bottom, left:right]
 
                 merged_model_output[..., refl_top:refl_bottom, refl_left:refl_right] += other_output_region * weights_region
                 weights[..., refl_top:refl_bottom, refl_left:refl_right] += weights_region
@@ -260,11 +260,11 @@ class TiledSampler(Sampler):
                 for i in range(len(sampler_prev_model_output)):
                     tile = self.get_tile(tiles_y[indices[i]], tiles_x[indices[i]])
                     sampler_prev_model_output[i] = tile.sampler_prev_model_output
-                self.scheduler.model_outputs[-1] = sampler_prev_model_output.view(-1, *batch_pred_noise.shape[2:])
+                self.scheduler.model_outputs[-1] = sampler_prev_model_output.view(-1, *batch_pred_noise.shape[-3:])
             
             # Reshape inputs to account for batch dimension
-            reshaped_pred_noise = batch_pred_noise.view(-1, *batch_pred_noise.shape[2:])
-            reshaped_input_sample = batch_input_sample.view(-1, *batch_input_sample.shape[2:])
+            reshaped_pred_noise = batch_pred_noise.view(-1, *batch_pred_noise.shape[-3:])
+            reshaped_input_sample = batch_input_sample.view(-1, *batch_input_sample.shape[-3:])
             
             batch_prev_sample = self.scheduler.step(reshaped_pred_noise, unique_t_value, reshaped_input_sample).prev_sample
             
@@ -309,8 +309,8 @@ class TiledSampler(Sampler):
             input_samples.append(base_tile.image)
             
         input_sample = torch.cat(input_samples, dim=0)
-        t = t.to(self.device).repeat(self.batch_size)
-        sigmas = sigmas.repeat(self.batch_size)
+        t = t.to(self.device).repeat_interleave(self.batch_size)
+        sigmas = sigmas.repeat_interleave(self.batch_size)
         x = self.scheduler.precondition_inputs(input_sample, sigmas.view(-1, 1, 1, 1))
         device_network_inputs = {}
         for k, v in net_inputs.items():
