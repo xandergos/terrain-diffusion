@@ -18,34 +18,56 @@ from utils import SerializableEasyDict as EasyDict
 
 def log_samples(images, config, state, encoder):
     import math
-    import matplotlib.pyplot as plt 
+    import matplotlib.pyplot as plt
+    import matplotlib.colors as colors
+    import numpy as np
+
     # Convert samples to numpy array and move to CPU
     samples_np = images.cpu().numpy()
-    
+
+    # Define custom normalization
+    class SignedLogNorm(colors.Normalize):
+        def __init__(self, vmin=None, vmax=None, clip=False):
+            super().__init__(vmin, vmax, clip)
+
+        def __call__(self, value, clip=None):
+            cbrt_min = np.sign(self.vmin) * np.sqrt(np.abs(self.vmin))
+            cbrt_max = np.sign(self.vmax) * np.sqrt(np.abs(self.vmax))
+            normalized = (np.sign(value) * np.sqrt(np.abs(value)) - cbrt_min) / (cbrt_max - cbrt_min)
+            return normalized
+
     # Calculate grid size
     bs = samples_np.shape[0]
-    grid_size = int(math.sqrt(bs))  
+    grid_size = int(math.sqrt(bs))
+    
     # Create a figure with subplots
     fig, axs = plt.subplots(grid_size, grid_size, figsize=(15, 15))
-    fig.suptitle(f'Generated Terrain Samples at Epoch {state.epoch}')   
+    fig.suptitle(f'Generated Terrain Samples at Epoch {state.epoch}')
+    
     # Plot each sample
     for i in range(grid_size):
         for j in range(grid_size):
             idx = i * grid_size + j
             if idx < bs:
-                im = axs[i, j].imshow(samples_np[idx, 0], cmap='terrain')
+                norm = SignedLogNorm(vmin=samples_np[idx, 0].min(), vmax=samples_np[idx, 0].max())
+                im = axs[i, j].imshow(samples_np[idx, 0], cmap='terrain', norm=norm)
                 axs[i, j].set_xticks([])
                 axs[i, j].set_yticks([])
                 axs[i, j].axis('off')
                 cbar = fig.colorbar(im, ax=axs[i, j], fraction=0.046, pad=0.04)
-                cbar.set_ticks([samples_np[idx, 0].min(), samples_np[idx, 0].max()])
-                cbar.set_ticklabels([f'{samples_np[idx, 0].min():.2f}', f'{samples_np[idx, 0].max():.2f}'])
+                
+                # Set colorbar ticks to show original values
+                min_val, max_val = samples_np[idx, 0].min(), samples_np[idx, 0].max()
+                cbar.set_ticks([min_val, 0, max_val])
+                cbar.set_ticklabels([f'{min_val:.2f}', '0', f'{max_val:.2f}'])
             else:
-                axs[i, j].axis('off')   
+                axs[i, j].axis('off')
+    
     # Adjust layout and save
     plt.tight_layout()
     plt.savefig(f"{config['logging']['save_dir']}/terrain_samples_epoch_{state.epoch}.png")
-    plt.close(fig)  
+    plt.close(fig)
+    
     # Log the entire figure to wandb
     wandb.log({"samples": wandb.Image(f"{config['logging']['save_dir']}/terrain_samples_epoch_{state.epoch}.png")},
               commit=False, step=state.epoch)
@@ -66,7 +88,7 @@ def main(config_path, ckpt_path):
     lr_scheduler = resolved['lr_sched']
     train_dataset = resolved['train_dataset']
     scheduler = resolved['scheduler']
-    optimizer = torch.optim.Adam(model.parameters())
+    optimizer = torch.optim.Adam(model.parameters(), betas=(0.9, 0.99))
     ema = EMAModel(model.to('cuda').parameters(), **resolved['ema'])
     state = EasyDict({'epoch': 0, 'step': 0, 'seen': 0})
     dataloader = DataLoader(LongDataset(train_dataset), batch_size=config['training']['train_batch_size'],
@@ -166,12 +188,12 @@ def main(config_path, ckpt_path):
             if cond_img is not None:
                 x = torch.cat([x, cond_img], dim=1)
             with accelerator.autocast(), accelerator.accumulate(model):
-                pred_noise, logvar = model(x, cnoise, label, context, return_logvar=True)
+                pred_noise, logvar = model(x, noise_labels=cnoise, label_index=label, context=context, return_logvar=True)
                 denoised = scheduler.precondition_outputs(noisy_images, pred_noise, sigma)
 
                 weight = (sigma ** 2 + sigma_data ** 2) / (sigma * sigma_data) ** 2
-                weight = weight.repeat(1, x.shape[1], 1, 1)
-                max_weight = torch.tensor(config['training']['channel_max_weight'], device=weight.device, dtype=weight.dtype).reshape([1, weight.shape[1], 1, 1])
+                weight = weight.repeat(1, pred_noise.shape[1], 1, 1)
+                max_weight = torch.tensor(config['training']['channel_max_weight'], device=weight.device, dtype=weight.dtype).reshape([1, pred_noise.shape[1], 1, 1])
                 weight = torch.minimum(weight, max_weight)
                 
                 loss = (weight / logvar.exp()) * ((denoised - images) ** 2) + logvar

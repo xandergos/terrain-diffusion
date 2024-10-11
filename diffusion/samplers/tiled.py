@@ -34,26 +34,25 @@ class Tile:
 
 class TiledSampler(Sampler):
     def __init__(self, model, scheduler, overlap=16, timesteps=15, seed=None, device='cpu',
-                 parent_sampler=None, boundary=None, batch_size=1, generation_batch_size=1,
+                 boundary=None, batch_size=1, generation_batch_size=1,
                  network_inputs=None, postprocessor=None):
         """Initialize a TiledSampler for efficient large image generation.
 
         This sampler divides the input image into tiles, processes each tile
         independently, and then combines the results. This approach allows for
-        generating large images that wouldn't fit in memory if processed all at once.
+        generating large images that wouldn't fit in memory or would take too long
+        if processed all at once.
 
         Args:
             model (torch.nn.Module): The diffusion model to use for sampling.
             scheduler (torch.nn.Module): The noise scheduler for the diffusion process.
             overlap (int, optional): The overlap between sampling tiles. Defaults to 16. MUST divide the image size evenly.
-            scale_factor (int, optional): The scale factor to use for the parent (conditional) image. Defaults to 4.
-                i.e scale_factor^2 pixels in this image are represented by 1 pixel in the parent image. Unused if parent_sampler is None.
-            parent_sampler (Sampler, optional): The sampler to use for the parent (conditional) image. Defaults to None.
             boundary (tuple[int, int, int, int], optional): The boundary of the region to sample. Defaults to None.
             batch_size (int, optional): The batch size of tiles, i.e how many tiles are stacked together.
             generation_batch_size (int, optional): Maximum number of tiles to process at once. The effective batch size of model inputs is batch_size * generation_batch_size.
             network_inputs (tile_y, tile_x, batch_idx) -> dict: A function that takes a list (batch) of (y, x) tile coordinates and returns a dictionary of model inputs for the tiles.
                 For example, this can be used to give each tile a different (or same) label.
+                Additionally, this can be used to pass additional input channels to the model by using the special key 'x', which should be a (B, C, H, W) tensor.
             postprocessor (tile_y, tile_x, tensor) -> tensor: A function that takes tile_y, tile_x, and the tile's image and returns a processed image. Good for denoising, or decoding, a tile.
         """
         self.model = model
@@ -64,7 +63,6 @@ class TiledSampler(Sampler):
         self._seed = seed if seed is not None else random.randint(0, 2**30)
         self.device = device
         self.tiles = {}
-        self.parent_sampler = parent_sampler
         self.boundary = boundary
         self.batch_size = batch_size
         self.generation_batch_size = generation_batch_size
@@ -93,7 +91,7 @@ class TiledSampler(Sampler):
         return distance_y * distance_x
     
     @cached_property
-    def tile_boundary(self):    
+    def tile_boundary(self):
         if self.boundary is None:
             return None
         
@@ -102,6 +100,13 @@ class TiledSampler(Sampler):
         tile_boundary_top = (self.boundary[1]) // (self.tile_size - self.overlap)
         tile_boundary_bottom = (self.boundary[3] + self.tile_size - 2 * self.overlap - 1) // (self.tile_size - self.overlap)
         return tile_boundary_left, tile_boundary_top, tile_boundary_right, tile_boundary_bottom
+        
+    def get_tile_bounds(self, tile_y, tile_x):
+        top = tile_y * (self.tile_size - self.overlap)
+        left = tile_x * (self.tile_size - self.overlap)
+        bottom = top + self.tile_size
+        right = left + self.tile_size
+        return top, left, bottom, right
         
     def is_tile_in_boundary(self, tile_y, tile_x): 
         if self.tile_boundary is None:
@@ -164,7 +169,6 @@ class TiledSampler(Sampler):
                         patch = torch.randn(self.batch_size, self.model.config['out_channels'], self.overlap, self.overlap, 
                                             generator=torch.Generator().manual_seed(self.coord_to_seed(patch_top, patch_left)))
                         image[..., patch_local_top:patch_local_top+self.overlap, patch_local_left:patch_local_left+self.overlap] = patch
-                
             tile = Tile(image * self.scheduler.sigmas[0])
             self.tiles[coords] = tile
         return tile
@@ -318,6 +322,8 @@ class TiledSampler(Sampler):
                 device_network_inputs[k] = v.to(self.device)
             else:
                 device_network_inputs[k] = v
+        if 'x' in device_network_inputs:
+            x = torch.cat([x, device_network_inputs['x']], dim=1)
         model_outputs = self.model(x.to(self.device), t.to(self.device), **device_network_inputs).to('cpu')
         for i in range(len(tiles_y)):
             tile = self.get_tile(tiles_y[i], tiles_x[i])
@@ -534,8 +540,3 @@ class TiledSampler(Sampler):
             weights[..., cropped_top-top:cropped_bottom-top, cropped_left-left:cropped_right-left] += cropped_tile_weights
                 
         return output / weights
-
-def constant_label_network_inputs(label):
-    def func(tiles_y, tiles_x, batch_idx):
-        return {'label_index': torch.full([len(batch_idx)], label, dtype=torch.int64)}
-    return func

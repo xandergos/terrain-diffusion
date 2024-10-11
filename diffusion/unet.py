@@ -1,3 +1,4 @@
+import math
 import numpy as np
 import torch
 import torch.nn as nn
@@ -41,11 +42,11 @@ def mp_sum(args, w=None):
             If a float, the weights are [1-w, w] (a linear interpolation).
     """
     if w is None:
-        w = torch.full((len(args),), 1 / len(args))
+        w = torch.full((len(args),), 1 / len(args), dtype=args[0].dtype)
     elif isinstance(w, float):
-        w = torch.tensor([1-w, w])
+        w = torch.tensor([1-w, w], dtype=args[0].dtype)
     else:
-        w = torch.tensor(w)
+        w = torch.tensor(w, dtype=args[0].dtype)
     return torch.sum(torch.stack([args * w for args, w in zip(args, w)]), dim=0) / torch.linalg.vector_norm(w)
 
 
@@ -62,7 +63,7 @@ def mp_concat(args, dim=1, w=None):
             If a float, the weights are [1-w, w] (a linear interpolation).
     """
     if w is None:
-        w = torch.full(len(args), 1 / len(args))
+        w = torch.full([len(args)], 1 / len(args))
     elif isinstance(w, float):
         w = torch.tensor([1-w, w])
     else:
@@ -274,7 +275,7 @@ class EDMUnet2D(ModelMixin, ConfigMixin):
             in_channels (int): The number of channels in the input image. 
                 Usually the same as out_channels, unless some channels are used for conditioning.
             out_channels (int): The number of channels in the output image. Default is in_channels.
-            label_dim (int, optional): The number of channels in the label image. Defaults to 0.
+            label_dim (int, optional): The number of labels. Defaults to 0.
             model_channels (int, optional): The dimension of the model. Default is 128.
             model_channel_mults (list, optional): The channel multipliers for each block. Default is [1, 2, 3, 4].
             layers_per_block (int, optional): The number of layers per block. Default is 2.
@@ -371,3 +372,176 @@ class EDMUnet2D(ModelMixin, ConfigMixin):
             logvar = self.logvar_linear(self.logvar_fourier(noise_labels)).reshape(-1, 1, 1, 1)
             return x, logvar
         return x
+
+
+class EDMUnet2DEncoder(ModelMixin, ConfigMixin):
+    @register_to_config
+    def __init__(
+        self,
+        image_size,
+        in_channels,
+        out_channels=None,
+        label_dim=0,
+        model_channels=128,
+        model_channel_mults=None,
+        layers_per_block=2,
+        emb_channels=None,
+        noise_emb_dims=None,
+        custom_cond_emb_dims=0,
+        attn_resolutions=None,
+        concat_balance=0.3,
+        logvar_channels=None,
+        include_distance=True,
+        block_kwargs=None
+    ):
+        """
+        Parameters:
+            image_size (int): The size of the input image.
+            in_channels (int): The number of channels in the input image. 
+                Usually the same as out_channels, unless some channels are used for conditioning.
+            out_channels (int): The number of channels in the output latent vector. Default is in_channels.
+            label_dim (int, optional): The number of labels. Defaults to 0.
+            model_channels (int, optional): The dimension of the model. Default is 128.
+            model_channel_mults (list, optional): The channel multipliers for each block. Default is [1, 2, 3, 4].
+            layers_per_block (int, optional): The number of layers per block. Default is 2.
+            emb_channels (int, optional): The number of channels in the embedding. Default is model_channels * max(model_channel_mults).
+            noise_emb_dims (int, optional): The number of channels in the noise embedding. Default is model_channels.
+            custom_cond_emb_dims (int, optional): The number of channels in the custom conditional embedding. Default is 0 (disabled).
+            attn_resolutions (list, optional): The resolutions at which attention is applied. Default is None.
+            concat_balance (float, optional): Balance factor for concatenation. Default is 0.3.
+            logvar_channels (int, optional): The number of channels for uncertainty estimation. Default is None (disabled).
+            include_distance (bool, optional): Whether to include distance from center information in the encoder. Default is True.
+        """
+        super().__init__()        
+        self.concat_balance = concat_balance
+        
+        block_kwargs = block_kwargs or {}
+        model_channel_mults = model_channel_mults or [1, 2, 3, 4]
+        emb_channels = emb_channels or model_channels * max(model_channel_mults)
+        noise_emb_dims = noise_emb_dims or model_channels
+        attn_resolutions = attn_resolutions or []
+
+        if isinstance(layers_per_block, int):
+            layers_per_block = [layers_per_block] * len(model_channel_mults)
+
+        block_channels = [model_channels * m for m in model_channel_mults]
+
+        self.noise_fourier = MPFourier(model_channels)
+        self.noise_linear = MPConv(noise_emb_dims, emb_channels, kernel=[])
+        self.custom_cond_linear = MPConv(custom_cond_emb_dims, emb_channels, kernel=[]) if custom_cond_emb_dims != 0 else None
+        self.label_embeds = MPEmbedding(label_dim, emb_channels) if label_dim != 0 else None
+
+        self.out_gain = torch.nn.Parameter(torch.zeros([]))
+        
+        def _create_distance_array(size):
+            center = (size - 1) / 2
+            y, x = torch.meshgrid(torch.arange(size), torch.arange(size), indexing='ij')
+            distance = torch.sqrt((x - center)**2 + (y - center)**2)
+            max_distance = math.sqrt(2) * center
+            normalized_distance = distance / max_distance
+            return 1 - normalized_distance
+        
+        if include_distance:
+            self.register_buffer('distance_arr', _create_distance_array(image_size))
+        else:
+            self.distance_arr = None
+
+        # Encoder.
+        self.enc = torch.nn.ModuleDict()
+        cout = in_channels + 1  # +1 because we add a ones channel to simulate a bias
+        if self.distance_arr is not None:
+            cout += 1  # Add distance channel
+        for level, (channels, nb) in enumerate(zip(block_channels, layers_per_block)):
+            res = image_size // 2**level
+            if level == 0:
+                cin = cout
+                cout = channels
+                self.enc[f'{res}x{res}_conv'] = MPConv(cin, cout, kernel=[3, 3])
+            else:
+                self.enc[f'{res}x{res}_down'] = UNetBlock(cout, cout, emb_channels, mode='enc', resample_mode='down', **block_kwargs)
+            for idx in range(nb):
+                cin = cout
+                cout = channels
+                self.enc[f'{res}x{res}_block{idx}'] = UNetBlock(cin, cout, emb_channels, mode='enc', attention=(res in attn_resolutions), **block_kwargs)
+        
+        self.merger = MPConv((image_size // 2**(len(block_channels) - 1))**2 * block_channels[-1], 
+                             out_channels, kernel=[])
+        
+        # logvar
+        if logvar_channels is not None:
+            self.logvar_fourier = MPFourier(logvar_channels)
+            self.logvar_linear = MPConv(logvar_channels, 1, kernel=[])
+
+    def forward(self, x, noise_labels, label_index=None, conditional_embeddings=None, return_logvar=False):
+        embeds = []
+        embeds.append(self.noise_linear(self.noise_fourier(noise_labels)))
+        if self.custom_cond_linear is not None:
+            embeds.append(self.custom_cond_linear(conditional_embeddings))
+        if self.label_embeds is not None:
+            embeds.append(self.label_embeds(label_index))
+        emb = mp_sum(embeds)
+        emb = mp_silu(emb)
+
+        # Encoder.
+        x_list = [x, torch.ones_like(x[:, :1])]
+        if self.distance_arr is not None:
+            x_list.append(self.distance_arr[None, None, ...].expand(x.shape[0], -1, -1, -1))
+        x = torch.cat(x_list, dim=1)  # Add ones channel to simulate bias
+        for name, block in self.enc.items():
+            x = block(x) if 'conv' in name else block(x, emb)
+        
+        x = torch.flatten(x, start_dim=1)
+        x = self.merger(x)
+        
+        if return_logvar:
+            assert self.logvar_fourier is not None, "Logvar is not enabled"
+            logvar = self.logvar_linear(self.logvar_fourier(noise_labels)).reshape(-1, 1, 1, 1)
+            return x, logvar
+        return x
+    
+class ContextualEDMUnet2D(EDMUnet2D):
+    def __init__(self, 
+                 image_size,
+                 in_channels,
+                 out_channels,
+                 custom_cond_emb_dims,
+                 encoders=None,
+                 label_dim=0,
+                 model_channels=128,
+                 model_channel_mults=None,
+                 layers_per_block=2,
+                 emb_channels=None,
+                 noise_emb_dims=None,
+                 attn_resolutions=None,
+                 midblock_attention=True,
+                 concat_balance=0.3,
+                 logvar_channels=128,
+                 block_kwargs=None):
+        super().__init__(image_size=image_size, in_channels=in_channels, out_channels=out_channels, 
+                         custom_cond_emb_dims=custom_cond_emb_dims, label_dim=label_dim, 
+                         model_channels=model_channels, model_channel_mults=model_channel_mults, 
+                         layers_per_block=layers_per_block, emb_channels=emb_channels, 
+                         noise_emb_dims=noise_emb_dims, attn_resolutions=attn_resolutions, 
+                         concat_balance=concat_balance, logvar_channels=logvar_channels, 
+                         midblock_attention=midblock_attention, block_kwargs=block_kwargs)
+        
+        self.encoders = nn.ModuleList(encoders or [])
+        if len(self.encoders) > 0:
+            total_latent_channels = sum(e.config.out_channels for e in self.encoders)
+            self.encoder_merger = MPConv(total_latent_channels, custom_cond_emb_dims, kernel=[])
+
+    def forward(self, x, noise_labels, label_index=None, return_logvar=False, context=None):
+        if len(self.encoders) > 0:
+            assert context is not None and len(context) == len(self.encoders), \
+                f"ContextualEDMUnet2D expects {len(self.encoders)} context encoders, but {len(context)} were provided."
+                
+            encodings = []
+            for encoder, ctx in zip(self.encoders, context):
+                encodings.append(encoder(ctx, noise_labels=noise_labels, label_index=label_index))
+            encodings = mp_concat(encodings, dim=1)
+            conditional_embeddings = self.encoder_merger(encodings)
+            
+        return super().forward(x, noise_labels, label_index, 
+                               conditional_embeddings=conditional_embeddings, 
+                               return_logvar=return_logvar)
+        
