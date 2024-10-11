@@ -20,8 +20,8 @@ class LaplacianPyramidEncoder(nn.Module):
             sigma (list|float): Sigma used for gaussian blur, 0 for no blur. If a list, should be same length as resize_scales.
             raw_mean (list): Expected mean of each channel. Length should be len(scale) + 1.
             raw_std (list): Expected standard deviation of each channel. Length should be len(scale) + 1.
-            final_mean (float, optional): Desired mean of the final latents. Defaults to 0.
-            final_std (float, optional): Desired standard deviation of the final latents. Defaults to 0.5.
+            final_mean (float|list, optional): Desired mean of the final latents. Defaults to 0.
+            final_std (float|list, optional): Desired standard deviation of the final latents. Defaults to 0.5.
         """
         super().__init__()
         self.resize_scales = resize_scales
