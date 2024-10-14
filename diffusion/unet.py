@@ -47,7 +47,11 @@ def mp_sum(args, w=None):
         w = torch.tensor([1-w, w], dtype=args[0].dtype)
     else:
         w = torch.tensor(w, dtype=args[0].dtype)
-    return torch.sum(torch.stack([args * w for args, w in zip(args, w)]), dim=0) / torch.linalg.vector_norm(w)
+    
+    if len(args) == 2:
+        return (args[0] * w[0] + args[1] * w[1]) / np.sqrt(w[0] ** 2 + w[1] ** 2)
+    else:
+        return torch.sum(torch.stack([args * w for args, w in zip(args, w)]), dim=0) / torch.linalg.vector_norm(w)
 
 
 def mp_concat(args, dim=1, w=None):
@@ -241,7 +245,7 @@ class UNetBlock(torch.nn.Module):
 
         if self.num_heads != 0:
             x = mp_sum([x, self.attn(x)], w=self.attn_balance)
-
+        
         # Clip activations.
         if self.clip_act is not None:
             x = torch.clip(x, -self.clip_act, self.clip_act)
@@ -303,8 +307,8 @@ class EDMUnet2D(ModelMixin, ConfigMixin):
 
         self.noise_fourier = MPFourier(model_channels)
         self.noise_linear = MPConv(noise_emb_dims, emb_channels, kernel=[])
-        self.custom_cond_linear = MPConv(custom_cond_emb_dims, emb_channels, kernel=[]) if custom_cond_emb_dims != 0 else None
-        self.label_embeds = MPEmbedding(label_dim, emb_channels) if label_dim != 0 else None
+        self.custom_cond_linear = MPConv(custom_cond_emb_dims, emb_channels, kernel=[]) if custom_cond_emb_dims else None
+        self.label_embeds = MPEmbedding(label_dim, emb_channels) if label_dim else None
 
         self.out_gain = torch.nn.Parameter(torch.zeros([]))
 
@@ -344,7 +348,7 @@ class EDMUnet2D(ModelMixin, ConfigMixin):
         self.logvar_fourier = MPFourier(logvar_channels)
         self.logvar_linear = MPConv(logvar_channels, 1, kernel=[])
 
-    def forward(self, x, noise_labels, label_index=None, conditional_embeddings=None, return_logvar=False):
+    def forward(self, x, noise_labels, label_index=None, conditional_embeddings=None, return_logvar=False, **kwargs):
         embeds = []
         embeds.append(self.noise_linear(self.noise_fourier(noise_labels)))
         if self.custom_cond_linear is not None:
@@ -372,6 +376,9 @@ class EDMUnet2D(ModelMixin, ConfigMixin):
             logvar = self.logvar_linear(self.logvar_fourier(noise_labels)).reshape(-1, 1, 1, 1)
             return x, logvar
         return x
+    
+    def count_parameters(self):
+        return sum(p.numel() for p in self.parameters())
 
 
 class EDMUnet2DEncoder(ModelMixin, ConfigMixin):
@@ -472,7 +479,7 @@ class EDMUnet2DEncoder(ModelMixin, ConfigMixin):
             self.logvar_fourier = MPFourier(logvar_channels)
             self.logvar_linear = MPConv(logvar_channels, 1, kernel=[])
 
-    def forward(self, x, noise_labels, label_index=None, conditional_embeddings=None, return_logvar=False):
+    def forward(self, x, noise_labels, label_index=None, conditional_embeddings=None, return_logvar=False, **kwargs):
         embeds = []
         embeds.append(self.noise_linear(self.noise_fourier(noise_labels)))
         if self.custom_cond_linear is not None:
@@ -498,50 +505,3 @@ class EDMUnet2DEncoder(ModelMixin, ConfigMixin):
             logvar = self.logvar_linear(self.logvar_fourier(noise_labels)).reshape(-1, 1, 1, 1)
             return x, logvar
         return x
-    
-class ContextualEDMUnet2D(EDMUnet2D):
-    def __init__(self, 
-                 image_size,
-                 in_channels,
-                 out_channels,
-                 custom_cond_emb_dims,
-                 encoders=None,
-                 label_dim=0,
-                 model_channels=128,
-                 model_channel_mults=None,
-                 layers_per_block=2,
-                 emb_channels=None,
-                 noise_emb_dims=None,
-                 attn_resolutions=None,
-                 midblock_attention=True,
-                 concat_balance=0.3,
-                 logvar_channels=128,
-                 block_kwargs=None):
-        super().__init__(image_size=image_size, in_channels=in_channels, out_channels=out_channels, 
-                         custom_cond_emb_dims=custom_cond_emb_dims, label_dim=label_dim, 
-                         model_channels=model_channels, model_channel_mults=model_channel_mults, 
-                         layers_per_block=layers_per_block, emb_channels=emb_channels, 
-                         noise_emb_dims=noise_emb_dims, attn_resolutions=attn_resolutions, 
-                         concat_balance=concat_balance, logvar_channels=logvar_channels, 
-                         midblock_attention=midblock_attention, block_kwargs=block_kwargs)
-        
-        self.encoders = nn.ModuleList(encoders or [])
-        if len(self.encoders) > 0:
-            total_latent_channels = sum(e.config.out_channels for e in self.encoders)
-            self.encoder_merger = MPConv(total_latent_channels, custom_cond_emb_dims, kernel=[])
-
-    def forward(self, x, noise_labels, label_index=None, return_logvar=False, context=None):
-        if len(self.encoders) > 0:
-            assert context is not None and len(context) == len(self.encoders), \
-                f"ContextualEDMUnet2D expects {len(self.encoders)} context encoders, but {len(context)} were provided."
-                
-            encodings = []
-            for encoder, ctx in zip(self.encoders, context):
-                encodings.append(encoder(ctx, noise_labels=noise_labels, label_index=label_index))
-            encodings = mp_concat(encodings, dim=1)
-            conditional_embeddings = self.encoder_merger(encodings)
-            
-        return super().forward(x, noise_labels, label_index, 
-                               conditional_embeddings=conditional_embeddings, 
-                               return_logvar=return_logvar)
-        

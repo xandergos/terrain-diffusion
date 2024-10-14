@@ -66,8 +66,8 @@ class TiledSampler(Sampler):
         self.boundary = boundary
         self.batch_size = batch_size
         self.generation_batch_size = generation_batch_size
-        self.network_inputs = network_inputs or (lambda x: {})
-        self.postprocessor = postprocessor or (lambda x: x)
+        self.network_inputs = network_inputs or (lambda a, b, c: {})
+        self.postprocessor = postprocessor or (lambda a, b, x: x)
         self.final_image_channels = model.config['out_channels']
         
     @property
@@ -319,11 +319,12 @@ class TiledSampler(Sampler):
         device_network_inputs = {}
         for k, v in net_inputs.items():
             if isinstance(v, torch.Tensor):
-                device_network_inputs[k] = v.to(self.device)
+                device_network_inputs[k] = v.to(x.device)
             else:
                 device_network_inputs[k] = v
         if 'x' in device_network_inputs:
             x = torch.cat([x, device_network_inputs['x']], dim=1)
+            del device_network_inputs['x']
         model_outputs = self.model(x.to(self.device), t.to(self.device), **device_network_inputs).to('cpu')
         for i in range(len(tiles_y)):
             tile = self.get_tile(tiles_y[i], tiles_x[i])

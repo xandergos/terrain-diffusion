@@ -1,6 +1,6 @@
 import catalogue
 import click
-import datetime
+from datetime import datetime
 import numpy as np
 import os
 import torch
@@ -16,62 +16,47 @@ import wandb
 from torch.utils.data import DataLoader
 from utils import SerializableEasyDict as EasyDict
 
-def log_samples(images, config, state, encoder):
-    import math
-    import matplotlib.pyplot as plt
-    import matplotlib.colors as colors
-    import numpy as np
+from PIL import Image
 
+def log_samples(images, config, state):
+    import numpy as np
+    
     # Convert samples to numpy array and move to CPU
     samples_np = images.cpu().numpy()
-
-    # Define custom normalization
-    class SignedLogNorm(colors.Normalize):
-        def __init__(self, vmin=None, vmax=None, clip=False):
-            super().__init__(vmin, vmax, clip)
-
-        def __call__(self, value, clip=None):
-            cbrt_min = np.sign(self.vmin) * np.sqrt(np.abs(self.vmin))
-            cbrt_max = np.sign(self.vmax) * np.sqrt(np.abs(self.vmax))
-            normalized = (np.sign(value) * np.sqrt(np.abs(value)) - cbrt_min) / (cbrt_max - cbrt_min)
-            return normalized
-
-    # Calculate grid size
-    bs = samples_np.shape[0]
-    grid_size = int(math.sqrt(bs))
     
-    # Create a figure with subplots
-    fig, axs = plt.subplots(grid_size, grid_size, figsize=(15, 15))
-    fig.suptitle(f'Generated Terrain Samples at Epoch {state.epoch}')
+    # Normalize to 0-1 range
+    samples_np = (samples_np - np.min(samples_np, axis=(1, 2, 3), keepdims=True)) / (np.max(samples_np, axis=(1, 2, 3), keepdims=True) - np.min(samples_np, axis=(1, 2, 3), keepdims=True))
     
-    # Plot each sample
-    for i in range(grid_size):
-        for j in range(grid_size):
-            idx = i * grid_size + j
-            if idx < bs:
-                norm = SignedLogNorm(vmin=samples_np[idx, 0].min(), vmax=samples_np[idx, 0].max())
-                im = axs[i, j].imshow(samples_np[idx, 0], cmap='terrain', norm=norm)
-                axs[i, j].set_xticks([])
-                axs[i, j].set_yticks([])
-                axs[i, j].axis('off')
-                cbar = fig.colorbar(im, ax=axs[i, j], fraction=0.046, pad=0.04)
-                
-                # Set colorbar ticks to show original values
-                min_val, max_val = samples_np[idx, 0].min(), samples_np[idx, 0].max()
-                cbar.set_ticks([min_val, 0, max_val])
-                cbar.set_ticklabels([f'{min_val:.2f}', '0', f'{max_val:.2f}'])
-            else:
-                axs[i, j].axis('off')
+    # Convert to PIL images
+    pil_images = [Image.fromarray((img * 255).astype(np.uint8)[0]) for img in samples_np]
     
-    # Adjust layout and save
-    plt.tight_layout()
-    plt.savefig(f"{config['logging']['save_dir']}/terrain_samples_epoch_{state.epoch}.png")
-    plt.close(fig)
+    # Create grid
+    num_images = len(pil_images)
+    grid_width = int(np.sqrt(num_images))
+    grid_height = grid_width
+    
+    # Remove extra images if there are more than grid_width * grid_height
+    max_images = grid_width * grid_height
+    if num_images > max_images:
+        pil_images = pil_images[:max_images]
+        num_images = max_images
+    
+    img_width, img_height = pil_images[0].size
+    grid_img = Image.new('RGB', (grid_width * img_width, grid_height * img_height))
+    
+    for i, img in enumerate(pil_images):
+        x = (i % grid_width) * img_width
+        y = (i // grid_width) * img_height
+        grid_img.paste(img, (x, y))
+    
+    # Save the grid image
+    os.makedirs(f"{config['logging']['save_dir']}/samples", exist_ok=True)
+    save_path = f"{config['logging']['save_dir']}/samples/terrain_samples_epoch_{state.epoch}.png"
+    grid_img.save(save_path)
     
     # Log the entire figure to wandb
-    wandb.log({"samples": wandb.Image(f"{config['logging']['save_dir']}/terrain_samples_epoch_{state.epoch}.png")},
+    wandb.log({"samples": wandb.Image(save_path)},
               commit=False, step=state.epoch)
-
 
 @click.command()
 @click.option("-c", "--config", "config_path", type=click.Path(exists=True), required=True)
@@ -80,6 +65,10 @@ def main(config_path, ckpt_path):
     build_registry()
     
     config = Config().from_disk(config_path) if config_path else None
+    
+    # Resolve this later
+    sampler_config = config['sampler']
+    del config['sampler']
             
     resolved = registry.resolve(config, validate=False)
 
@@ -93,6 +82,9 @@ def main(config_path, ckpt_path):
     state = EasyDict({'epoch': 0, 'step': 0, 'seen': 0})
     dataloader = DataLoader(LongDataset(train_dataset), batch_size=config['training']['train_batch_size'],
                             **resolved['dataloader_kwargs'])
+    
+    registry.utils.register("get_object", func=lambda object: {'model': model, 'scheduler': scheduler}[object])
+    print(f"Training model with {model.count_parameters()} parameters.")
 
     # Setup accelerate
     accelerator = Accelerator(
@@ -102,14 +94,6 @@ def main(config_path, ckpt_path):
     )
     model, dataloader, optimizer, ema = accelerator.prepare(model, dataloader, optimizer, ema)
     accelerator.register_for_checkpointing(state)
-    
-    # Temporary fix for old checkpoints
-    # path = 'checkpoints/64_128x3/latest.pt'
-    # ckpt = torch.load(path)
-    # model.load_state_dict(ckpt['model'])
-    # optimizer.load_state_dict(ckpt['optimizer'])
-    # ema.load_state_dict(ckpt['ema'])
-    # state = EasyDict(ckpt['state'])
     
     # Load from checkpoint if needed
     if ckpt_path:
@@ -234,11 +218,13 @@ def main(config_path, ckpt_path):
                 ema.store(model.parameters())
                 ema.copy_to(model.parameters())
                 
-                sampler = TiledSampler(model=model, 
-                                       scheduler=scheduler,
-                                       **resolved['sampler']['init'])
-                images = sampler.get_region(*resolved['sampler']['region'])
-                log_samples(images, config, state, train_dataset.sub_datasets[0].encoder)
+                sampler_resolved = registry.resolve(sampler_config, validate=False)
+                sampler = sampler_resolved['init']
+                images = sampler.get_region(*sampler_resolved['region'])
+                    
+                log_samples(images, config, state)
+                # Delete sampler to free memory in case models are used
+                del sampler, sampler_resolved
                 
                 ema.restore(model.parameters())
 

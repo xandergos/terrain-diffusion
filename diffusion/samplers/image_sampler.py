@@ -1,7 +1,8 @@
 import torch
 from diffusion.samplers.sampler import Sampler
 from PIL import Image
-
+from torchvision.transforms.v2 import functional as TF
+from torch.utils.data import Dataset
 class ImageSampler(Sampler):
     """
     A simple sampler that retrieves regions from an input image tensor.
@@ -73,9 +74,19 @@ class ImageSampler(Sampler):
         return self.postprocessor(output)
 
     @classmethod
-    def from_pil(cls, path: str, translate_x: int = 0, translate_y: int = 0, postprocessor = None):
+    def from_pil(cls, paths: list[str], translate_x: int = 0, translate_y: int = 0, postprocessor = None):
         """
-        Initialize the ImageSampler with a pil image.
+        Initialize the ImageSampler with many pil images.
         """
-        image = Image.open(path)
-        return cls(image, translate_x, translate_y, postprocessor)
+        images = torch.stack([TF.pil_to_tensor(Image.open(path)) for path in paths])
+        return cls(images, translate_x, translate_y, postprocessor)
+
+    @classmethod
+    def from_dataset(cls, dataset: Dataset, count: int, translate_x: int = 0, translate_y: int = 0, postprocessor = None):
+        images = []
+        for i in range(count):
+            image = dataset[i]
+            images.append(image)
+        
+        stacked_images = torch.stack(images)
+        return cls(stacked_images, translate_x, translate_y, postprocessor)
