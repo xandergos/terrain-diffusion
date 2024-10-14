@@ -6,8 +6,9 @@ import torch
 from torch.utils.data import Dataset
 from PIL import Image
 import torchvision.transforms.v2 as T
-
+import torchvision.transforms.v2.functional as TF
 from diffusion.encoder import LaplacianPyramidEncoder
+from .transforms import TupleTransform
 
 class CachedTiffDataset(Dataset):
     """Simple dataset that reads tiff images from a folder and applies a transformation.
@@ -124,7 +125,7 @@ class SuperresTerrainDataset(CachedTiffDataset):
     """
     def __init__(self, paths, image_size, crop_size,
                  pyramid_scales, pyramid_sigma, pyramid_raw_mean, pyramid_raw_std,
-                 context_scales,
+                 upsample_factor,
                  read_image_fn=None, cache: dict = None, eval_dataset=False, 
                  root_dir=None):
         """
@@ -141,7 +142,6 @@ class SuperresTerrainDataset(CachedTiffDataset):
             read_image_fn (callable, optional): The function to use to read the images. Defaults to PIL.Image.open.
             cache (dict, optional): A dictionary to use for caching. Defaults to None (no caching).
             eval_dataset (bool, optional): Whether to use evaluation mode (center crop, no augmentations). Defaults to False.
-            context_scales (list): The scales to use for conditioning.
             root_dir (str, optional): The root directory to prepend to the paths. Defaults to None (paths are used as is).
         """
         if isinstance(paths, str):
@@ -153,30 +153,43 @@ class SuperresTerrainDataset(CachedTiffDataset):
         if root_dir is not None:
             paths = [os.path.join(root_dir, p) for p in paths]
         
-        self.encoder = LaplacianPyramidEncoder(pyramid_scales, pyramid_sigma, pyramid_raw_mean, pyramid_raw_std,
-                                               final_std=[0.5] + [1] * len(pyramid_scales))
-        self.crop_size = crop_size
-        self.context_scales = context_scales
-        self.eval_dataset = eval_dataset
+        self.encoder = LaplacianPyramidEncoder(pyramid_scales, pyramid_sigma, pyramid_raw_mean, pyramid_raw_std)
         pretransform = T.Compose([
             T.ToImage(),
             T.ToDtype(torch.float32, scale=False),
             T.Resize((image_size, image_size)),
-            self.encoder,
+            TupleTransform(
+                # Target image
+                self.encoder,
+                # Conditional image
+                T.Compose([
+                    T.Resize((image_size // upsample_factor, image_size // upsample_factor)), 
+                    T.Lambda(lambda x: torch.nn.functional.interpolate(x[None], (image_size, image_size), mode='bicubic', align_corners=False)[0]),
+                    self.encoder,
+                ]),
+            ),
         ])
+        super().__init__(paths, pretransform, T.Identity(), read_image_fn, cache)
+        
+        self.upsample_factor = upsample_factor
+        self.crop_size = crop_size
+        self.image_size = image_size
+        self.eval_dataset = eval_dataset
+        
+        # Apply this after the parent
         if not eval_dataset:
-            posttransform = T.Compose([
+            self.posttransform = T.Compose([
                 T.RandomVerticalFlip(),
                 T.RandomChoice([T.Identity(), T.RandomRotation((90, 90)), T.RandomRotation((180, 180)), T.RandomRotation((270, 270))])
             ])
         else:
-            posttransform = T.Identity()
-        super().__init__(paths, pretransform, posttransform, read_image_fn, cache)
+            self.posttransform = T.Identity()
 
     def __getitem__(self, index):
-        item = super().__getitem__(index)
-        x = item[:1]
-        cond_img = item[1:]
+        img, cond_img = super().__getitem__(index)
+        
+        # Assume only the first level needs to be predicted; other levels are low frequency and can just be upsampled.
+        x = img[:1]
         
         if self.eval_dataset:
             i, j, h, w = x.shape[1] // 2 - self.crop_size // 2, x.shape[1] // 2 - self.crop_size // 2, self.crop_size, self.crop_size
@@ -184,19 +197,24 @@ class SuperresTerrainDataset(CachedTiffDataset):
             i, j, h, w = T.RandomCrop.get_params(cond_img, output_size=(self.crop_size, self.crop_size))
 
         x = x[:, i:i+h, j:j+w]
-
-        center_y, center_x = i + h // 2, j + w // 2
-        translate_x = center_x - cond_img.shape[2] // 2
-        translate_y = center_y - cond_img.shape[1] // 2
-        context = []
-        masked_cond = torch.concat([cond_img, torch.ones_like(cond_img[:1])], dim=0)
-        for scale in self.context_scales:
-            c = T.functional.affine(masked_cond, angle=0, translate=(-translate_x * scale, -translate_y * scale), scale=scale, shear=0, fill=0)
-            c = T.functional.resize(c, (self.crop_size, self.crop_size))
-            context.append(c)
-            
         cond_img = cond_img[:, i:i+h, j:j+w]
-        return {'image': x, 'cond_img': cond_img, 'context': context}
+        
+        # temporarily merge along channel dim to apply post transform
+        z = torch.cat([x, cond_img], dim=0)
+        z = self.posttransform(z)
+        x, cond_img = z[:x.shape[0]], z[x.shape[0]:]
+        
+        #center_y, center_x = i + h // 2, j + w // 2
+        #translate_x = center_x - cond_img.shape[2] // 2
+        #translate_y = center_y - cond_img.shape[1] // 2
+        #context = []
+        #masked_cond = torch.concat([cond_img, torch.ones_like(cond_img[:1])], dim=0)
+        #for scale in self.context_scales:
+        #    c = T.functional.affine(masked_cond, angle=0, translate=(-translate_x * scale, -translate_y * scale), scale=scale, shear=0, fill=0)
+        #    c = T.functional.resize(c, (self.crop_size, self.crop_size))
+        #    context.append(c)
+            
+        return {'image': x, 'cond_img': cond_img}
 
 class MultiDataset(Dataset):
     def __init__(self, *sub_datasets, labels=None, weights=None):
