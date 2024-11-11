@@ -312,14 +312,16 @@ class TiledSampler(Sampler):
             sigmas[i] = self.scheduler.sigmas[base_tile.level]
             input_samples.append(base_tile.image)
             
-        input_sample = torch.cat(input_samples, dim=0)
+        input_sample = torch.cat(input_samples, dim=0).to(self.device)
         t = t.to(self.device).repeat_interleave(self.batch_size)
-        sigmas = sigmas.repeat_interleave(self.batch_size)
+        sigmas = sigmas.to(self.device).repeat_interleave(self.batch_size)
         x = self.scheduler.precondition_inputs(input_sample, sigmas.view(-1, 1, 1, 1))
         device_network_inputs = {}
         for k, v in net_inputs.items():
             if isinstance(v, torch.Tensor):
                 device_network_inputs[k] = v.to(x.device)
+            elif isinstance(v, list):
+                device_network_inputs[k] = [v_i.to(x.device) for v_i in v if isinstance(v_i, torch.Tensor)]
             else:
                 device_network_inputs[k] = v
         if 'x' in device_network_inputs:

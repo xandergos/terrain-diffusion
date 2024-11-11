@@ -33,8 +33,11 @@ class LaplacianPyramidEncoder(nn.Module):
 
         self.inv_scale = np.float32(raw_std) / np.float32(final_std)
         self.inv_bias = np.float32(raw_mean) - np.float32(final_mean) * self.inv_scale
+        
+        self.final_std = final_std
+        self.final_mean = final_mean
 
-    def encode(self, x: torch.Tensor):
+    def encode(self, x: torch.Tensor, return_downsampled=False):
         """Encode an image into a pyramid encoding.
 
         Args:
@@ -44,13 +47,21 @@ class LaplacianPyramidEncoder(nn.Module):
             torch.Tensor: Pyramid encoding. Shape (..., num_layers, H, W).
         """
         imgs = [x]
+        downsampled_imgs = [x]
         for d, sigma in zip(self.resize_scales, self.sigma):
-            imgs.append(self._resample(x, d, sigma))
-
+            img, downsampled = self._resample(imgs[-1], d, sigma, return_downsampled=True)
+            imgs.append(img)
+            downsampled_imgs.append(downsampled)
         for i in range(len(imgs) - 1):
             imgs[i] = (imgs[i] - imgs[i + 1]) * self.scale[i] + self.bias[i]
         imgs[-1] = imgs[-1] * self.scale[-1] + self.bias[-1]
-        return torch.cat(imgs, dim=-3)
+        for i in range(len(downsampled_imgs)):
+            downsampled_imgs[i] = downsampled_imgs[i] * self.scale[i] + self.bias[i]
+        
+        if return_downsampled:
+            return torch.cat(imgs, dim=-3), downsampled_imgs
+        else:
+            return torch.cat(imgs, dim=-3)
 
     def decode(self, x):
         """
@@ -69,7 +80,7 @@ class LaplacianPyramidEncoder(nn.Module):
     def forward(self, x):
         return self.encode(x)
     
-    def _resample(self, x, resize_scale, sigma, resize=True):
+    def _resample(self, x, resize_scale, sigma, resize=True, return_downsampled=False):
         """Resamples an image with a blur and/or double resize.
 
         Args:
@@ -104,6 +115,7 @@ class LaplacianPyramidEncoder(nn.Module):
         if sigma > 0:
             next = TF.pad(next, radius, padding_mode='edge')
             next = TF.gaussian_blur(next, radius, sigma)
+            downsampled = next[..., radius:-radius, radius:-radius]
             next = torch.nn.functional.interpolate(next, size=(size + 2 * radius * resize_scale, size + 2 * radius * resize_scale), 
                                                    mode='bicubic', align_corners=False)
             next = next[..., radius * resize_scale:-radius * resize_scale, radius * resize_scale:-radius * resize_scale]
@@ -112,8 +124,12 @@ class LaplacianPyramidEncoder(nn.Module):
         
         # Restore batch dimensions
         next = next.view(*batch_dims, 1, size, size)
+        downsampled = downsampled.view(*batch_dims, 1, size // resize_scale, size // resize_scale)
         
-        return next
+        if return_downsampled:
+            return next, downsampled
+        else:
+            return next
     
 def denoise_pyramid_layer(x0, encoder, depth, loss_fn=torch.nn.functional.mse_loss, maxiter=10):
     """Denoises a predicted pyramid encoding.
@@ -162,6 +178,10 @@ def denoise_pyramid_layer(x0, encoder, depth, loss_fn=torch.nn.functional.mse_lo
         else:
             return out
         
+def denoise_pyramid(image, encoder):
+    encoded = encoder.encode(encoder.decode(image))
+    return torch.cat([image[..., [0], :, :], encoded[..., 1:, :, :]], dim=-3)
+        
 def encode_postprocess(encoder):
     def postprocessor(tile_y, tile_x, image):
         return encoder.encode(image)
@@ -170,8 +190,7 @@ def encode_postprocess(encoder):
 def decode_postprocess(encoder, denoise=True):
     def postprocessor(tile_y, tile_x, image):
         if denoise:
-            for i in range(1, image.shape[1]):
-                image[:, [i]] = denoise_pyramid_layer(image[:, [i]], encoder, depth=i, maxiter=3)
+            image = denoise_pyramid(image, encoder)
         decoded = encoder.decode(image)
         return decoded
     return postprocessor

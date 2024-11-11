@@ -2,6 +2,7 @@ import json
 import math
 import os
 import random
+import numpy as np
 import torch
 from torch.utils.data import Dataset
 from PIL import Image
@@ -9,6 +10,31 @@ import torchvision.transforms.v2 as T
 import torchvision.transforms.v2.functional as TF
 from diffusion.encoder import LaplacianPyramidEncoder
 from .transforms import TupleTransform
+import h5py
+
+class AreaResize(torch.nn.Module):
+    """
+    Resizes a square image using adaptive mean pooling.
+    """
+    def __init__(self, output_size):
+        """
+        Args:
+            output_size (int): Desired output size for both height and width.
+        """
+        super().__init__()
+        self.output_size = output_size
+
+    def forward(self, img):
+        """
+        Args:
+            img (Tensor): Square image to be resized.
+
+        Returns:
+            Tensor: Resized square image.
+        """
+        return torch.nn.functional.adaptive_avg_pool2d(img, self.output_size)
+
+
 
 class CachedTiffDataset(Dataset):
     """Simple dataset that reads tiff images from a folder and applies a transformation.
@@ -99,7 +125,7 @@ class BaseTerrainDataset(CachedTiffDataset):
         pretransform = T.Compose([
             T.ToImage(),
             T.ToDtype(torch.float32, scale=False),
-            T.Resize((image_size, image_size)),
+            AreaResize((image_size, image_size)),
             self.encoder,
         ])
         if not eval_dataset:
@@ -125,7 +151,7 @@ class SuperresTerrainDataset(CachedTiffDataset):
     """
     def __init__(self, paths, image_size, crop_size,
                  pyramid_scales, pyramid_sigma, pyramid_raw_mean, pyramid_raw_std,
-                 upsample_factor,
+                 upsample_factor, noise_scale=0.0,
                  read_image_fn=None, cache: dict = None, eval_dataset=False, 
                  root_dir=None):
         """
@@ -139,6 +165,8 @@ class SuperresTerrainDataset(CachedTiffDataset):
             pyramid_sigma (float): Sigma used for gaussian blur in the Laplacian pyramid.
             pyramid_raw_mean (list): Expected mean of each channel in the Laplacian pyramid.
             pyramid_raw_std (list): Expected standard deviation of each channel in the Laplacian pyramid.
+            upsample_factor (int): The upsampling factor to apply to the conditional image.
+            noise_scale (float): The scale of the gaussian noise to add to the conditional image.
             read_image_fn (callable, optional): The function to use to read the images. Defaults to PIL.Image.open.
             cache (dict, optional): A dictionary to use for caching. Defaults to None (no caching).
             eval_dataset (bool, optional): Whether to use evaluation mode (center crop, no augmentations). Defaults to False.
@@ -153,6 +181,7 @@ class SuperresTerrainDataset(CachedTiffDataset):
         if root_dir is not None:
             paths = [os.path.join(root_dir, p) for p in paths]
         
+        self.noise_scale = noise_scale
         self.encoder = LaplacianPyramidEncoder(pyramid_scales, pyramid_sigma, pyramid_raw_mean, pyramid_raw_std)
         pretransform = T.Compose([
             T.ToImage(),
@@ -178,12 +207,12 @@ class SuperresTerrainDataset(CachedTiffDataset):
         
         # Apply this after the parent
         if not eval_dataset:
-            self.posttransform = T.Compose([
+            self._posttransform = T.Compose([
                 T.RandomVerticalFlip(),
                 T.RandomChoice([T.Identity(), T.RandomRotation((90, 90)), T.RandomRotation((180, 180)), T.RandomRotation((270, 270))])
             ])
         else:
-            self.posttransform = T.Identity()
+            self._posttransform = T.Identity()
 
     def __getitem__(self, index):
         img, cond_img = super().__getitem__(index)
@@ -201,8 +230,11 @@ class SuperresTerrainDataset(CachedTiffDataset):
         
         # temporarily merge along channel dim to apply post transform
         z = torch.cat([x, cond_img], dim=0)
-        z = self.posttransform(z)
+        z = self._posttransform(z)
         x, cond_img = z[:x.shape[0]], z[x.shape[0]:]
+        cond_img[:1] += TF.gaussian_noise(cond_img[:1], clip=False, sigma=self.noise_scale)
+        cond_img[:1] /= np.sqrt(1 + self.noise_scale**2)
+        cond_img *= 2
         
         #center_y, center_x = i + h // 2, j + w // 2
         #translate_x = center_x - cond_img.shape[2] // 2
@@ -215,9 +247,204 @@ class SuperresTerrainDataset(CachedTiffDataset):
         #    context.append(c)
             
         return {'image': x, 'cond_img': cond_img}
+    
+class H5BaseTerrainDataset(Dataset):
+    """Dataset for reading terrain data from an HDF5 file."""
+
+    def __init__(self, h5_file, crop_size, pct_land_range, dataset_label, model_label, eval_dataset=False,
+                 latent_channels=8, latents_mean=None, latents_std=None, sigma_data=0.5):
+        """
+        Args:
+            h5_file (str): Path to the HDF5 file.
+            crop_size (int): Size of the square crop.
+            pct_land_range (list): Range of acceptable pct_land values [min, max].
+        """
+        self.h5_file = h5_file
+        self.crop_size = crop_size
+        self.pct_land_range = pct_land_range
+        self.model_label = torch.tensor(model_label)
+        self.latent_channels = latent_channels
+        self.latents_mean = torch.tensor(latents_mean).view(-1, 1, 1)
+        self.latents_std = torch.tensor(latents_std).view(-1, 1, 1)
+        self.sigma_data = sigma_data
+        with h5py.File(self.h5_file, 'r') as f:
+            self.keys = []
+            for key in f.keys():
+                if pct_land_range[0] <= f[key].attrs['pct_land'] <= pct_land_range[1] and (dataset_label is None or str(f[key].attrs['label']) == str(dataset_label)):
+                    self.keys.append(key)
+
+        if not eval_dataset:
+            self.transform = T.Compose([
+                T.RandomCrop((self.crop_size, self.crop_size)),
+                T.RandomVerticalFlip(),
+                T.RandomChoice([
+                    T.Identity(),
+                    T.RandomRotation((90, 90)),
+                    T.RandomRotation((180, 180)),
+                    T.RandomRotation((270, 270))
+                ])
+            ])
+        else:
+            self.transform = T.Compose([
+                T.CenterCrop((self.crop_size, self.crop_size)),
+            ])
+
+    def __len__(self):
+        return len(self.keys)
+
+    def __getitem__(self, index):
+        with h5py.File(self.h5_file, 'r') as f:
+            data = torch.from_numpy(f[self.keys[index]][:])
+        data = self.transform(data)
+        
+        latents = data[:self.latent_channels]
+        latent_means, latent_vars = latents[:self.latent_channels//2], latents[self.latent_channels//2:]
+        sampled_latents = torch.randn_like(latent_means) * latent_vars.exp() + latent_means
+        sampled_latents = (sampled_latents - self.latents_mean) / self.latents_std * self.sigma_data
+        data = torch.cat([sampled_latents, data[self.latent_channels:]], dim=0)
+        
+        # Conditional input using last channel
+        cond_img_noise = (torch.rand([]) * 12 - 4).exp()
+        noise_label = 0.25 * torch.log(cond_img_noise)
+        cond_img = data[-1:] if cond_img_noise.item() < 2900 else torch.zeros_like(data[-1:])  # After 2900 just make 0 to ensure no leakage
+        cond_img = (cond_img + torch.randn_like(cond_img) * cond_img_noise) / np.sqrt(1 + cond_img_noise**2)
+        
+        return {'image': data, 'cond_img': cond_img, 'cond_inputs': [self.model_label, noise_label]}
+
+
+class H5AutoencoderDataset(Dataset):
+    """Dataset for reading terrain data from an HDF5 file."""
+
+    def __init__(self, h5_file, crop_size, pct_land_range, dataset_label, eval_dataset=False):
+        """
+        Args:
+            h5_file (str): Path to the HDF5 file.
+            crop_size (int): Size of the square crop in the original image.
+            pct_land_range (list): Range of acceptable pct_land values [min, max].
+        """
+        self.h5_file = h5_file
+        self.crop_size = crop_size
+        self.pct_land_range = pct_land_range
+        with h5py.File(self.h5_file, 'r') as f:
+            self.keys = []
+            for key in f.keys():
+                if pct_land_range[0] <= f[key].attrs['pct_land'] <= pct_land_range[1] and (dataset_label is None or str(f[key].attrs['label']) == str(dataset_label)):
+                    self.keys.append(key)
+
+        if not eval_dataset:
+            self.transform = T.Compose([
+                T.RandomVerticalFlip(),
+                T.RandomChoice([
+                    T.Identity(),
+                    T.RandomRotation((90, 90)),
+                    T.RandomRotation((180, 180)),
+                    T.RandomRotation((270, 270))
+                ])
+            ])
+        else:
+            self.transform = T.Identity()
+            
+        self.eval_dataset = eval_dataset
+        self.dummy_data = None
+
+    def __len__(self):
+        return len(self.keys)
+
+    def __getitem__(self, index):
+        if self.dummy_data is None:
+            with h5py.File(self.h5_file, 'r') as f:
+                self.dummy_data = torch.from_numpy(f[self.keys[index]][:1, :, :])
+        if not self.eval_dataset:
+            i, j, h, w = T.RandomCrop.get_params(self.dummy_data, output_size=(self.crop_size, self.crop_size))
+        else:
+            i, j, h, w = self.crop_size // 2, self.crop_size // 2, self.crop_size, self.crop_size
+        with h5py.File(self.h5_file, 'r') as f:
+            data = torch.from_numpy(f[self.keys[index]][:1, i:i+h, j:j+w])
+        data = self.transform(data)
+        return {'image': data}
+    
+class H5SuperresTerrainDataset(H5AutoencoderDataset):
+    """Dataset for reading terrain data from an HDF5 file."""
+    def __init__(self, h5_file, crop_size, pct_land_range, dataset_label, eval_dataset=False,
+                 latents_mean=None, latents_std=None, sigma_data=0.5):
+        """
+        Args:
+            h5_file (str): Path to the HDF5 file.
+            crop_size (int): Size of the square crop.
+            pct_land_range (list): Range of acceptable pct_land values [min, max].
+        """
+        self.h5_file = h5_file
+        self.crop_size = crop_size
+        self.pct_land_range = pct_land_range
+        self.latents_mean = torch.tensor(latents_mean).view(-1, 1, 1)
+        self.latents_std = torch.tensor(latents_std).view(-1, 1, 1)
+        self.sigma_data = sigma_data
+        self.eval_dataset = eval_dataset
+        
+        with h5py.File(self.h5_file, 'r') as f:
+            self.keys = []
+            search_label = dataset_label + '_latent' if dataset_label is not None else None
+            for key in f.keys():
+                if pct_land_range[0] <= f[key].attrs['pct_land'] <= pct_land_range[1] and (search_label is None or str(f[key].attrs['label']) == str(search_label)):
+                    self.keys.append('_'.join(key.split('_')[:-1]))
+
+        if not eval_dataset:
+            self.transform = T.Compose([
+                T.RandomCrop((self.crop_size, self.crop_size)),
+                T.RandomVerticalFlip(),
+                T.RandomChoice([
+                    T.Identity(),
+                    T.RandomRotation((90, 90)),
+                    T.RandomRotation((180, 180)),
+                    T.RandomRotation((270, 270))
+                ])
+            ])
+        else:
+            self.transform = T.Compose([
+                T.CenterCrop((self.crop_size, self.crop_size)),
+            ])
+            
+        self.dummy_data_latent = None
+
+    def __len__(self):
+        return len(self.keys)
+
+    def __getitem__(self, index):
+        key_latent = self.keys[index] + '_latent'
+        key_highfreq = self.keys[index] + '_highfreq'
+        
+        if self.dummy_data_latent is None:
+            with h5py.File(self.h5_file, 'r') as f:
+                self.dummy_data_latent = torch.from_numpy(f[key_latent][:1, :, :])
+                self.dummy_data_highfreq = torch.from_numpy(f[key_highfreq][:1, :, :])
+                
+        upscale_factor = self.dummy_data_highfreq.shape[1] // self.dummy_data_latent.shape[1]
+        latent_crop_size = self.crop_size // upscale_factor
+        if not self.eval_dataset:
+            i, j, h, w = T.RandomCrop.get_params(self.dummy_data_latent, output_size=(latent_crop_size, latent_crop_size))
+        else:
+            i, j, h, w = latent_crop_size // 2, latent_crop_size // 2, latent_crop_size, latent_crop_size
+            
+        li, lj, lh, lw = i * upscale_factor, j * upscale_factor, h * upscale_factor, w * upscale_factor
+            
+        with h5py.File(self.h5_file, 'r') as f:
+            data_latent = torch.from_numpy(f[key_latent][:, i:i+h, j:j+w])
+            data_highfreq = torch.from_numpy(f[key_highfreq][:, li:li+lh, lj:lj+lw])
+            
+        latent_channels = data_latent.shape[0]
+        means, logvars = data_latent[:latent_channels//2], data_latent[latent_channels//2:]
+        sampled_latent = torch.randn_like(means) * logvars.exp() + means
+        sampled_latent = (sampled_latent - self.latents_mean) / self.latents_std
+        upsampled_latent = torch.nn.functional.interpolate(sampled_latent[None], (self.crop_size, self.crop_size), mode='nearest')[0]
+        data = self.transform(torch.cat([data_highfreq, upsampled_latent], dim=0))
+        
+        img = data[:1]
+        cond_img = data[1:]
+        
+        return {'image': img, 'cond_img': cond_img}
 
 class MultiDataset(Dataset):
-    def __init__(self, *sub_datasets, labels=None, weights=None):
+    def __init__(self, *sub_datasets, weights=None):
         """
         Args:
             sub_datasets (list): The list of sub datasets.
@@ -227,7 +454,6 @@ class MultiDataset(Dataset):
         self.weights = weights or [1] * len(sub_datasets)
         self.cum_weights = [sum(self.weights[:i+1]) for i in range(len(self.weights))]
         self.sub_datasets = sub_datasets
-        self.labels = labels or [list(range(len(ds))) for ds in sub_datasets]
         self.ordering = []
         for ds in self.sub_datasets:
             self.ordering.append(list(range(len(ds))))
@@ -241,12 +467,7 @@ class MultiDataset(Dataset):
         ordering = self.ordering[ds_idx]
         item_idx = ordering[index % len(ordering)]
         x = ds[item_idx]
-        if isinstance(x, dict):
-            return {**x, 'label': self.labels[ds_idx]}
-        if isinstance(x, tuple) or isinstance(x, list):
-            return *x, self.labels[ds_idx]
-        else:
-            return x, self.labels[ds_idx]
+        return x
 
     def shuffle(self):
         for ordering in self.ordering:
