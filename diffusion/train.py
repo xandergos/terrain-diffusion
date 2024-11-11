@@ -127,13 +127,6 @@ def main(config_path, ckpt_path, model_ckpt_path, debug_run):
         optimizer = AdamWScheduleFree(model.parameters(), **resolved['optimizer']['kwargs'])
         optimizer.eval()
         sf_optim = True
-    elif resolved['optimizer']['type'] == 'soap':
-        optimizer = SOAP(model.parameters(), **resolved['optimizer']['kwargs'])
-        sf_optim = False
-    elif resolved['optimizer']['type'] == 'sf-soap':
-        optimizer = ScheduleFreeWrapper(SOAP(model.parameters(), **resolved['optimizer']['soap_kwargs']), **resolved['optimizer']['sf_kwargs'])
-        optimizer.eval()
-        sf_optim = True
     resolved['ema']['checkpoint_folder'] = os.path.join(resolved['logging']['save_dir'], 'phema')
     ema = PostHocEMA(model, **resolved['ema'])
     state = EasyDict({'epoch': 0, 'step': 0, 'seen': 0})
