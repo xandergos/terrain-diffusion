@@ -190,6 +190,10 @@ class EDMDPMSolverMultistepScheduler(SchedulerMixin, ConfigMixin):
         c_noise = 0.25 * torch.log(sigma)
 
         return c_noise
+    
+    def trigflow_precondition_noise(self, sigma):
+        trigflow_t = torch.atan(sigma / self.config.sigma_data)
+        return trigflow_t
 
     # Copied from diffusers.schedulers.scheduling_edm_euler.EDMEulerScheduler.precondition_outputs
     def precondition_outputs(self, sample, model_output, sigma):

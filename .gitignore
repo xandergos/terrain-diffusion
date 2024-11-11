@@ -157,6 +157,8 @@ cython_debug/
 # wandb, checkpoints
 wandb/
 checkpoints/
+*.png
+*.h5
 
 # PyCharm
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can

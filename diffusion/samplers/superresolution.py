@@ -1,12 +1,14 @@
 from functools import lru_cache
 
 from matplotlib import pyplot as plt
+import numpy as np
 import torch
 import torch.nn.functional as F
 from diffusion.samplers.tiled import TiledSampler
+import torchvision.transforms.v2.functional as TF
 
 
-def superresolution_sampler(samplers, upscaling_factors, encoders, postprocessor):
+def superresolution_sampler(samplers, upscaling_factors, encoders, postprocessor, noise_scales=[0.0]):
     """
     Inject the contextual network inputs into the samplers.
     Args:
@@ -27,8 +29,11 @@ def superresolution_sampler(samplers, upscaling_factors, encoders, postprocessor
             # small_img is NOT encoded
             img = samplers[i-1].get_region(top // up, left // up, bottom // up, right // up)
             # upsample
-            img = torch.nn.functional.interpolate(img, (img_size, img_size), mode='bicubic', align_corners=False)
+            img = torch.nn.functional.interpolate(img, (img_size, img_size), mode='bilinear', align_corners=False)
             img = encoders[i].encode(img)
+            img[:1] += TF.gaussian_noise(img[:1], clip=False, sigma=noise_scales[i-1])
+            img[:1] /= np.sqrt(1 + noise_scales[i-1]**2)
+            img *= 2
             
             return img
         
@@ -42,6 +47,3 @@ def superresolution_sampler(samplers, upscaling_factors, encoders, postprocessor
         samplers[i].network_inputs = network_inputs
         samplers[i].postprocessor = intermediate_postprocessor
     return samplers[-1]
-
-if __name__ == "__main__":
-    pass
