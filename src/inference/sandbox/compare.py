@@ -1,3 +1,7 @@
+"""
+This script compares two folders of images, and displays them side by side for easy comparison.
+"""
+
 import os
 import matplotlib.pyplot as plt
 from pathlib import Path
@@ -32,7 +36,6 @@ def compare_images(folder1, folder2):
         plt.close()
 
 if __name__ == "__main__":
-    # Example usage
-    folder1 = "outputs/fid_images_64x3_ema005_step192k/original"
-    folder2 = "outputs/fid_images_64x3_ema005_step192k/reconstructed"
+    folder1 = "outputs/fid_images/original"
+    folder2 = "outputs/fid_images/reconstructed"
     compare_images(folder1, folder2)

@@ -1,11 +1,11 @@
 import numpy as np
 import torch
 from tqdm import tqdm
-from diffusion.scheduler.dpmsolver import EDMDPMSolverMultistepScheduler
-from diffusion.unet import EDMUnet2D
+from inference.scheduler.dpmsolver import EDMDPMSolverMultistepScheduler
+from training.diffusion.unet import EDMUnet2D
 from safetensors.torch import load_model
 from ema_pytorch import PostHocEMA
-from diffusion.datasets.datasets import H5SuperresTerrainDataset
+from training.datasets.datasets import H5SuperresTerrainDataset
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 

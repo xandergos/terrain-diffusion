@@ -1,3 +1,10 @@
+"""
+Takes a folder of elevation .tiff files and preprocesses them for training a diffusion model.
+The output can be used to train superresolution or base diffusion models.
+
+Requires a pre-trained encoder model.
+"""
+
 import os
 import tifffile as tiff
 import matplotlib.pyplot as plt
@@ -7,8 +14,8 @@ import torch.nn.functional as F
 import h5py
 from tqdm import tqdm
 import click
-from diffusion.encoder import LaplacianPyramidEncoder
-from diffusion.unet import EDMUnet2D
+from src.data.laplacian_encoder import LaplacianPyramidEncoder
+from training.diffusion.unet import EDMUnet2D
 
 def preprocess_elevation(img):
     ocean = torch.from_numpy(img[:, :, 1])
@@ -38,11 +45,11 @@ def preprocess_elevation(img):
 @click.option('--lapl-enc-lowres-std', default=2420, help='Std value for encoder normalization (low res)')
 @click.option('--lapl-enc-highres-mean', default=0, help='Mean value for encoder normalization (high res)')
 @click.option('--lapl-enc-highres-std', default=160, help='Std value for encoder normalization (high res)')
-@click.option('--encoder-model-path', default='checkpoints/models/encoder_512', help='Path to encoder model checkpoint')
-@click.option('--output-file', default='dataset_full_encoded.h5', help='Output HDF5 filename')
-@click.option('--elevation-folder', default='/mnt/ntfs2/shared/data/terrain/datasets/elevation/', help='Folder containing elevation .tiff/tif files')
+@click.option('--output-file', default='dataset_encoded.h5', help='Output HDF5 filename')
+@click.option('--elevation-folder', required=True, help='Folder containing elevation .tiff/tif files')
+@click.option('--encoder-model-path', required=True, help='Path to encoder model checkpoint')
 def process_dataset(base_resolution, target_resolution, chunk_size, lapl_enc_resize, lapl_enc_sigma, lapl_enc_lowres_mean, lapl_enc_lowres_std, 
-                   lapl_enc_highres_mean, lapl_enc_highres_std, encoder_model_path, output_file, elevation_folder):
+                   lapl_enc_highres_mean, lapl_enc_highres_std, output_file, elevation_folder, encoder_model_path):
     """
     Process elevation dataset into encoded HDF5 format.
     

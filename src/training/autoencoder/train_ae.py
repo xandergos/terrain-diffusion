@@ -1,6 +1,5 @@
 from collections import defaultdict
 import json
-import catalogue
 import click
 from datetime import datetime
 import numpy as np
@@ -9,15 +8,14 @@ import torch
 from accelerate import Accelerator
 from confection import Config, registry
 from ema_pytorch import PostHocEMA
-from diffusion.datasets.datasets import LongDataset
-from diffusion.encoder import *
-from diffusion.registry import build_registry
-from diffusion.samplers.tiled import TiledSampler
+from training.datasets.datasets import LongDataset
+from src.data.laplacian_encoder import *
+from training.diffusion.registry import build_registry
 from tqdm import tqdm
 import wandb
 from torch.utils.data import DataLoader
 from diffusion.unet import DiffusionAutoencoder
-from utils import SerializableEasyDict as EasyDict
+from src.training.utils import SerializableEasyDict as EasyDict
 from safetensors.torch import load_model
 import lpips
 import torch.nn.functional as F
