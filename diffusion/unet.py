@@ -55,10 +55,10 @@ def mp_sum(args, w=None):
     else:
         w = torch.tensor(w, dtype=args[0].dtype)
     
-    if len(args) == 2:
-        return (args[0] * w[0] + args[1] * w[1]) / np.sqrt(w[0] ** 2 + w[1] ** 2)
-    else:
-        return torch.sum(torch.stack([args * w for args, w in zip(args, w)]), dim=0) / torch.linalg.vector_norm(w)
+    #if len(args) == 2:
+    #    return (args[0] * w[0] + args[1] * w[1]) / torch.sqrt(w[0] ** 2 + w[1] ** 2)
+    #else:
+    return torch.sum(torch.stack([args * w for args, w in zip(args, w)]), dim=0) / torch.linalg.vector_norm(w)
 
 
 def mp_concat(args, dim=1, w=None):
@@ -80,9 +80,29 @@ def mp_concat(args, dim=1, w=None):
     else:
         w = torch.tensor(w)
     N = [x.shape[dim] for x in args]
-    C = np.sqrt(sum(N) / torch.sum(torch.square(w)))
+    C = torch.sqrt(sum(N) / torch.sum(torch.square(w)))
     return torch.concat([args[i] * (C / np.sqrt(args[i].shape[dim]) * w[i]) for i in range(len(args))], dim=dim)
 
+class MPPositionalEmbedding(nn.Module):
+    def __init__(self, num_channels):
+        super().__init__()
+        self.num_channels = num_channels
+        half_dim = num_channels // 2
+        emb = math.log(10) / (half_dim - 1)
+        self.register_buffer('freqs', torch.exp(torch.arange(half_dim) * -emb))
+
+    def forward(self, x):
+        # Convert input to float32 for higher precision calculations
+        y = x.to(torch.float32)
+        
+        # Compute outer product of input with frequencies
+        y = y.outer(self.freqs.to(torch.float32))
+        
+        # Apply sin and cos, concatenate, and normalize by sqrt(2) to maintain unit variance
+        y = torch.cat([torch.sin(y), torch.cos(y)], dim=1) * np.sqrt(2)
+        
+        # Convert back to original dtype and return
+        return y.to(x.dtype)
 
 class MPFourier(nn.Module):
     def __init__(self, num_channels, s=1):
@@ -151,6 +171,9 @@ class MPConvResample(nn.Module):
             y = torch.nn.functional.conv_transpose2d(x, w, stride=2, padding=w.shape[-1]//2-1)
         return mp_sum([y, upsampled], w=self.skip_weight)
 
+    def norm_weights(self):
+        with torch.no_grad():
+            self.weight.copy_(normalize(self.weight.to(torch.float32)))
 
 class MPConv(nn.Module):
     """
@@ -192,6 +215,10 @@ class MPConv(nn.Module):
         # Otherwise do a 2D convolution
         assert w.ndim == 4
         return nn.functional.conv2d(x, w, padding=(w.shape[-1]//2,), groups=self.groups)
+    
+    def norm_weights(self):
+        with torch.no_grad():
+            self.weight.copy_(normalize(self.weight.to(torch.float32)))
 
 class MPEmbedding(nn.Module):
     def __init__(self, in_channels, out_channels):
@@ -210,6 +237,10 @@ class MPEmbedding(nn.Module):
         w = w.to(x.dtype)
 
         return nn.functional.embedding(x, self.weight)
+    
+    def norm_weights(self):
+        with torch.no_grad():
+            self.weight.copy_(normalize(self.weight.to(torch.float32)))
 
 class UNetBlock(nn.Module):
     def __init__(
@@ -385,6 +416,7 @@ class EDMUnet2D(ModelMixin, ConfigMixin):
                 In all cases, 'weight' is a float that describes the weight of the conditional input relative to the other inputs.
                 The 'weight' of the noise input is fixed at 1.
             encode_only (bool, optional): Whether to only encode the input and not decode it. Default is False.
+            fourier_scale (float, optional): The scale factor for the Fourier embedding. Default is 1. Can also use 'pos' to use a positional embedding.
         """
         super().__init__()        
         self.concat_balance = concat_balance
@@ -405,7 +437,10 @@ class EDMUnet2D(ModelMixin, ConfigMixin):
 
         block_channels = [model_channels * m for m in model_channel_mults]
 
-        self.noise_fourier = MPFourier(model_channels, s=fourier_scale) if noise_emb_dims > 0 else None
+        if fourier_scale == 'pos':
+            self.noise_fourier = MPPositionalEmbedding(model_channels) if noise_emb_dims > 0 else None
+        else:
+            self.noise_fourier = MPFourier(model_channels, s=fourier_scale) if noise_emb_dims > 0 else None
         self.noise_linear = MPConv(noise_emb_dims, emb_channels, kernel=[]) if noise_emb_dims > 0 else None
         self.conditional_layers = nn.ModuleList([])
         self.conditional_weights = [1] if self.noise_linear is not None else []
@@ -498,6 +533,11 @@ class EDMUnet2D(ModelMixin, ConfigMixin):
     
     def count_parameters(self):
         return sum(p.numel() for p in self.parameters())
+
+    def norm_weights(self):
+        for module in self.modules():
+            if module != self and hasattr(module, 'norm_weights'):
+                module.norm_weights()
 
 
 class EDMAutoencoder(ModelMixin, ConfigMixin):

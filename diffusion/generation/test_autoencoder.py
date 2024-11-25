@@ -1,6 +1,6 @@
 import torch
 from tqdm import tqdm
-from diffusion.datasets.datasets import H5AutoencoderDataset
+from diffusion.datasets.datasets import H5AutoencoderDataset, H5SuperresTerrainDataset
 from diffusion.scheduler.dpmsolver import EDMDPMSolverMultistepScheduler
 from diffusion.unet import DiffusionAutoencoder, EDMAutoencoder
 from ema_pytorch import PostHocEMA
@@ -17,13 +17,15 @@ from torch.utils.data import DataLoader
 
 device = 'cuda'
 
-dataset = H5AutoencoderDataset('dataset_full.h5', 512, [0.9999, 1.0], '240m', eval_dataset=False)
+dataset = H5SuperresTerrainDataset('dataset_full_encoded.h5', 512, [0.6, 1], '480m', eval_dataset=True,
+                                   latents_mean=[0, 0.07, 0.12, 0.07],
+                                   latents_std=[1.4127, 0.8170, 0.8386, 0.8414])
 
 model_cfg = EDMAutoencoder.load_config('checkpoints/autoencoder_x8-plain_ft/configs/model_config_latest')
 model = EDMAutoencoder.from_config(model_cfg)
 load_model(model, 'checkpoints/autoencoder_x8-plain_ft/latest_checkpoint/model.safetensors')
 
-model.encoder.save_pretrained('checkpoints/models/encoder_512')
+# model.encoder.save_pretrained('checkpoints/models/encoder_512')
 
 ema = PostHocEMA(model, sigma_rels=[0.05, 0.1], update_every=20, checkpoint_every_num_steps=12800, allow_different_devices=True,
                  checkpoint_folder='checkpoints/autoencoder_x8-plain/phema')

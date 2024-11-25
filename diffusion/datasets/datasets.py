@@ -366,7 +366,7 @@ class H5AutoencoderDataset(Dataset):
 class H5SuperresTerrainDataset(H5AutoencoderDataset):
     """Dataset for reading terrain data from an HDF5 file."""
     def __init__(self, h5_file, crop_size, pct_land_range, dataset_label, eval_dataset=False,
-                 latents_mean=None, latents_std=None, sigma_data=0.5):
+                 latents_mean=None, latents_std=None, sigma_data=0.5, clip_edges=True):
         """
         Args:
             h5_file (str): Path to the HDF5 file.
@@ -379,6 +379,7 @@ class H5SuperresTerrainDataset(H5AutoencoderDataset):
         self.latents_mean = torch.tensor(latents_mean).view(-1, 1, 1)
         self.latents_std = torch.tensor(latents_std).view(-1, 1, 1)
         self.sigma_data = sigma_data
+        self.clip_edges = clip_edges
         self.eval_dataset = eval_dataset
         
         with h5py.File(self.h5_file, 'r') as f:
@@ -387,22 +388,6 @@ class H5SuperresTerrainDataset(H5AutoencoderDataset):
             for key in f.keys():
                 if pct_land_range[0] <= f[key].attrs['pct_land'] <= pct_land_range[1] and (search_label is None or str(f[key].attrs['label']) == str(search_label)):
                     self.keys.append('_'.join(key.split('_')[:-1]))
-
-        if not eval_dataset:
-            self.transform = T.Compose([
-                T.RandomCrop((self.crop_size, self.crop_size)),
-                T.RandomVerticalFlip(),
-                T.RandomChoice([
-                    T.Identity(),
-                    T.RandomRotation((90, 90)),
-                    T.RandomRotation((180, 180)),
-                    T.RandomRotation((270, 270))
-                ])
-            ])
-        else:
-            self.transform = T.Compose([
-                T.CenterCrop((self.crop_size, self.crop_size)),
-            ])
             
         self.dummy_data_latent = None
 
@@ -415,31 +400,50 @@ class H5SuperresTerrainDataset(H5AutoencoderDataset):
         
         if self.dummy_data_latent is None:
             with h5py.File(self.h5_file, 'r') as f:
-                self.dummy_data_latent = torch.from_numpy(f[key_latent][:1, :, :])
+                self.dummy_data_latent = torch.from_numpy(f[key_latent][0, :1, :, :])
                 self.dummy_data_highfreq = torch.from_numpy(f[key_highfreq][:1, :, :])
                 
         upscale_factor = self.dummy_data_highfreq.shape[1] // self.dummy_data_latent.shape[1]
         latent_crop_size = self.crop_size // upscale_factor
         if not self.eval_dataset:
-            i, j, h, w = T.RandomCrop.get_params(self.dummy_data_latent, output_size=(latent_crop_size, latent_crop_size))
+            if self.clip_edges:
+                i, j, h, w = T.RandomCrop.get_params(self.dummy_data_latent[:, 1:-1, 1:-1], output_size=(latent_crop_size, latent_crop_size))
+                i, j = i + 1, j + 1
+            else:
+                i, j, h, w = T.RandomCrop.get_params(self.dummy_data_latent, output_size=(latent_crop_size, latent_crop_size))
         else:
             i, j, h, w = latent_crop_size // 2, latent_crop_size // 2, latent_crop_size, latent_crop_size
             
         li, lj, lh, lw = i * upscale_factor, j * upscale_factor, h * upscale_factor, w * upscale_factor
             
+        transform_idx = random.randrange(8) if not self.eval_dataset else 0
+        flip = (transform_idx // 4) == 1
+        rotate_k = transform_idx % 4
+        
+        # Adjust highfreq crop for flips and rotations. Note that we are inverting the transformation so we do it in reverse.
+        for _ in range(rotate_k):
+            li, lj = lj, self.dummy_data_highfreq.shape[-1] - li - lh
+        if flip:
+            lj = self.dummy_data_highfreq.shape[-1] - lj - lw
+            
         with h5py.File(self.h5_file, 'r') as f:
-            data_latent = torch.from_numpy(f[key_latent][:, i:i+h, j:j+w])
+            data_latent = torch.from_numpy(f[key_latent][transform_idx, :, i:i+h, j:j+w])
             data_highfreq = torch.from_numpy(f[key_highfreq][:, li:li+lh, lj:lj+lw])
+            
+        # Apply transforms to highfreq to match latent
+        if flip:
+            data_highfreq = torch.flip(data_highfreq, dims=[-1])
+        if rotate_k != 0:
+            data_highfreq = torch.rot90(data_highfreq, k=rotate_k, dims=[-2, -1])
             
         latent_channels = data_latent.shape[0]
         means, logvars = data_latent[:latent_channels//2], data_latent[latent_channels//2:]
-        sampled_latent = torch.randn_like(means) * logvars.exp() + means
+        sampled_latent = torch.randn_like(means) * (logvars * 0.5).exp() + means
         sampled_latent = (sampled_latent - self.latents_mean) / self.latents_std
         upsampled_latent = torch.nn.functional.interpolate(sampled_latent[None], (self.crop_size, self.crop_size), mode='nearest')[0]
-        data = self.transform(torch.cat([data_highfreq, upsampled_latent], dim=0))
         
-        img = data[:1]
-        cond_img = data[1:]
+        img = data_highfreq
+        cond_img = upsampled_latent
         
         return {'image': img, 'cond_img': cond_img}
 
@@ -472,12 +476,23 @@ class MultiDataset(Dataset):
     def shuffle(self):
         for ordering in self.ordering:
             random.shuffle(ordering)
+    
+    def split(self, val_pct, generator=None):
+        train_datasets = []
+        val_datasets = []
+        for dataset in self.sub_datasets:
+            train_size = int(len(dataset) * (1 - val_pct))
+            train_dset, val_dset = torch.utils.data.random_split(dataset, [train_size, len(dataset) - train_size], generator=generator)
+            train_datasets.append(train_dset)
+            val_datasets.append(val_dset)
+        return MultiDataset(*train_datasets, weights=self.weights), MultiDataset(*val_datasets, weights=self.weights)
 
 
 class LongDataset(Dataset):
-    def __init__(self, base_dataset, length=10 ** 12):
+    def __init__(self, base_dataset, length=10 ** 12, shuffle=True):
         self.base_dataset = base_dataset
         self.length = length
+        self.shuffle = shuffle
 
     def __len__(self):
         return self.length
@@ -486,7 +501,7 @@ class LongDataset(Dataset):
         return math.ceil(len(self.base_dataset) / batch_size)
 
     def __getitem__(self, index):
-        if index % len(self.base_dataset) == 0:
+        if index % len(self.base_dataset) == 0 and self.shuffle:
             self.base_dataset.shuffle()
         return self.base_dataset[index % len(self.base_dataset)]
 
