@@ -8,7 +8,7 @@ from torch.utils.data import Dataset
 from PIL import Image
 import torchvision.transforms.v2 as T
 import torchvision.transforms.v2.functional as TF
-from diffusion.encoder import LaplacianPyramidEncoder
+from data.laplacian_encoder import LaplacianPyramidEncoder
 from .transforms import TupleTransform
 import h5py
 

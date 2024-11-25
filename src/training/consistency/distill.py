@@ -14,14 +14,14 @@ from accelerate import Accelerator
 from confection import Config, registry
 from ema_pytorch import PostHocEMA
 from diffusion.datasets.datasets import LongDataset
-from diffusion.encoder import *
+from src.data.laplacian_encoder import *
 from diffusion.registry import build_registry
 from diffusion.samplers.tiled import TiledSampler
 from tqdm import tqdm
 import wandb
 from torch.utils.data import DataLoader
 from schedulefree import ScheduleFreeWrapper, AdamWScheduleFree
-from diffusion.utils import SerializableEasyDict as EasyDict
+from src.training.utils import SerializableEasyDict as EasyDict
 from diffusion.unet import EDMUnet2D
 
 @click.command()

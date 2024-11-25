@@ -8,15 +8,14 @@ import torch
 from accelerate import Accelerator
 from confection import Config, registry
 from ema_pytorch import PostHocEMA
-from diffusion.datasets.datasets import LongDataset
-from diffusion.encoder import *
-from diffusion.registry import build_registry
-from diffusion.samplers.tiled import TiledSampler
+from training.datasets.datasets import LongDataset, MultiDataset
+from src.data.laplacian_encoder import *
+from training.diffusion.registry import build_registry
 from tqdm import tqdm
 import wandb
 from torch.utils.data import DataLoader
-from utils import SerializableEasyDict as EasyDict
-from schedulefree import ScheduleFreeWrapper, AdamWScheduleFree
+from src.training.utils import SerializableEasyDict as EasyDict
+from schedulefree import AdamWScheduleFree
 
 from PIL import Image
 import warnings
@@ -165,6 +164,8 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
     model = resolved['model']
     lr_scheduler = resolved['lr_sched']
     dataset = resolved['dataset']
+    if not isinstance(dataset, MultiDataset):
+        dataset = MultiDataset(dataset)  # Has no effect but can now use .split()
     train_dataset, val_dataset = dataset.split(config['training']['val_pct'], generator=torch.Generator().manual_seed(68197))
     scheduler = resolved['scheduler']
     if resolved['optimizer']['type'] == 'adam':

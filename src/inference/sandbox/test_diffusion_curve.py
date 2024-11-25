@@ -1,10 +1,10 @@
 import torch
 from tqdm import tqdm
-from diffusion.scheduler.dpmsolver import EDMDPMSolverMultistepScheduler
-from diffusion.unet import EDMUnet2D
+from inference.scheduler.dpmsolver import EDMDPMSolverMultistepScheduler
+from training.diffusion.unet import EDMUnet2D
 from safetensors.torch import load_model
 from ema_pytorch import PostHocEMA
-from diffusion.datasets.datasets import H5SuperresTerrainDataset
+from training.datasets.datasets import H5SuperresTerrainDataset
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 import numpy as np
@@ -39,7 +39,7 @@ def get_model(channels, layers, tag, sigma_rel=None, ema_step=None, fs=1.0, chec
 
 models = [
     get_model(32, 2, '32x2', 0.05, fs='pos').to(device),
-    get_model(64, 3, '64x3', 0.1, fs='pos').to(device)
+    get_model(64, 3, '64x3', 0.05, fs='pos').to(device)
 ]
 
 dataset = H5SuperresTerrainDataset('dataset_full_encoded.h5', 128, [0.9999, 1], '480m', eval_dataset=True,
