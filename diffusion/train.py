@@ -16,10 +16,10 @@ from tqdm import tqdm
 import wandb
 from torch.utils.data import DataLoader
 from utils import SerializableEasyDict as EasyDict
-from soap import SOAP
 from schedulefree import ScheduleFreeWrapper, AdamWScheduleFree
 
 from PIL import Image
+import warnings
 
 def log_samples(images, config, state):
     import numpy as np
@@ -98,27 +98,74 @@ def plot_tensor_channels(x):
     plt.show()
     plt.close()
 
-@click.command()
-@click.option("-c", "--config", "config_path", type=click.Path(exists=True), required=True)
-@click.option("--ckpt", "ckpt_path", type=click.Path(exists=True), required=False)
-@click.option("--model-ckpt", "model_ckpt_path", type=click.Path(exists=True), required=False)
-@click.option("--debug-run", "debug_run", is_flag=True, default=False)
-def main(config_path, ckpt_path, model_ckpt_path, debug_run):
+def set_nested_value(config, key_path, value, original_override):
+    """Set a value in nested config dict, warning if key path doesn't exist."""
+    keys = key_path.split('.')
+    current = config
+    
+    # Check if the full path exists before modifying
+    try:
+        for key in keys[:-1]:
+            if key not in current:
+                warnings.warn(f"Creating new config section '{key}' from override: {original_override}")
+                current[key] = {}
+            current = current[key]
+        
+        if keys[-1] not in current:
+            warnings.warn(f"Creating new config value '{key_path}' from override: {original_override}")
+        current[keys[-1]] = value
+    except (KeyError, TypeError) as e:
+        warnings.warn(f"Failed to apply override '{original_override}': {str(e)}")
+
+@click.command(context_settings=dict(ignore_unknown_options=True, allow_extra_args=True))
+@click.option("-c", "--config", "config_path", type=click.Path(exists=True), required=True, help="Path to the configuration file")
+@click.option("--ckpt", "ckpt_path", type=click.Path(exists=True), required=False, help="Path to a checkpoint (folder) to resume training from")
+@click.option("--model-ckpt", "model_ckpt_path", type=click.Path(exists=True), required=False, help="Path to a HuggingFace model to initialize weights from")
+@click.option("--debug-run", "debug_run", is_flag=True, default=False, help="Run in debug mode which disables wandb and all file saving")
+@click.option("--resume", "resume_id", type=str, required=False, help="Wandb run ID to resume")
+@click.option("--override", "-o", multiple=True, help="Override config values (format: key.subkey=value)")
+@click.pass_context
+def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, override):
     build_registry()
     
     config = Config().from_disk(config_path) if config_path else None
     
-    # Resolve this later
-    sampler_config = config.get('sampler', None)
-    if sampler_config:
-        del config['sampler']
-            
+    # Handle both explicit overrides (-o flag) and wandb sweep parameters
+    all_overrides = list(override)
+    
+    # Process any additional wandb sweep parameters
+    for param in ctx.args:
+        if param.startswith('--'):
+            key, value = param.lstrip('-').split('=', 1)
+            all_overrides.append(f"{key}={value}")
+    
+    # Apply all config overrides
+    for o in all_overrides:
+        key_path, value = o.split('=', 1)
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            pass
+        set_nested_value(config, key_path, value, o)
+    
+    if debug_run:
+        config['wandb']['mode'] = 'disabled'
+    if resume_id:
+        config['wandb']['id'] = resume_id
+        config['wandb']['resume'] = 'must'
+    wandb.init(
+        **config['wandb'],
+        config=config
+    )
+    print("Run ID:", wandb.run.id)
+        
     resolved = registry.resolve(config, validate=False)
 
     # Load anything that needs to be used for training.
     model = resolved['model']
     lr_scheduler = resolved['lr_sched']
-    train_dataset = resolved['train_dataset']
+    dataset = resolved['dataset']
+    train_dataset, val_dataset = dataset.split(config['training']['val_pct'], generator=torch.Generator().manual_seed(68197))
     scheduler = resolved['scheduler']
     if resolved['optimizer']['type'] == 'adam':
         optimizer = torch.optim.Adam(model.parameters(), **resolved['optimizer']['kwargs'])
@@ -132,6 +179,9 @@ def main(config_path, ckpt_path, model_ckpt_path, debug_run):
     state = EasyDict({'epoch': 0, 'step': 0, 'seen': 0})
     dataloader = DataLoader(LongDataset(train_dataset), batch_size=config['training']['train_batch_size'],
                             **resolved['dataloader_kwargs'])
+    val_dataloader = DataLoader(LongDataset(val_dataset, shuffle=False), batch_size=config['training']['train_batch_size'],
+                                **resolved['dataloader_kwargs'])
+    print("Validation dataset size:", len(val_dataset))
     
     if model_ckpt_path:
         temp_model_statedict = type(model).from_pretrained(model_ckpt_path).state_dict()
@@ -164,7 +214,7 @@ def main(config_path, ckpt_path, model_ckpt_path, debug_run):
         log_with=None
     )
     ema = ema.to(accelerator.device)
-    model, dataloader, optimizer = accelerator.prepare(model, dataloader, optimizer)
+    model, dataloader, optimizer, val_dataloader = accelerator.prepare(model, dataloader, optimizer, val_dataloader)
     accelerator.register_for_checkpointing(state)
     accelerator.register_for_checkpointing(ema)
     
@@ -185,13 +235,48 @@ def main(config_path, ckpt_path, model_ckpt_path, debug_run):
         model.save_config(os.path.join(resolved['logging']['save_dir'], 'configs', f'model_config_{state.seen//1000}kimg'))
         model.save_config(os.path.join(resolved['logging']['save_dir'], 'configs', f'model_config_latest'))
         
-    if accelerator.is_main_process:
-        if debug_run:
-            config['wandb']['mode'] = 'disabled'
-        wandb.init(
-            **config['wandb'],
-            config=config
-        )
+    def validate(repeats, dataloader, pbar_title):
+        validation_stats = {'loss': []}
+        generator = torch.Generator(device=accelerator.device).manual_seed(config['training']['seed'])
+        pbar = tqdm(total=repeats * len(val_dataset), desc=pbar_title)
+        val_dataloader_iter = iter(dataloader)
+        while pbar.n < pbar.total:
+            batch = next(val_dataloader_iter)
+            images = batch['image']
+            cond_img = batch.get('cond_img')
+            conditional_inputs = batch.get('cond_inputs')
+            
+            sigma = torch.randn(images.shape[0], device=images.device, generator=generator).reshape(-1, 1, 1, 1)
+            sigma = (sigma * config['evaluation']['P_std'] + config['evaluation']['P_mean']).exp()
+            sigma_data = scheduler.config.sigma_data
+            t = torch.atan(sigma / sigma_data)
+            cnoise = t.flatten()
+            
+            noise = torch.randn_like(images) * sigma_data
+            x_t = torch.cos(t) * images + torch.sin(t) * noise
+
+            x = x_t / sigma_data
+            if cond_img is not None:
+                x = torch.cat([x, cond_img], dim=1)
+                
+            if sf_optim:
+                optimizer.eval()
+            model.eval()
+            with torch.no_grad(), accelerator.autocast():
+                model_output, logvar = model(x, noise_labels=cnoise, conditional_inputs=conditional_inputs, return_logvar=True)
+                pred_v_t = -sigma_data * model_output
+                
+            v_t = torch.cos(t) * noise - torch.sin(t) * images
+
+            loss = 1 / (logvar.exp() * sigma_data ** 2) * ((pred_v_t - v_t) ** 2) + logvar
+            loss = loss.mean()
+            validation_stats['loss'].append(loss.item())
+            
+            pbar.update(images.shape[0])
+            pbar.set_postfix(loss=np.mean(validation_stats['loss']))
+            
+        return np.mean(validation_stats['loss'])
+                
         
     def safe_rmtree(path):
         """Removes a tree but only checkpoint files."""
@@ -218,6 +303,7 @@ def main(config_path, ckpt_path, model_ckpt_path, debug_run):
         torch.save(ema.state_dict(), os.path.join(base_folder_path + '_checkpoint', 'phema.pt'))
 
     dataloader_iter = iter(dataloader)
+    grad_norm = torch.tensor(0.0, device=accelerator.device)
     while state.epoch < config['training']['epochs']:
         stats_hist = {'loss': [], 'importance_loss': []}
         progress_bar = tqdm(dataloader_iter, desc=f"Epoch {state.epoch}", total=config['training']['epoch_steps'])
@@ -230,48 +316,27 @@ def main(config_path, ckpt_path, model_ckpt_path, debug_run):
             sigma = torch.randn(images.shape[0], device=images.device).reshape(-1, 1, 1, 1)
             sigma = (sigma * config['training']['P_std'] + config['training']['P_mean']).exp()
             sigma_data = scheduler.config.sigma_data
-            
-            # Calculate likelihood ratio of P_mean = -0.4, P_std = 1.0 to current distribution
-            # for consistent comparison between runs
-            sigma_importance_ratio = config['training']['P_std'] / 1.4 * torch.exp(
-                (torch.log(sigma) - config['training']['P_mean'])**2 / (2 * config['training']['P_std']**2)
-                - (torch.log(sigma) + 0.4)**2 / (2 * 1.4**2)
-            )
-            
-            # Replace 0.1% of sigmas with uniform random values to ensure very large sigmas are reached
-            num_to_replace = np.random.poisson(config['training']['random_replace_rate'] * sigma.numel())
-            max_train_sigma = scheduler.config.sigma_max / scheduler.config.scaling_t
-            uniform_sigma = torch.rand(num_to_replace, device=sigma.device) * (max_train_sigma - scheduler.config.sigma_min) + scheduler.config.sigma_min
-            sigma.view(-1)[:num_to_replace] = uniform_sigma
+            t = torch.atan(sigma / sigma_data)
+            cnoise = t.flatten()
         
-            noise = torch.randn_like(images) * sigma
-            noisy_images = images + noise
+            noise = torch.randn_like(images) * sigma_data
+            x_t = torch.cos(t) * images + torch.sin(t) * noise
 
-            cnoise = scheduler.trigflow_precondition_noise(sigma).flatten()
-            scaled_noisy_images = scheduler.precondition_inputs(noisy_images, sigma)
-
-            x = scaled_noisy_images
+            x = x_t / sigma_data
             if cond_img is not None:
                 x = torch.cat([x, cond_img], dim=1)
                 
             if sf_optim:
                 optimizer.train()
+            model.train()
             with accelerator.autocast(), accelerator.accumulate(model):
-                pred_noise, logvar = model(x, noise_labels=cnoise, conditional_inputs=conditional_inputs, return_logvar=True)
+                model_output, logvar = model(x, noise_labels=cnoise, conditional_inputs=conditional_inputs, return_logvar=True)
+                pred_v_t = -sigma_data * model_output
                 
-            denoised = scheduler.precondition_outputs(noisy_images, pred_noise, sigma)
+            v_t = torch.cos(t) * noise - torch.sin(t) * images
 
-            weight = (sigma ** 2 + sigma_data ** 2) / (sigma * sigma_data) ** 2
-            weight = weight.repeat(1, pred_noise.shape[1], 1, 1)
-            max_weight = torch.tensor(config['training']['channel_max_weight'], device=weight.device, dtype=weight.dtype).reshape([1, pred_noise.shape[1], 1, 1])
-            weight = torch.minimum(weight, max_weight)
-        
-            loss = (weight / logvar.exp()) * ((denoised - images) ** 2) + logvar
+            loss = 1 / (logvar.exp() * sigma_data ** 2) * ((pred_v_t - v_t) ** 2) + logvar
             loss = loss.mean()
-                
-            with torch.no_grad():
-                importance_loss = loss * sigma_importance_ratio
-            importance_loss = importance_loss.mean()
 
             state.seen += images.shape[0]
             state.step += 1
@@ -281,7 +346,8 @@ def main(config_path, ckpt_path, model_ckpt_path, debug_run):
             
             optimizer.zero_grad()
             accelerator.backward(loss)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=config['training'].get('gradient_clip_val', 1.0))
+            if accelerator.sync_gradients:
+                grad_norm = accelerator.clip_grad_norm_(model.parameters(), max_norm=config['training'].get('gradient_clip_val', 10.0))
             optimizer.step()
 
             if accelerator.is_main_process:
@@ -290,37 +356,38 @@ def main(config_path, ckpt_path, model_ckpt_path, debug_run):
                 ema.update()
 
             stats_hist['loss'].append(loss.item())
-            stats_hist['importance_loss'].append(importance_loss.item())
-            progress_bar.set_postfix({'loss': np.mean(stats_hist['loss']), 
-                                      "importance_loss": np.mean(stats_hist['importance_loss']), 
-                                      "lr": lr})
+            progress_bar.set_postfix({'loss': np.mean(stats_hist['loss']),
+                                      "lr": lr,
+                                      "grad_norm": grad_norm.item()})
             progress_bar.update(1)
+            
+        progress_bar.close()
+        if (state.epoch + 1) % config['training']['validate_epochs'] == 0:
+            val_loss = validate(config['training']['validation_repeats'], val_dataloader, "Validation Loss")
+            eval_loss = validate(config['training']['validation_repeats'], dataloader, "Eval Loss")
+        else:
+            val_loss = None
+            eval_loss = None
 
         state.epoch += 1
         if accelerator.is_main_process:
-            wandb.log({
-                "avg_loss": np.mean(stats_hist['loss']),
-                "loss": np.median(stats_hist['loss']),
-                "importance_loss": np.mean(stats_hist['importance_loss']),
+            log_values = {
+                "loss": np.mean(stats_hist['loss']),
                 "lr": lr,
                 "step": state.step,
                 "epoch": state.epoch,
                 "seen": state.seen
-            }, step=state.epoch)
+            }
+            if val_loss is not None:
+                log_values['val_loss'] = val_loss
+                log_values['eval_loss'] = eval_loss
+            wandb.log(log_values, step=state.epoch, commit=True)
             if sf_optim:
                 optimizer.eval()
-            if state.epoch % config['logging']['temp_save_epochs'] == 0:
+            if state.epoch % config['logging']['temp_save_epochs'] == 0 and not debug_run:
                 save_checkpoint(f"{config['logging']['save_dir']}/latest", overwrite=True)
-            if state.epoch % config['logging']['save_epochs'] == 0:
+            if state.epoch % config['logging']['save_epochs'] == 0 and not debug_run:
                 save_checkpoint(f"{config['logging']['save_dir']}/{state.seen//1000}kimg")
-            if sampler_config is not None and state.epoch % config['logging']['plot_epochs'] == 0:
-                sampler_resolved = registry.resolve(sampler_config, validate=False)
-                sampler = sampler_resolved['init']
-                images = sampler.get_region(*sampler_resolved['region'])
-                    
-                log_samples(images, config, state)
-                # Delete sampler to free memory in case models are used
-                del sampler, sampler_resolved
 
 if __name__ == '__main__':
     main()

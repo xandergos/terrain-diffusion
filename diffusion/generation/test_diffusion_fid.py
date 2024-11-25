@@ -18,7 +18,7 @@ scheduler = EDMDPMSolverMultistepScheduler(0.002, 80, 0.5)
 
 device = 'cuda'
 
-def get_model(channels, layers, tag, sigma_rel=None, ema_step=None):
+def get_model(channels, layers, tag, sigma_rel=None, ema_step=None, sigma_rels=[0.04, 0.09]):
     model = EDMUnet2D(
         image_size=512,
         in_channels=5,
@@ -42,11 +42,11 @@ def get_model(channels, layers, tag, sigma_rel=None, ema_step=None):
 
     return model
 
-model_m = get_model(64, 3, '64x3', 0.05, ema_step=192000).to(device)
-model_g = get_model(64, 2, '64', None).to(device)
-guidance_scale = 1.0
+model_m = get_model(64, 3, '64x3', 0.05, fs='pos').to(device)
+model_g = get_model(32, 2, '32x2', 0.05, ema_step=2048*4, fs='pos').to(device)
+guidance_scale = 2.0
 
-dataset = H5SuperresTerrainDataset('dataset_full_encoded.h5', 256, [0.9999, 1], '240m', eval_dataset=False,
+dataset = H5SuperresTerrainDataset('dataset_full_encoded.h5', 256, [0.9999, 1], '480m', eval_dataset=False,
                                    latents_mean=[0, 0.07, 0.12, 0.07],
                                    latents_std=[1.4127, 0.8170, 0.8386, 0.8414])
 
