@@ -1,5 +1,5 @@
 import torch
-from diffusion.samplers.sampler import Sampler
+from inference.samplers.sampler import Sampler
 
 
 class StackedSampler(Sampler):

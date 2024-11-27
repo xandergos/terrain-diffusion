@@ -388,7 +388,7 @@ class H5SuperresTerrainDataset(H5AutoencoderDataset):
             for key in f.keys():
                 if pct_land_range[0] <= f[key].attrs['pct_land'] <= pct_land_range[1] and (search_label is None or str(f[key].attrs['label']) == str(search_label)):
                     self.keys.append('_'.join(key.split('_')[:-1]))
-            
+        
         self.dummy_data_latent = None
 
     def __len__(self):
@@ -412,7 +412,8 @@ class H5SuperresTerrainDataset(H5AutoencoderDataset):
             else:
                 i, j, h, w = T.RandomCrop.get_params(self.dummy_data_latent, output_size=(latent_crop_size, latent_crop_size))
         else:
-            i, j, h, w = latent_crop_size // 2, latent_crop_size // 2, latent_crop_size, latent_crop_size
+            i, j = (self.dummy_data_latent.shape[-2] - latent_crop_size) // 2, (self.dummy_data_latent.shape[-1] - latent_crop_size) // 2
+            h, w = latent_crop_size, latent_crop_size
             
         li, lj, lh, lw = i * upscale_factor, j * upscale_factor, h * upscale_factor, w * upscale_factor
             

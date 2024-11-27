@@ -3,9 +3,9 @@ import os
 import catalogue
 from confection import registry
 from training.datasets.datasets import BaseTerrainDataset, CachedTiffDataset, H5AutoencoderDataset, H5BaseTerrainDataset, MultiDataset, SuperresTerrainDataset, H5SuperresTerrainDataset
-from src.data.laplacian_encoder import *
-from src.data.laplacian_encoder import encode_postprocess
-from src.training.loss import SqrtLRScheduler
+from data.laplacian_encoder import *
+from data.laplacian_encoder import encode_postprocess
+from training.loss import SqrtLRScheduler
 from inference.samplers.image_sampler import ImageSampler
 from inference.samplers.stacked_sampler import StackedSampler
 from inference.samplers.superresolution import superresolution_sampler

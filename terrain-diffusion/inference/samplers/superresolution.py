@@ -4,7 +4,7 @@ from matplotlib import pyplot as plt
 import numpy as np
 import torch
 import torch.nn.functional as F
-from diffusion.samplers.tiled import TiledSampler
+from inference.samplers.tiled import TiledSampler
 import torchvision.transforms.v2.functional as TF
 
 
