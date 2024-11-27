@@ -9,93 +9,17 @@ from accelerate import Accelerator
 from confection import Config, registry
 from ema_pytorch import PostHocEMA
 from training.datasets.datasets import LongDataset, MultiDataset
-from src.data.laplacian_encoder import *
+from data.laplacian_encoder import *
 from training.diffusion.registry import build_registry
 from tqdm import tqdm
 import wandb
 from torch.utils.data import DataLoader
-from src.training.utils import SerializableEasyDict as EasyDict
+from training.utils import SerializableEasyDict as EasyDict
 from schedulefree import AdamWScheduleFree
+from training.diffusion.unet import EDMUnet2D
 
 from PIL import Image
 import warnings
-
-def log_samples(images, config, state):
-    import numpy as np
-    
-    # Convert samples to numpy array and move to CPU
-    samples_np = images.cpu().numpy()
-    
-    # Normalize to 0-1 range
-    samples_np = (samples_np - np.min(samples_np, axis=(1, 2, 3), keepdims=True)) / (np.max(samples_np, axis=(1, 2, 3), keepdims=True) - np.min(samples_np, axis=(1, 2, 3), keepdims=True))
-    
-    # Convert to PIL images
-    pil_images = [Image.fromarray((img * 255).astype(np.uint8)[0]) for img in samples_np]
-    
-    # Create grid
-    num_images = len(pil_images)
-    grid_width = int(np.sqrt(num_images))
-    grid_height = grid_width
-    
-    # Remove extra images if there are more than grid_width * grid_height
-    max_images = grid_width * grid_height
-    if num_images > max_images:
-        pil_images = pil_images[:max_images]
-        num_images = max_images
-    
-    img_width, img_height = pil_images[0].size
-    grid_img = Image.new('RGB', (grid_width * img_width, grid_height * img_height))
-    
-    for i, img in enumerate(pil_images):
-        x = (i % grid_width) * img_width
-        y = (i // grid_width) * img_height
-        grid_img.paste(img, (x, y))
-    
-    # Save the grid image
-    os.makedirs(f"{config['logging']['save_dir']}/samples", exist_ok=True)
-    save_path = f"{config['logging']['save_dir']}/samples/terrain_samples_epoch_{state.epoch}.png"
-    grid_img.save(save_path)
-    
-    wandb.log({"samples": [wandb.Image(img) for img in pil_images]},
-              commit=False, step=state.epoch)
-
-def plot_tensor_channels(x):
-    """
-    Plot the channels of a tensor side by side.
-    
-    Args:
-        x (torch.Tensor): Input tensor of shape (C, H, W) or (B, C, H, W).
-    """
-    import matplotlib.pyplot as plt
-    import torch
-    
-    # Ensure the tensor is on CPU and convert to numpy
-    x = x.detach().cpu().numpy()
-    
-    # If the input is a batch, take the first item
-    if x.ndim == 4:
-        x = x[0]
-    
-    # Get the number of channels
-    num_channels = x.shape[0]
-    
-    # Create a figure with subplots for each channel
-    fig, axes = plt.subplots(1, num_channels, figsize=(4*num_channels, 4))
-    
-    # If there's only one channel, axes will not be an array
-    if num_channels == 1:
-        axes = [axes]
-    
-    # Plot each channel
-    for i, ax in enumerate(axes):
-        im = ax.imshow(x[i], cmap='viridis')
-        ax.set_title(f'Channel {i}')
-        ax.axis('off')
-        fig.colorbar(im, ax=ax)
-    
-    plt.tight_layout()
-    plt.show()
-    plt.close()
 
 def set_nested_value(config, key_path, value, original_override):
     """Set a value in nested config dict, warning if key path doesn't exist."""
@@ -162,6 +86,7 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
 
     # Load anything that needs to be used for training.
     model = resolved['model']
+    assert isinstance(model, EDMUnet2D), "Currently only supports EDMUnet2D for diffusion training."
     lr_scheduler = resolved['lr_sched']
     dataset = resolved['dataset']
     if not isinstance(dataset, MultiDataset):
@@ -205,7 +130,6 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
             model.load_state_dict(temp_model_statedict, strict=False)
         del temp_model_statedict
         
-    registry.utils.register("get_object", func=lambda object: {'model': model, 'scheduler': scheduler}[object])
     print(f"Training model with {model.count_parameters()} parameters.")
 
     # Setup accelerate
@@ -222,19 +146,6 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
     # Load from checkpoint if needed
     if ckpt_path:
         accelerator.load_state(ckpt_path)
-    
-    # Save full train config
-    if not debug_run:
-        os.makedirs(os.path.join(resolved['logging']['save_dir'], 'configs'), exist_ok=True)
-        with open(os.path.join(resolved['logging']['save_dir'], 'configs', f'config_{state.seen//1000}kimg.json'), 'w') as f:
-            json.dump(config, f)
-        with open(os.path.join(resolved['logging']['save_dir'], 'configs', f'config_latest.json'), 'w') as f:
-            json.dump(config, f)
-            
-        # Save model config
-        os.makedirs(os.path.join(resolved['logging']['save_dir'], 'configs'), exist_ok=True)
-        model.save_config(os.path.join(resolved['logging']['save_dir'], 'configs', f'model_config_{state.seen//1000}kimg'))
-        model.save_config(os.path.join(resolved['logging']['save_dir'], 'configs', f'model_config_latest'))
         
     def validate(repeats, dataloader, pbar_title):
         validation_stats = {'loss': []}
@@ -275,7 +186,7 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
             
             pbar.update(images.shape[0])
             pbar.set_postfix(loss=np.mean(validation_stats['loss']))
-            
+                
         return np.mean(validation_stats['loss'])
                 
         
@@ -302,10 +213,18 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
         accelerator.save_state(base_folder_path + '_checkpoint')
         
         torch.save(ema.state_dict(), os.path.join(base_folder_path + '_checkpoint', 'phema.pt'))
+        
+        # Save full train config and model config
+        with open(os.path.join(base_folder_path + '_checkpoint', f'config.json'), 'w') as f:
+            json.dump(config, f, indent=2)
+        model.save_config(os.path.join(base_folder_path + '_checkpoint', f'model_config_latest'))
 
     dataloader_iter = iter(dataloader)
     grad_norm = torch.tensor(0.0, device=accelerator.device)
     while state.epoch < config['training']['epochs']:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+                
         stats_hist = {'loss': [], 'importance_loss': []}
         progress_bar = tqdm(dataloader_iter, desc=f"Epoch {state.epoch}", total=config['training']['epoch_steps'])
         while progress_bar.n < config['training']['epoch_steps']:            
@@ -363,12 +282,12 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
             progress_bar.update(1)
             
         progress_bar.close()
-        if (state.epoch + 1) % config['training']['validate_epochs'] == 0:
+        val_loss = None
+        eval_loss = None
+        if config['training']['validate_epochs'] > 0 and (state.epoch + 1) % config['training']['validate_epochs'] == 0:
             val_loss = validate(config['training']['validation_repeats'], val_dataloader, "Validation Loss")
-            eval_loss = validate(config['training']['validation_repeats'], dataloader, "Eval Loss")
-        else:
-            val_loss = None
-            eval_loss = None
+            if sf_optim:
+                eval_loss = validate(config['training']['validation_repeats'], dataloader, "Eval Loss")
 
         state.epoch += 1
         if accelerator.is_main_process:

@@ -13,16 +13,15 @@ import torch
 from accelerate import Accelerator
 from confection import Config, registry
 from ema_pytorch import PostHocEMA
-from diffusion.datasets.datasets import LongDataset
-from src.data.laplacian_encoder import *
-from diffusion.registry import build_registry
-from diffusion.samplers.tiled import TiledSampler
+from training.datasets.datasets import LongDataset
+from data.laplacian_encoder import *
+from training.diffusion.registry import build_registry
 from tqdm import tqdm
 import wandb
 from torch.utils.data import DataLoader
 from schedulefree import ScheduleFreeWrapper, AdamWScheduleFree
-from src.training.utils import SerializableEasyDict as EasyDict
-from diffusion.unet import EDMUnet2D
+from training.utils import SerializableEasyDict as EasyDict
+from training.diffusion.unet import EDMUnet2D
 
 @click.command()
 @click.option("-c", "--config", "config_path", type=click.Path(exists=True), required=True)
@@ -75,19 +74,6 @@ def distill(config_path, ckpt_path, debug_run):
     # Load from checkpoint if needed
     if ckpt_path:
         accelerator.load_state(ckpt_path)
-    
-    # Save full train config
-    if not debug_run:
-        os.makedirs(os.path.join(resolved['logging']['save_dir'], 'configs'), exist_ok=True)
-        with open(os.path.join(resolved['logging']['save_dir'], 'configs', f'config_{state.seen//1000}kimg.json'), 'w') as f:
-            json.dump(config, f)
-        with open(os.path.join(resolved['logging']['save_dir'], 'configs', f'config_latest.json'), 'w') as f:
-            json.dump(config, f)
-            
-        # Save model config
-        os.makedirs(os.path.join(resolved['logging']['save_dir'], 'configs'), exist_ok=True)
-        model.save_config(os.path.join(resolved['logging']['save_dir'], 'configs', f'model_config_{state.seen//1000}kimg'))
-        model.save_config(os.path.join(resolved['logging']['save_dir'], 'configs', f'model_config_latest'))
         
     if accelerator.is_main_process:
         if debug_run:
@@ -120,6 +106,11 @@ def distill(config_path, ckpt_path, debug_run):
         accelerator.save_state(base_folder_path + '_checkpoint')
         
         torch.save(ema.state_dict(), os.path.join(base_folder_path + '_checkpoint', 'phema.pt'))
+        
+        # Save full train config and model config
+        with open(os.path.join(base_folder_path + '_checkpoint', f'config.json'), 'w') as f:
+            json.dump(config, f, indent=2)
+        model.save_config(os.path.join(base_folder_path + '_checkpoint', f'model_config_latest'))
 
     grad_norm = torch.tensor(0.0, device=accelerator.device)
     dataloader_iter = iter(dataloader)
@@ -185,7 +176,6 @@ def distill(config_path, ckpt_path, debug_run):
                 g = -torch.cos(t)**2 * (sigma_data * F_theta_minus - dxt_dt)
                 second_term = -r * torch.cos(t) * torch.sin(t) * x_t - r * sigma_data * F_theta_grad
                 g = g + second_term
-                g = g.detach()
                 
                 # Tangent normalization
                 g_norm = torch.linalg.vector_norm(g, dim=(1, 2, 3), keepdim=True)

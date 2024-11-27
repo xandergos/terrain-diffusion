@@ -11,9 +11,9 @@ import numpy as np
 
 scheduler = EDMDPMSolverMultistepScheduler(0.002, 10.0, 0.5)
 
-device = 'cpu'
+device = 'cuda'
 
-def get_model(channels, layers, tag, sigma_rel=None, ema_step=None, fs=1.0, checkpoint='latest_checkpoint', sigma_rels=[0.05, 0.1]):
+def get_model(channels, layers, tag, sigma_rel=None, ema_step=None, fs=1.0, checkpoint='latest_checkpoint'):
     model = EDMUnet2D(
         image_size=512,
         in_channels=5,
@@ -27,22 +27,24 @@ def get_model(channels, layers, tag, sigma_rel=None, ema_step=None, fs=1.0, chec
         conditional_inputs=[],
         fourier_scale=fs
     )
-    load_model(model, f'checkpoints/diffusion_x8-{tag}/{checkpoint}/model.safetensors')
 
     if sigma_rel is not None:
-        ema = PostHocEMA(model, sigma_rels=sigma_rels, update_every=1, checkpoint_every_num_steps=12800, allow_different_devices=True,
-                        checkpoint_folder=f'checkpoints/diffusion_x8-{tag}/phema').to(device)
-        ema.load_state_dict(torch.load(f'checkpoints/diffusion_x8-{tag}/{checkpoint}/phema.pt', map_location='cpu'))
+        # sigma_rels are placeholders since we dont use them
+        ema = PostHocEMA(model, sigma_rels=[0.05, 0.1], checkpoint_folder=f'checkpoints/diffusion_x8-{tag}/phema').to(device)
+        #ema.load_state_dict(torch.load(f'checkpoints/diffusion_x8-{tag}/{checkpoint}/phema.pt', map_location='cpu'))
         ema.synthesize_ema_model(sigma_rel=sigma_rel, step=ema_step).copy_params_from_ema_to_model()
+    else:
+        load_model(model, f'checkpoints/diffusion_x8-{tag}/{checkpoint}/model.safetensors')
 
     return model
 
 models = [
-    get_model(32, 2, '32x2', 0.05, fs='pos').to(device),
-    get_model(64, 3, '64x3', 0.05, fs='pos').to(device)
+    get_model(32, 2, '32x2', None, fs='pos').to(device),
+    get_model(32, 2, '32x2-old', None, fs='pos').to(device),
+    get_model(64, 3, '64x3-old', None, fs='pos').to(device)
 ]
 
-dataset = H5SuperresTerrainDataset('dataset_full_encoded.h5', 128, [0.9999, 1], '480m', eval_dataset=True,
+dataset = H5SuperresTerrainDataset('dataset_full_encoded.h5', 128, [0.9999, 1], '240m', eval_dataset=True,
                                    latents_mean=[0, 0.07, 0.12, 0.07],
                                    latents_std=[1.4127, 0.8170, 0.8386, 0.8414])
 

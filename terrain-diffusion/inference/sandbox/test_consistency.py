@@ -1,11 +1,10 @@
+import os
 import numpy as np
 import torch
-from tqdm import tqdm
-from diffusion.scheduler.dpmsolver import EDMDPMSolverMultistepScheduler
-from diffusion.unet import EDMUnet2D
+from training.diffusion.unet import EDMUnet2D
 from safetensors.torch import load_model
 from ema_pytorch import PostHocEMA
-from diffusion.datasets.datasets import H5SuperresTerrainDataset
+from training.datasets.datasets import H5SuperresTerrainDataset
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 
@@ -13,33 +12,40 @@ device = 'cpu'
 
 mode = 'consistency'
 
-def get_model(channels, layers, tag, sigma_rel=None, ema_step=None, checkpoint='latest_checkpoint'):
-    model = EDMUnet2D(
-        image_size=512,
-        in_channels=5,
-        out_channels=1,
-        model_channels=channels,
-        model_channel_mults=[1, 2, 3, 4],
-        layers_per_block=layers,
-        attn_resolutions=[],
-        midblock_attention=False,
-        concat_balance=0.5,
-        conditional_inputs=[],
-        fourier_scale=1.0
-    )
-    load_model(model, f'checkpoints/{mode}_x8-{tag}/{checkpoint}/model.safetensors')
+def get_model(checkpoint_path, ema_step=None, sigma_rel=None, model_config_path=None):
+    """
+    Load a model from a checkpoint and optionally apply EMA synthesis.
+    
+    Args:
+        checkpoint_path (str): Path to the checkpoint directory.
+        ema_step (int, optional): EMA step to use. Defaults to None.
+        sigma_rel (float, optional): Sigma relative value. Defaults to None.
+        
+    Returns:
+        EDMUnet2D: The loaded model with optional EMA synthesis applied.
+    """
+    # Load model configuration
+    if model_config_path is None:
+        config_path = os.path.join(checkpoint_path, 'model_config')
+    else:
+        config_path = model_config_path
+    model = EDMUnet2D.from_config(EDMUnet2D.load_config(config_path))
 
     if sigma_rel is not None:
-        ema = PostHocEMA(model, sigma_rels=[0.05, 0.1], update_every=1, checkpoint_every_num_steps=12800, allow_different_devices=True,
-                        checkpoint_folder=f'checkpoints/{mode}_x8-{tag}/phema')
-        ema.load_state_dict(torch.load(f'checkpoints/{mode}_x8-{tag}/{checkpoint}/phema.pt'))
+        ema = PostHocEMA(model, sigma_rels=[0.05, 0.1], update_every=1, checkpoint_every_num_steps=12800,
+                         checkpoint_folder=os.path.join(checkpoint_path, '..', 'phema'))
+        ema.load_state_dict(torch.load(os.path.join(checkpoint_path, 'phema.pt'), map_location='cpu', weights_only=True))
+        ema.gammas = tuple(ema_model.gamma for ema_model in ema.ema_models)
         ema.synthesize_ema_model(sigma_rel=sigma_rel, step=ema_step).copy_params_from_ema_to_model()
+    else:
+        load_model(model, os.path.join(checkpoint_path, 'model.safetensors'))
 
     return model
 
-model = get_model(64, 3, '64x3', None)
+model = get_model("checkpoints/diffusion_x8-64x3/latest_checkpoint", sigma_rel=None,
+                  model_config_path="checkpoints/diffusion_x8-64x3/configs/model_config_latest")
 
-dataset = H5SuperresTerrainDataset('dataset_full_encoded.h5', 128, [0.9999, 1], '240m', eval_dataset=False,
+dataset = H5SuperresTerrainDataset('dataset_full_encoded.h5', 128, [0.9999, 1], '480m', eval_dataset=False,
                                    latents_mean=[0, 0.07, 0.12, 0.07],
                                    latents_std=[1.4127, 0.8170, 0.8386, 0.8414])
 
@@ -64,7 +70,6 @@ for batch in dataloader:
         t = t.view(1).to(device)
         model_input = torch.cat([x_t / 0.5, cond_img], dim=1)
         pred = -model(model_input, noise_labels=t.flatten(), conditional_inputs=[])
-        print(torch.cos(t), torch.sin(t))
         pred_x0 = torch.cos(t) * x_t - torch.sin(t) * sigma_data * pred
     
         # Plot the predictions and original image side by side

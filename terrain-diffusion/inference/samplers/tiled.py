@@ -8,9 +8,9 @@ import torch
 import torch.nn.functional as F
 from collections import deque
 from tqdm import tqdm
-from diffusion.encoder import LaplacianPyramidEncoder, denoise_pyramid_layer
-from diffusion.samplers.sampler import Sampler
-from diffusion.scheduler.dpmsolver import EDMDPMSolverMultistepScheduler
+from data.laplacian_encoder import LaplacianPyramidEncoder, denoise_pyramid_layer
+from inference.samplers.sampler import Sampler
+from inference.scheduler.dpmsolver import EDMDPMSolverMultistepScheduler
 import matplotlib.pyplot as plt
 import catalogue
 from diffusers.training_utils import EMAModel
@@ -21,7 +21,7 @@ import networkx as nx
 
 from confection import registry, Config
 
-from diffusion.unet import EDMUnet2D
+from training.diffusion.unet import EDMUnet2D
 
 @dataclass
 class Tile:

@@ -14,7 +14,7 @@ import torch.nn.functional as F
 import h5py
 from tqdm import tqdm
 import click
-from src.data.laplacian_encoder import LaplacianPyramidEncoder
+from data.laplacian_encoder import LaplacianPyramidEncoder
 from training.diffusion.unet import EDMUnet2D
 
 def preprocess_elevation(img):
@@ -99,39 +99,35 @@ def process_dataset(base_resolution, target_resolution, chunk_size, lapl_enc_res
                     img_chunk = img[:, :, start_h:end_h, start_w:end_w]
                     pct_land = torch.mean((img_chunk > 0).float()).item()
                     
-                    transformed_highfreq = []
-                    transformed_lowfreq = []
+                    encoded, downsampled_encoding = encoder.encode(img_chunk, return_downsampled=True)
+                    highfreq = encoded[:1]
+                    lowfreq = downsampled_encoding[-1]
                     transformed_latent = []
                     
                     for horiz_flip in [False, True]:
                         for rot_deg in [0, 90, 180, 270]:
                             # Apply horizontal flip if needed
-                            img_transformed = img_chunk
+                            highfreq_transformed = highfreq
                             if horiz_flip:
-                                img_transformed = torch.flip(img_transformed, dims=[-1])
+                                highfreq_transformed = torch.flip(highfreq_transformed, dims=[-1])
                                 
                             # Apply rotation if needed 
                             if rot_deg != 0:
-                                img_transformed = torch.rot90(img_transformed, k=rot_deg // 90, dims=[-2, -1])
-                            
-                            encoded, downsampled_encoding = encoder.encode(img_transformed, return_downsampled=True)
+                                highfreq_transformed = torch.rot90(highfreq_transformed, k=rot_deg // 90, dims=[-2, -1])
                             
                             with torch.no_grad():
-                                highfreq = encoded[None, :1]
-                                latent_highfreq = model(highfreq.to(device) / 0.5, noise_labels=None, conditional_inputs=None).cpu()[0]
-                                
-                            transformed_highfreq.append(encoded[:1].numpy())
-                            transformed_lowfreq.append(downsampled_encoding[-1].numpy())
+                                latent_highfreq = model(highfreq_transformed[None].to(device) / 0.5, noise_labels=None, conditional_inputs=None).cpu()[0]
+                            
                             transformed_latent.append(latent_highfreq.numpy())
                             
                     transformed_latent = np.stack(transformed_latent)
                     
                     chunk_id = f'chunk_{chunk_h}_{chunk_w}'
-                    dset = f.create_dataset(f'{file}_{target_resolution}m_{chunk_id}_highfreq', data=transformed_highfreq[0], compression='lzf')
+                    dset = f.create_dataset(f'{file}_{target_resolution}m_{chunk_id}_highfreq', data=highfreq.numpy(), compression='lzf')
                     dset.attrs['pct_land'] = pct_land
                     dset.attrs['label'] = f'{target_resolution}m_highfreq'
                     
-                    dset = f.create_dataset(f'{file}_{target_resolution}m_{chunk_id}_lowfreq', data=transformed_lowfreq[0], compression='lzf')
+                    dset = f.create_dataset(f'{file}_{target_resolution}m_{chunk_id}_lowfreq', data=lowfreq.numpy(), compression='lzf')
                     dset.attrs['pct_land'] = pct_land
                     dset.attrs['label'] = f'{target_resolution}m_lowfreq'
                     

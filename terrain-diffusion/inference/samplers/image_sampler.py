@@ -1,5 +1,5 @@
 import torch
-from diffusion.samplers.sampler import Sampler
+from inference.samplers.sampler import Sampler
 from PIL import Image
 from torchvision.transforms.v2 import functional as TF
 from torch.utils.data import Dataset
