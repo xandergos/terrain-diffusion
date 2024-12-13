@@ -38,11 +38,11 @@ from terrain_diffusion.training.utils import recursive_to
 @click.option("--max-samples", type=int, default=2048*16, help="Max number of samples to generate")
 @click.option("--batch-size", type=int, default=64, help="Batch size for generation")
 @click.option("--cpu", is_flag=True, help="Use CPU", default=False)
-@click.option("--no-wandb", is_flag=True, help="Disable wandb logging")
+@click.option("--use-wandb", is_flag=True, help="Use wandb logging")
 @click.option("--save-samples-dir", type=click.Path(file_okay=False, writable=True), help="Directory to save generated samples", default=None)
 @click.option("--fp16", is_flag=True, help="Use FP16", default=False)
 def evaluate_sr_fid(config, sigma_rel, intermediate_timestep,
-                   log_samples, max_samples, batch_size, cpu, no_wandb, save_samples_dir, fp16):
+                   log_samples, max_samples, batch_size, cpu, use_wandb, save_samples_dir, fp16):
     """Generate samples using consistency model and calculate FID score."""
     # Load configs and build registry
     from accelerate import Accelerator
@@ -55,7 +55,7 @@ def evaluate_sr_fid(config, sigma_rel, intermediate_timestep,
     
     # Initialize wandb for compatibility with sweeps; don't need to log online
     wandb.init(project=cfg['wandb']['project'],
-               mode='offline' if no_wandb else 'online',
+               mode='offline' if not use_wandb else 'online',
                job_type='eval-fid',
                config={
                     'config': config,

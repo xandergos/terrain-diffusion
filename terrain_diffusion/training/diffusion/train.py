@@ -1,6 +1,5 @@
 from contextlib import contextmanager
 import json
-import catalogue
 import click
 from datetime import datetime
 import numpy as np
@@ -17,7 +16,6 @@ import wandb
 from torch.utils.data import DataLoader
 from terrain_diffusion.training.utils import SerializableEasyDict as EasyDict
 from schedulefree import AdamWScheduleFree
-from terrain_diffusion.training.optim.cadam import CAdamW
 from heavyball.foreach_soap import ForeachSOAP
 from heavyball.foreach_adamw import ForeachAdamW
 from terrain_diffusion.training.diffusion.unet import EDMUnet2D
@@ -98,9 +96,6 @@ def get_optimizer(model, config):
         optimizer = torch.optim.Adam(model.parameters(), **config['optimizer']['kwargs'])
     elif config['optimizer']['type'] == 'heavyball-adam':
         optimizer = ForeachAdamW(model.parameters(), **config['optimizer']['kwargs'])
-    elif config['optimizer']['type'] == 'sf-adam':
-        optimizer = AdamWScheduleFree(model.parameters(), **config['optimizer']['kwargs'])
-        optimizer.eval()
     elif config['optimizer']['type'] == 'soap':
         optimizer = ForeachSOAP(model.parameters(), **config['optimizer']['kwargs'])
     else:
