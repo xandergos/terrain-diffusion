@@ -2,6 +2,7 @@ from collections import defaultdict
 import json
 import click
 from datetime import datetime
+from heavyball import ForeachAdamW, ForeachSOAP
 import numpy as np
 import os
 import torch
@@ -14,47 +15,82 @@ from terrain_diffusion.training.diffusion.registry import build_registry
 from tqdm import tqdm
 import wandb
 from torch.utils.data import DataLoader
-from terrain_diffusion.training.diffusion.unet import DiffusionAutoencoder
-from terrain_diffusion.training.utils import SerializableEasyDict as EasyDict
-from safetensors.torch import load_model
 import lpips
-import torch.nn.functional as F
+from terrain_diffusion.training.diffusion.unet import EDMAutoencoder
+from terrain_diffusion.training.utils import *
+from terrain_diffusion.training.utils import SerializableEasyDict as EasyDict
 
+def get_optimizer(model, config):
+    """Get optimizer based on config settings."""
+    if config['optimizer']['type'] == 'adam':
+        optimizer = torch.optim.Adam(model.parameters(), **config['optimizer']['kwargs'])
+    elif config['optimizer']['type'] == 'heavyball-adam':
+        optimizer = ForeachAdamW(model.parameters(), **config['optimizer']['kwargs'])
+    elif config['optimizer']['type'] == 'soap':
+        optimizer = ForeachSOAP(model.parameters(), **config['optimizer']['kwargs'])
+    else:
+        raise ValueError(f"Unknown optimizer type: {config['optimizer']['type']}")
+    return optimizer
 
-    
-
-@click.command()
-@click.option("-c", "--config", "config_path", type=click.Path(exists=True), required=True)
-@click.option("--ckpt", "ckpt_path", type=click.Path(exists=True), required=False)
-@click.option("--model-ckpt", "model_ckpt_path", type=click.Path(exists=True), required=False)
-@click.option("--debug-run", "debug_run", is_flag=True, default=False)
-@click.option("--reset-state", "reset_state", is_flag=True, default=False)
-def main(config_path, ckpt_path, model_ckpt_path, debug_run, reset_state):
+@click.command(context_settings=dict(ignore_unknown_options=True, allow_extra_args=True))
+@click.option("-c", "--config", "config_path", type=click.Path(exists=True), required=True, help="Path to the configuration file")
+@click.option("--ckpt", "ckpt_path", type=click.Path(exists=True), required=False, help="Path to a checkpoint to resume training from")
+@click.option("--model-ckpt", "model_ckpt_path", type=click.Path(exists=True), required=False, help="Path to a HuggingFace model to initialize weights from")
+@click.option("--debug-run", "debug_run", is_flag=True, default=False, help="Run in debug mode which disables wandb and all file saving")
+@click.option("--resume", "resume_id", type=str, required=False, help="Wandb run ID to resume")
+@click.option("--override", "-o", multiple=True, help="Override config values (format: key.subkey=value)")
+@click.pass_context
+def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, override):
     build_registry()
     
     config = Config().from_disk(config_path) if config_path else None
     
-    # Resolve this later
-    sampler_config = config.get('sampler', None)
-    if sampler_config:
-        del config['sampler']
-            
+    # Handle both explicit overrides and wandb sweep parameters
+    all_overrides = list(override)
+    for param in ctx.args:
+        if param.startswith('--'):
+            key, value = param.lstrip('-').split('=', 1)
+            all_overrides.append(f"{key}={value}")
+    
+    # Apply all config overrides
+    for o in all_overrides:
+        key_path, value = o.split('=', 1)
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            pass
+        set_nested_value(config, key_path, value, o)
+
+    if debug_run:
+        config['wandb']['mode'] = 'disabled'
+    if resume_id:
+        config['wandb']['id'] = resume_id
+        config['wandb']['resume'] = 'must'
+    wandb.init(
+        **config['wandb'],
+        config=config
+    )
+    print("Run ID:", wandb.run.id)
+    
     resolved = registry.resolve(config, validate=False)
 
     # Load anything that needs to be used for training.
     model = resolved['model']
+    assert isinstance(model, EDMAutoencoder), "Currently only EDMAutoencoder is supported for autoencoder training."
     lr_scheduler = resolved['lr_sched']
+    
     train_dataset = resolved['train_dataset']
-    optimizer = torch.optim.Adam(model.parameters(), betas=tuple(config['training'].get('adam_betas', (0.9, 0.999))))
+    val_dataset = resolved['val_dataset']
+    
+    optimizer = get_optimizer(model, config)
     resolved['ema']['checkpoint_folder'] = os.path.join(resolved['logging']['save_dir'], 'phema')
     ema = PostHocEMA(model, **resolved['ema'])
-    if config['training']['disc_weight'] > 0:
-        discriminator = resolved['discriminator']
-        optimizer_d = torch.optim.AdamW(discriminator.parameters(), betas=tuple(config['training'].get('disc_adam_betas', (0.9, 0.999))))
     state = EasyDict({'epoch': 0, 'step': 0, 'seen': 0})
-    dataloader = DataLoader(LongDataset(train_dataset), batch_size=config['training']['train_batch_size'],
-                            **resolved['dataloader_kwargs'])
-    perceptual_loss_fn = lpips.LPIPS(net='alex', spatial=True)
+    dataloader = DataLoader(LongDataset(train_dataset, shuffle=True), batch_size=config['training']['train_batch_size'],
+                            **resolved['dataloader_kwargs'], drop_last=True)
+    val_dataloader = DataLoader(LongDataset(val_dataset, shuffle=True), batch_size=config['training']['train_batch_size'],
+                                **resolved['dataloader_kwargs'], drop_last=True)
+    perceptual_loss = lpips.LPIPS(net='alex', spatial=True)
     
     if model_ckpt_path:
         temp_model_statedict = type(model).from_pretrained(model_ckpt_path).state_dict()
@@ -85,33 +121,18 @@ def main(config_path, ckpt_path, model_ckpt_path, debug_run, reset_state):
         gradient_accumulation_steps=resolved['training']['gradient_accumulation_steps'],
         log_with=None
     )
+    
+    ema = ema.to(accelerator.device)
     model, dataloader, optimizer = accelerator.prepare(model, dataloader, optimizer)
-    perceptual_loss_fn = accelerator.prepare(perceptual_loss_fn)
-    if config['training']['disc_weight'] > 0:
-        discriminator, optimizer_d = accelerator.prepare(discriminator, optimizer_d)
+    perceptual_loss = accelerator.prepare(perceptual_loss)
     accelerator.register_for_checkpointing(state)
     accelerator.register_for_checkpointing(ema)
     
     # Load from checkpoint if needed
     if ckpt_path:
+        torch.serialization.add_safe_globals([np.core.multiarray.scalar])
         accelerator.load_state(ckpt_path)
-    if reset_state:
-        state = EasyDict({'epoch': 0, 'step': 0, 'seen': 0})
     
-    
-    # Save full train config
-    if not debug_run:
-        os.makedirs(os.path.join(resolved['logging']['save_dir'], 'configs'), exist_ok=True)
-        with open(os.path.join(resolved['logging']['save_dir'], 'configs', f'config_{state.seen//1000}kimg.json'), 'w') as f:
-            json.dump(config, f)
-        with open(os.path.join(resolved['logging']['save_dir'], 'configs', f'config_latest.json'), 'w') as f:
-            json.dump(config, f)
-            
-        # Save model config
-        os.makedirs(os.path.join(resolved['logging']['save_dir'], 'configs'), exist_ok=True)
-        model.save_config(os.path.join(resolved['logging']['save_dir'], 'configs', f'model_config_{state.seen//1000}kimg'))
-        model.save_config(os.path.join(resolved['logging']['save_dir'], 'configs', f'model_config_latest'))
-        
     if accelerator.is_main_process:
         if debug_run:
             config['wandb']['mode'] = 'disabled'
@@ -119,20 +140,60 @@ def main(config_path, ckpt_path, model_ckpt_path, debug_run, reset_state):
             **config['wandb'],
             config=config
         )
-        
-    def safe_rmtree(path):
-        """Removes a tree but only checkpoint files."""
-        for fp in os.listdir(path):
-            if os.path.isdir(os.path.join(path, fp)):
-                safe_rmtree(os.path.join(path, fp))
-            else:
-                legal_extensions = ['.bin', '.safetensors', '.pkl', '.pt', '.json', '.md']
-                for ext in legal_extensions:
-                    if fp.endswith(ext):
-                        os.remove(os.path.join(path, fp))
-                        break
-        os.rmdir(path)
 
+    def validate(repeats, dataloader, pbar_title):
+        validation_stats = {
+            'loss': [], 
+            'kl_loss': [], 
+            'rec_mse_loss': [], 
+            'rec_percep_loss': []
+        }
+        pbar = tqdm(total=repeats * len(val_dataset), desc=pbar_title)
+        val_dataloader_iter = iter(dataloader)
+        
+        while pbar.n < pbar.total:
+            batch = next(val_dataloader_iter)
+            images = batch['image']
+            cond_img = batch.get('cond_img')
+            conditional_inputs = batch.get('cond_inputs')
+
+            sigma_data = config['training']['sigma_data']
+            
+            model.eval()
+            with torch.no_grad(), accelerator.autocast():
+                scaled_clean_images = images / sigma_data
+                if cond_img is not None:
+                    scaled_clean_images = torch.cat([scaled_clean_images, cond_img], dim=1)
+                
+                # Encode and decode
+                z_means, z_logvars = model.preencode(scaled_clean_images, conditional_inputs)
+                z = model.postencode(z_means, z_logvars)
+                decoded_x = model.decode(z)
+
+                # Calculate losses
+                images_std = torch.std(images, dim=[1, 2, 3], keepdim=True) + config['training'].get('mse_scale_eps', 1e-2)
+                rec_mse_loss = ((decoded_x / images_std - scaled_clean_images / images_std) ** 2).mean()
+                
+                rec_percep_loss = percep_loss_fn(decoded_x, scaled_clean_images)
+                kl_loss = -0.5 * torch.mean(1 + z_logvars - z_means**2 - z_logvars.exp())
+                
+                # Combine losses with weights
+                loss = (config['training']['mse_weight'] * rec_mse_loss + 
+                       config['training']['percep_weight'] * rec_percep_loss + 
+                       config['training']['kl_weight'] * kl_loss)
+
+            # Record statistics
+            validation_stats['loss'].append(loss.item())
+            validation_stats['kl_loss'].append(kl_loss.item())
+            validation_stats['rec_mse_loss'].append(rec_mse_loss.item())
+            validation_stats['rec_percep_loss'].append(rec_percep_loss.item())
+            
+            pbar.update(images.shape[0])
+            pbar.set_postfix({k: f"{np.mean(v):.4f}" for k, v in validation_stats.items()})
+        
+        # Return average losses
+        return {k: np.mean(v) for k, v in validation_stats.items()}
+    
     def save_checkpoint(base_folder_path, overwrite=False):
         if os.path.exists(base_folder_path + '_checkpoint') and not overwrite:
             strtime = datetime.now().strftime("_%Y%m%d_%H%M%S")
@@ -140,11 +201,17 @@ def main(config_path, ckpt_path, model_ckpt_path, debug_run, reset_state):
         elif os.path.exists(base_folder_path + '_checkpoint'):
             safe_rmtree(base_folder_path + '_checkpoint')
         os.makedirs(base_folder_path + '_checkpoint', exist_ok=False)
-        accelerator.save_state(base_folder_path + '_checkpoint')
         
+        accelerator.save_state(base_folder_path + '_checkpoint')
         torch.save(ema.state_dict(), os.path.join(base_folder_path + '_checkpoint', 'phema.pt'))
+        
+        # Save full train config and model config
+        with open(os.path.join(base_folder_path + '_checkpoint', f'config.json'), 'w') as f:
+            json.dump(config, f, indent=2)
+        model.save_config(os.path.join(base_folder_path + '_checkpoint', f'model_config'))
 
     dataloader_iter = iter(dataloader)
+    grad_norm = 0.0
     while state.epoch < config['training']['epochs']:
         stats_hist = defaultdict(list)
         progress_bar = tqdm(dataloader_iter, desc=f"Epoch {state.epoch}", total=config['training']['epoch_steps'])
@@ -161,104 +228,89 @@ def main(config_path, ckpt_path, model_ckpt_path, debug_run, reset_state):
                 if cond_img is not None:
                     scaled_clean_images = torch.cat([scaled_clean_images, cond_img], dim=1)
                 
-                if state.step % 2 != 0 and config['training']['disc_weight'] > 0:
-                    with torch.no_grad():
-                        z_means, z_logvars = model.preencode(scaled_clean_images, conditional_inputs)
-                        z = model.postencode(z_means, z_logvars)
-                        decoded_x = model.decode(z)
-                else:
-                    z_means, z_logvars = model.preencode(scaled_clean_images, conditional_inputs)
-                    z = model.postencode(z_means, z_logvars)
-                    decoded_x = model.decode(z)
-                
+                z_means, z_logvars = model.preencode(scaled_clean_images, conditional_inputs)
+                z = model.postencode(z_means, z_logvars)
+                decoded_x = model.decode(z)
+
                 def percep_loss_fn(reconstruction, reference):
                     ref_min = torch.amin(reference, dim=(1, 2, 3), keepdim=True)
                     ref_max = torch.amax(reference, dim=(1, 2, 3), keepdim=True)
-                    eps = 1e-4
+                    eps = 0.1
                     
-                    normalized_ref = ((reference - ref_min) / (ref_max - ref_min + eps) * 2 - 1) * 0.9
-                    normalized_rec = ((reconstruction - ref_min) / (ref_max - ref_min + eps) * 2 - 1) * 0.9
+                    ref_range = torch.maximum((ref_max - ref_min) * 1.1, torch.tensor(eps))
+                    ref_center = (ref_min + ref_max) / 2
+                    
+                    normalized_ref = ((reference - ref_center) / ref_range * 2)
+                    normalized_rec = ((reconstruction - ref_center) / ref_range * 2)
                     normalized_rec = normalized_rec.clamp(-1, 1)
                     
-                    rec_perceptual_loss = perceptual_loss_fn(normalized_ref.repeat(1, 3, 1, 1), normalized_rec.repeat(1, 3, 1, 1))
+                    rec_perceptual_loss = perceptual_loss(normalized_ref.repeat(1, 3, 1, 1), normalized_rec.repeat(1, 3, 1, 1))
                     return rec_perceptual_loss.mean()
-
-                if state.step % 2 != 0 and config['training']['disc_weight'] > 0:  # Update discriminator
-                    if config['training']['lambda_gp'] > 0:
-                        scaled_clean_images.requires_grad_(True)
-                    real_output = torch.mean(discriminator(scaled_clean_images).view(scaled_clean_images.size(0), -1), dim=1)
-                    fake_output = torch.mean(discriminator(decoded_x.detach()).view(decoded_x.size(0), -1), dim=1)
-                    
-                    # Compute main gradients
-                    d_loss = torch.mean(F.relu(1 - real_output) + F.relu(1 + fake_output))
-                    optimizer_d.zero_grad()
-                    accelerator.backward(d_loss, retain_graph=True)
-                    
-                    # R1 gradient penalty for real inputs
-                    if config['training']['lambda_gp'] > 0:
-                        batch_size = scaled_clean_images.size(0)
-                        gradients = torch.autograd.grad(outputs=real_output.sum(), inputs=scaled_clean_images,
-                                                        create_graph=True, retain_graph=True, only_inputs=True)[0]
-                        gradient_penalty = gradients.pow(2).view(batch_size, -1).sum(1)
-                        lambda_gp = config['training']['lambda_gp']
-                        accelerator.backward(lambda_gp * gradient_penalty.mean())
-                    
-                    optimizer_d.step()
-                else:
-                    rec_mse_loss = (1 / sigma_data ** 2) * (decoded_x - scaled_clean_images) ** 2
-                    rec_mse_loss = rec_mse_loss.mean()
-                    mse_weight = config['training']['mse_weight']
-                    rec_percep_loss = percep_loss_fn(decoded_x, scaled_clean_images)
-                    percep_weight = config['training']['percep_weight']
-                    kl_loss = -0.5 * torch.mean(1 + z_logvars - z_means**2 - z_logvars.exp())
-                    kl_weight = config['training']['kl_weight']
-                    
-                    if config['training']['disc_weight'] > 0:
-                        disc_output = torch.mean(discriminator(decoded_x).view(decoded_x.size(0), -1), dim=1)
-                        g_loss = torch.mean(F.relu(1 - disc_output))
-                        g_weight = config['training']['disc_weight']
-                    else:
-                        g_loss = 0
-                        g_weight = 0
-                    
-                    loss = mse_weight * rec_mse_loss + percep_weight * rec_percep_loss + kl_weight * kl_loss + g_weight * g_loss
-                    
-                    optimizer.zero_grad()
-                    accelerator.backward(loss)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=config['training'].get('gradient_clip_val', 1.0))
-                    optimizer.step()
-
+                
+                # Scaling MSE loss so large scale images don't dominate
+                images_std = torch.maximum(torch.std(images, dim=[1, 2, 3], keepdim=True) / sigma_data, torch.tensor(0.1))
+                rec_mse_loss = ((decoded_x - scaled_clean_images) / images_std) ** 2
+                rec_mse_loss = rec_mse_loss.mean()
+                
+                rec_percep_loss = percep_loss_fn(decoded_x, scaled_clean_images)
+                
+                kl_loss = -0.5 * torch.mean(1 + z_logvars - z_means**2 - z_logvars.exp())
+                
+                percep_weight = config['training']['percep_weight']
+                mse_weight = config['training']['mse_weight']
+                kl_weight = config['training']['kl_weight']
+                
+                loss = mse_weight * rec_mse_loss + percep_weight * rec_percep_loss + kl_weight * kl_loss
+                
                 state.seen += images.shape[0]
                 state.step += 1
                 lr = lr_scheduler.get(state.seen)
                 for g in optimizer.param_groups:
                     g['lr'] = lr
-                if config['training']['disc_weight'] > 0:
-                    for g in optimizer_d.param_groups:
-                        g['lr'] = lr * config['training']['disc_lr_mult']
+                    
+                optimizer.zero_grad()
+                accelerator.backward(loss)
+                if accelerator.sync_gradients:
+                    grad_norm = accelerator.clip_grad_norm_(model.parameters(), max_norm=config['training'].get('gradient_clip_val', 100.0)).item()
+                optimizer.step()
 
             if accelerator.is_main_process:
                 ema.update()
 
-            if state.step % 2 == 0 or config['training']['disc_weight'] == 0:
-                stats_hist['loss'].append(loss.item())
-                stats_hist['kl_loss'].append(kl_loss.item())
-                stats_hist['rec_mse_loss'].append(rec_mse_loss.item())
-                stats_hist['rec_percep_loss'].append(rec_percep_loss.item())
-                stats_hist['d_loss'].append(d_loss.item() if config['training']['disc_weight'] > 0 else float('nan'))
-                stats_hist['g_loss'].append(g_loss.item() if config['training']['disc_weight'] > 0 else float('nan'))
-                progress_bar.set_postfix({'loss': np.mean(stats_hist['loss']), 
-                                        'rec_mse_loss': np.mean(stats_hist['rec_mse_loss']),
-                                        'rec_percep_loss': np.mean(stats_hist['rec_percep_loss']),
-                                        'kl_loss': np.mean(stats_hist['kl_loss']),
-                                        'd_loss': np.mean(stats_hist['d_loss']),
-                                        'g_loss': np.mean(stats_hist['g_loss']),
-                                        "lr": lr})
+            stats_hist['loss'].append(loss.item())
+            stats_hist['kl_loss'].append(kl_loss.item())
+            stats_hist['rec_mse_loss'].append(rec_mse_loss.item())
+            stats_hist['rec_percep_loss'].append(rec_percep_loss.item())
+            stats_hist['grad_norm'].append(grad_norm)
+            progress_bar.set_postfix({'loss': np.mean(stats_hist['loss']), 
+                                    'rec_mse_loss': np.mean(stats_hist['rec_mse_loss']),
+                                    'rec_percep_loss': np.mean(stats_hist['rec_percep_loss']),
+                                    'kl_loss': np.mean(stats_hist['kl_loss']),
+                                    "lr": lr,
+                                    "grad_norm": grad_norm})
             progress_bar.update(1)
+            
+        progress_bar.close()
 
+        val_losses = None
+        eval_losses = None
+        if config['evaluation']['validate_epochs'] > 0 and (state.epoch + 1) % config['evaluation']['validate_epochs'] == 0:
+            if config['evaluation'].get('val_ema_idx', -1) >= 0 and config['evaluation']['val_ema_idx'] < len(ema.ema_models):
+                with temporary_ema_to_model(ema.ema_models[config['evaluation']['val_ema_idx']]):
+                    val_losses = validate(config['evaluation']['validation_repeats'], val_dataloader, "Validation Loss")
+                    if config['evaluation'].get('training_eval', False):
+                        eval_losses = validate(config['evaluation']['validation_repeats'], dataloader, "Eval Loss")
+            else:
+                if config['evaluation'].get('val_ema_idx', -1) >= 0:
+                    warnings.warn(f"Invalid val_ema_idx: {config['evaluation']['val_ema_idx']}. "
+                                  "Falling back to using the model's parameters.")
+                val_losses = validate(config['evaluation']['validation_repeats'], val_dataloader, "Validation Loss")
+                if config['evaluation'].get('training_eval', False):
+                    eval_losses = validate(config['evaluation']['validation_repeats'], dataloader, "Eval Loss")
+                    
         state.epoch += 1
         if accelerator.is_main_process:
-            wandb.log({
+            wandb_logs = {
                 "loss": np.mean(stats_hist['loss']),
                 "kl_loss": np.mean(stats_hist['kl_loss']),
                 "rec_mse_loss": np.mean(stats_hist['rec_mse_loss']),
@@ -267,7 +319,14 @@ def main(config_path, ckpt_path, model_ckpt_path, debug_run, reset_state):
                 "step": state.step,
                 "epoch": state.epoch,
                 "seen": state.seen
-            }, step=state.epoch)
+            }
+            if val_losses:
+                val_losses = {f"val_{k}": v for k, v in val_losses.items()}
+                wandb_logs.update(val_losses)
+            if eval_losses:
+                eval_losses = {f"eval_{k}": v for k, v in eval_losses.items()}
+                wandb_logs.update(eval_losses)
+            wandb.log(wandb_logs, step=state.epoch)
             if state.epoch % config['logging']['temp_save_epochs'] == 0 and not debug_run:
                 save_checkpoint(f"{config['logging']['save_dir']}/latest", overwrite=True)
             if state.epoch % config['logging']['save_epochs'] == 0 and not debug_run:

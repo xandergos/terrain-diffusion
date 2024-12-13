@@ -38,7 +38,7 @@ def preprocess_elevation(img):
 
 @click.command()
 @click.option('--base-resolution', default=240, help='Resolution input images are in meters')
-@click.option('--target-resolution', default=240, help='Resolution output images should be in meters')
+@click.option('--target-resolution', default=480, help='Resolution output images should be in meters')
 @click.option('--chunk-size', default=2048, help='Size of chunks to write to HDF5 file')
 @click.option('--lapl-enc-resize', default=8, help='How much to downsample the input image for the low-res channel')
 @click.option('--lapl-enc-sigma', default=5, help='Amount to blur the low-res channel')
@@ -51,7 +51,7 @@ def preprocess_elevation(img):
 @click.option('--encoder-model-path', required=True, help='Path to encoder model checkpoint')
 @click.option('--use-fp16', is_flag=True, help='Use FP16 for encoding', default=False)
 @click.option('--compile-model', is_flag=True, help='Compile the model', default=False)
-def process_dataset(base_resolution, target_resolution, chunk_size, lapl_enc_resize, lapl_enc_sigma, lapl_enc_lowres_mean, lapl_enc_lowres_std, 
+def process_encoded_dataset(base_resolution, target_resolution, chunk_size, lapl_enc_resize, lapl_enc_sigma, lapl_enc_lowres_mean, lapl_enc_lowres_std, 
                    lapl_enc_highres_mean, lapl_enc_highres_std, output_file, elevation_folder, encoder_model_path, use_fp16, compile_model):
     """
     Process elevation dataset into encoded HDF5 format.
@@ -88,7 +88,7 @@ def process_dataset(base_resolution, target_resolution, chunk_size, lapl_enc_res
             img = tiff.imread(os.path.join(elevation_folder, file)).astype(np.float32)
             img = preprocess_elevation(img)
             
-            downsample_factor = base_resolution // target_resolution
+            downsample_factor = target_resolution // base_resolution
             img = F.adaptive_avg_pool2d(torch.from_numpy(img)[None], (img.shape[0] // downsample_factor, img.shape[1] // downsample_factor))
             
             # Calculate number of chunks needed
@@ -159,4 +159,4 @@ def process_dataset(base_resolution, target_resolution, chunk_size, lapl_enc_res
         print(f"Finished processing. Total datasets in file: {len(f.keys())}")
         
 if __name__ == '__main__':
-    process_dataset()
+    process_encoded_dataset()

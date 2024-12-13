@@ -17,7 +17,7 @@ def split_dataset(dataset_file, val_pct=0.2, seed=68197):
     filenames = set()
     with h5py.File(dataset_file, 'a') as f:
         for key in f.keys():
-            filenames.add(f[key].attrs['filename'])
+            filenames.add(f[key].attrs['filename'] + '$' + str(f[key].attrs['chunk_id']))
 
         filenames = list(filenames)
         filenames.sort()
