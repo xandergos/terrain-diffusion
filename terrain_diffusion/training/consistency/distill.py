@@ -1,10 +1,8 @@
-from functools import partial
 import click
+from heavyball import ForeachAdamW, ForeachSOAP
 import torch
-import torch.nn as nn
 import numpy as np
 import json
-import catalogue
 import click
 from datetime import datetime
 import numpy as np
@@ -19,9 +17,28 @@ from terrain_diffusion.training.diffusion.registry import build_registry
 from tqdm import tqdm
 import wandb
 from torch.utils.data import DataLoader
-from schedulefree import ScheduleFreeWrapper, AdamWScheduleFree
 from terrain_diffusion.training.utils import SerializableEasyDict as EasyDict
 from terrain_diffusion.training.diffusion.unet import EDMUnet2D
+
+def get_optimizer(model, config):
+    """Get optimizer based on config settings.
+    
+    Args:
+        model: The model whose parameters will be optimized
+        config: Configuration dictionary containing optimizer settings
+        
+    Returns:
+        torch.optim.Optimizer: The configured optimizer
+    """
+    if config['optimizer']['type'] == 'adam':
+        optimizer = torch.optim.Adam(model.parameters(), **config['optimizer']['kwargs'])
+    elif config['optimizer']['type'] == 'heavyball-adam':
+        optimizer = ForeachAdamW(model.parameters(), **config['optimizer']['kwargs'])
+    elif config['optimizer']['type'] == 'soap':
+        optimizer = ForeachSOAP(model.parameters(), **config['optimizer']['kwargs'])
+    else:
+        raise ValueError(f"Unknown optimizer type: {config['optimizer']['type']}")
+    return optimizer
 
 @click.command()
 @click.option("-c", "--config", "config_path", type=click.Path(exists=True), required=True)
@@ -47,13 +64,8 @@ def distill(config_path, ckpt_path, debug_run, resume_id):
     
     train_dataset = resolved['train_dataset']
     
-    if resolved['optimizer']['type'] == 'adam':
-        optimizer = torch.optim.Adam(model.parameters(), **resolved['optimizer']['kwargs'])
-        sf_optim = False
-    elif resolved['optimizer']['type'] == 'sf-adam':
-        optimizer = AdamWScheduleFree(model.parameters(), **resolved['optimizer']['kwargs'])
-        optimizer.eval()
-        sf_optim = True
+    optimizer = get_optimizer(model, resolved)
+    
     resolved['ema']['checkpoint_folder'] = os.path.join(resolved['logging']['save_dir'], 'phema')
     ema = PostHocEMA(model, **resolved['ema'])
     state = EasyDict({'epoch': 0, 'step': 0, 'seen': 0})
@@ -148,8 +160,6 @@ def distill(config_path, ckpt_path, debug_run, resume_id):
                     dxt_dt = sigma_data * -pretrain_pred
 
                 # Calculate current model prediction
-                if sf_optim:
-                    optimizer.train()
                 with accelerator.autocast():
                     def model_wrapper(scaled_x_t, t):
                         if cond_img is not None:
@@ -202,8 +212,6 @@ def distill(config_path, ckpt_path, debug_run, resume_id):
                 optimizer.step()
                 model.norm_weights()
                 if accelerator.is_main_process:
-                    if sf_optim:
-                        optimizer.eval()
                     ema.update()
 
                 stats_hist['loss'].append(loss.item())
@@ -222,8 +230,6 @@ def distill(config_path, ckpt_path, debug_run, resume_id):
                 "epoch": state.epoch,
                 "seen": state.seen
             }, step=state.epoch)
-            if sf_optim:
-                optimizer.eval()
             if state.epoch % config['logging']['temp_save_epochs'] == 0:
                 save_checkpoint(f"{config['logging']['save_dir']}/latest", overwrite=True)
             if state.epoch % config['logging']['save_epochs'] == 0:
