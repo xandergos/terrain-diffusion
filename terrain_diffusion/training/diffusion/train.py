@@ -14,82 +14,18 @@ from terrain_diffusion.training.diffusion.registry import build_registry
 from tqdm import tqdm
 import wandb
 from torch.utils.data import DataLoader
-from terrain_diffusion.training.utils import SerializableEasyDict as EasyDict
 from schedulefree import AdamWScheduleFree
 from heavyball.foreach_soap import ForeachSOAP
 from heavyball.foreach_adamw import ForeachAdamW
 from terrain_diffusion.training.diffusion.unet import EDMUnet2D
 import torch._dynamo.config
 import torch._inductor.config
+from terrain_diffusion.training.utils import *
+from terrain_diffusion.training.utils import SerializableEasyDict as EasyDict
 
 from PIL import Image
 import warnings
-    
-@contextmanager
-def temporary_ema_to_model(ema_model):
-    """
-    Context manager that temporarily transfers EMA parameters to the model
-    and restores the original model parameters afterwards.
-    
-    Usage:
-        with ema.temporary_ema_to_model(ema_model):
-            # Model temporarily has EMA parameters here
-            result = model(input)
-        # Original model parameters are restored here
-    """
-    # Store original parameters
-    model_state = {
-        name: param.data.to(device='cpu', copy=True)
-        for name, param in ema_model.get_params_iter(ema_model.model)
-    }
-    model_buffers = {
-        name: buffer.data.to(device='cpu', copy=True)
-        for name, buffer in ema_model.get_buffers_iter(ema_model.model)
-    }
 
-    # Copy EMA parameters to model
-    ema_model.copy_params_from_ema_to_model()
-
-    try:
-        yield
-    finally:
-        # Restore original parameters
-        for (name, param) in ema_model.get_params_iter(ema_model.model):
-            param.data.copy_(model_state[name])
-        for (name, buffer) in ema_model.get_buffers_iter(ema_model.model):
-            buffer.data.copy_(model_buffers[name])
-
-def safe_rmtree(path):
-    """Removes a tree but only checkpoint files."""
-    for fp in os.listdir(path):
-        if os.path.isdir(os.path.join(path, fp)):
-            safe_rmtree(os.path.join(path, fp))
-        else:
-            legal_extensions = ['.bin', '.safetensors', '.pkl', '.pt', '.json', '.md']
-            for ext in legal_extensions:
-                if fp.endswith(ext):
-                    os.remove(os.path.join(path, fp))
-                    break
-    os.rmdir(path)
-
-def set_nested_value(config, key_path, value, original_override):
-    """Set a value in nested config dict, warning if key path doesn't exist."""
-    keys = key_path.split('.')
-    current = config
-    
-    # Check if the full path exists before modifying
-    try:
-        for key in keys[:-1]:
-            if key not in current:
-                warnings.warn(f"Creating new config section '{key}' from override: {original_override}")
-                current[key] = {}
-            current = current[key]
-        
-        if keys[-1] not in current:
-            warnings.warn(f"Creating new config value '{key_path}' from override: {original_override}")
-        current[keys[-1]] = value
-    except (KeyError, TypeError) as e:
-        warnings.warn(f"Failed to apply override '{original_override}': {str(e)}")
         
 def get_optimizer(model, config):
     if config['optimizer']['type'] == 'adam':
@@ -99,7 +35,7 @@ def get_optimizer(model, config):
     elif config['optimizer']['type'] == 'soap':
         optimizer = ForeachSOAP(model.parameters(), **config['optimizer']['kwargs'])
     else:
-        raise ValueError(f"Unknown optimizer type: {config['optimizer']['type']}")
+        raise ValueError(f"Invalid optimizer type: {config['optimizer']['type']}. Options are 'adam', 'heavyball-adam', and 'soap'.")
     return optimizer
 
 @click.command(context_settings=dict(ignore_unknown_options=True, allow_extra_args=True))
@@ -218,7 +154,11 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
             conditional_inputs = batch.get('cond_inputs')
             
             sigma = torch.randn(images.shape[0], device=images.device, generator=generator).reshape(-1, 1, 1, 1)
-            sigma = (sigma * config['training']['P_std'] + config['training']['P_mean']).exp()
+            sigma = (sigma * config['evaluation']['P_std'] + config['evaluation']['P_mean']).exp()
+            
+            if config['evaluation'].get('scale_sigma', False):
+                sigma = sigma * torch.maximum(torch.std(images, dim=[1, 2, 3], keepdim=True) / sigma_data, config['evaluation'].get('sigma_scale_eps', 1e-2))
+            
             sigma_data = scheduler.config.sigma_data
             t = torch.atan(sigma / sigma_data)
             cnoise = t.flatten()
@@ -230,8 +170,6 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
             if cond_img is not None:
                 x = torch.cat([x, cond_img], dim=1)
                 
-            if isinstance(optimizer, AdamWScheduleFree):
-                optimizer.eval()
             model.eval()
             with torch.no_grad(), accelerator.autocast():
                 model_output, logvar = model(x, noise_labels=cnoise, conditional_inputs=conditional_inputs, return_logvar=True)
@@ -279,6 +217,9 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
                     
                     sigma = torch.randn(images.shape[0], device=images.device).reshape(-1, 1, 1, 1)
                     sigma = (sigma * config['training']['P_std'] + config['training']['P_mean']).exp()
+                    if config['training'].get('scale_sigma', False):
+                        sigma = sigma * torch.maximum(torch.std(images, dim=[1, 2, 3], keepdim=True) / sigma_data, config['training'].get('sigma_scale_eps', 1e-2))
+                
                     sigma_data = scheduler.config.sigma_data
                     t = torch.atan(sigma / sigma_data)
                     cnoise = t.flatten()
@@ -315,8 +256,6 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
                 optimizer.step()
 
             if accelerator.is_main_process:
-                if isinstance(optimizer, AdamWScheduleFree):
-                    optimizer.eval()
                 ema.update()
 
             stats_hist['loss'].append(loss.item())
@@ -357,8 +296,6 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
             if eval_loss is not None:
                 log_values['eval_loss'] = eval_loss
             wandb.log(log_values, step=state.epoch, commit=True)
-            if isinstance(optimizer, AdamWScheduleFree):
-                optimizer.eval()
             if state.epoch % config['logging']['temp_save_epochs'] == 0 and not debug_run:
                 save_checkpoint(f"{config['logging']['save_dir']}/latest", overwrite=True)
             if state.epoch % config['logging']['save_epochs'] == 0 and not debug_run:

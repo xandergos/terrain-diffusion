@@ -5,8 +5,8 @@ from terrain_diffusion.training.consistency.distill import distill as distill_ma
 from terrain_diffusion.training.save_model import save_model as save_model_main
 from terrain_diffusion.inference.evaluation.evaluate_sr_fid import evaluate_sr_fid_cli as evaluate_sr_fid_main
 from terrain_diffusion.inference.evaluation.evaluate_sr_fid_consistency import evaluate_sr_fid as evaluate_sr_fid_consistency_main
-from terrain_diffusion.data.preprocessing.build_base_dataset import process_dataset as build_base_dataset_main
-from terrain_diffusion.data.preprocessing.build_encoded_dataset import process_dataset as build_encoded_dataset_main
+from terrain_diffusion.data.preprocessing.build_base_dataset import process_base_dataset as build_base_dataset_main
+from terrain_diffusion.data.preprocessing.build_encoded_dataset import process_encoded_dataset as build_encoded_dataset_main
 from terrain_diffusion.data.preprocessing.define_splits import split_dataset as define_splits_main
 
 @click.group()

@@ -33,6 +33,7 @@ from terrain_diffusion.training.utils import recursive_to
 @click.command()
 @click.option("--config", type=click.Path(exists=True), required=True, help="Path to consistency distillation config")
 @click.option("--sigma-rel", type=float, default=0.05, help="EMA sigma_rel for model")
+@click.option("--ema-step", type=int, default=None, help="EMA step for model", required=False)
 @click.option("--intermediate-timestep", type=float, default=1.1, help="Intermediate timestep for consistency model")
 @click.option("--log-samples", type=int, default=2048, help="Number of samples to generate between logs (minimum 2048)")
 @click.option("--max-samples", type=int, default=2048*16, help="Max number of samples to generate")
@@ -41,7 +42,7 @@ from terrain_diffusion.training.utils import recursive_to
 @click.option("--use-wandb", is_flag=True, help="Use wandb logging")
 @click.option("--save-samples-dir", type=click.Path(file_okay=False, writable=True), help="Directory to save generated samples", default=None)
 @click.option("--fp16", is_flag=True, help="Use FP16", default=False)
-def evaluate_sr_fid(config, sigma_rel, intermediate_timestep,
+def evaluate_sr_fid(config, sigma_rel, ema_step, intermediate_timestep,
                    log_samples, max_samples, batch_size, cpu, use_wandb, save_samples_dir, fp16):
     """Generate samples using consistency model and calculate FID score."""
     # Load configs and build registry
@@ -60,6 +61,7 @@ def evaluate_sr_fid(config, sigma_rel, intermediate_timestep,
                config={
                     'config': config,
                     'sigma_rel': sigma_rel,
+                    'ema_step': ema_step,
                     'intermediate_timestep': intermediate_timestep,
                     'log_samples': log_samples,
                     'max_samples': max_samples,
@@ -80,7 +82,7 @@ def evaluate_sr_fid(config, sigma_rel, intermediate_timestep,
     
     ema = PostHocEMA(model, **resolved['ema'])
     ema.load_state_dict(torch.load(f"{cfg['logging']['save_dir']}/latest_checkpoint/phema.pt"))
-    ema.synthesize_ema_model(sigma_rel=sigma_rel).copy_params_from_ema_to_model()
+    ema.synthesize_ema_model(sigma_rel=sigma_rel, step=ema_step).copy_params_from_ema_to_model()
     del ema
     
     # Initialize dataset and dataloader
