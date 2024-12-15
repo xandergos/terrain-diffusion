@@ -156,10 +156,11 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
             sigma = torch.randn(images.shape[0], device=images.device, generator=generator).reshape(-1, 1, 1, 1)
             sigma = (sigma * config['evaluation']['P_std'] + config['evaluation']['P_mean']).exp()
             
-            if config['evaluation'].get('scale_sigma', False):
-                sigma = sigma * torch.maximum(torch.std(images, dim=[1, 2, 3], keepdim=True) / sigma_data, config['evaluation'].get('sigma_scale_eps', 1e-2))
-            
             sigma_data = scheduler.config.sigma_data
+            if config['evaluation'].get('scale_sigma', False):
+                sigma = sigma * torch.maximum(torch.std(images, dim=[1, 2, 3], keepdim=True) / sigma_data, 
+                                              torch.tensor(config['evaluation'].get('sigma_scale_eps', 0.05), device=images.device))
+            
             t = torch.atan(sigma / sigma_data)
             cnoise = t.flatten()
             
@@ -217,10 +218,12 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
                     
                     sigma = torch.randn(images.shape[0], device=images.device).reshape(-1, 1, 1, 1)
                     sigma = (sigma * config['training']['P_std'] + config['training']['P_mean']).exp()
-                    if config['training'].get('scale_sigma', False):
-                        sigma = sigma * torch.maximum(torch.std(images, dim=[1, 2, 3], keepdim=True) / sigma_data, config['training'].get('sigma_scale_eps', 1e-2))
-                
+                    
                     sigma_data = scheduler.config.sigma_data
+                    if config['training'].get('scale_sigma', False):
+                        sigma = sigma * torch.maximum(torch.std(images, dim=[1, 2, 3], keepdim=True) / sigma_data, 
+                                                      torch.tensor(config['training'].get('sigma_scale_eps', 0.05), device=images.device))
+                
                     t = torch.atan(sigma / sigma_data)
                     cnoise = t.flatten()
                 
