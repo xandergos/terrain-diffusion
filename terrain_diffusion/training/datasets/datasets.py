@@ -89,8 +89,6 @@ class H5AutoencoderDataset(Dataset):
                     if pct_land_valid and resolution_valid and split_valid:
                         self.keys[i].add((dset.attrs['filename'], dset.attrs['resolution'], dset.attrs['chunk_id']))
         self.keys = [list(keys) for keys in self.keys]
-        
-        self.dummy_data = None
 
     def __len__(self):
         return max(len(keys) for keys in self.keys)
@@ -104,24 +102,24 @@ class H5AutoencoderDataset(Dataset):
         file, res, chunk_id = self.keys[subset_idx][index]
         key = '$'.join([file, f'{res}m', chunk_id, 'highfreq'])
         
-        if self.dummy_data is None:
-            with h5py.File(self.h5_file, 'r') as f:
-                self.dummy_data = torch.from_numpy(f[key][:1, :, :])
                 
-        if not self.eval_dataset:
-            i, j, h, w = T.RandomCrop.get_params(self.dummy_data, output_size=(self.crop_size, self.crop_size))
-        else:
-            i, j = (self.dummy_data.shape[-2] - self.crop_size) // 2, (self.dummy_data.shape[-1] - self.crop_size) // 2
-            h, w = self.crop_size, self.crop_size
-            
-        transform_idx = random.randrange(8) if not self.eval_dataset else 0
-        flip = (transform_idx // 4) == 1
-        rotate_k = transform_idx % 4
-            
         with h5py.File(self.h5_file, 'r') as f:
+            data_shape = f[key].shape
+            if not self.eval_dataset:
+                i = random.randint(0, data_shape[-2] - self.crop_size)
+                j = random.randint(0, data_shape[-1] - self.crop_size)
+                h, w = self.crop_size, self.crop_size
+            else:
+                i, j = (data_shape[-2] - self.crop_size) // 2, (data_shape[-1] - self.crop_size) // 2
+                h, w = self.crop_size, self.crop_size
+                
+            transform_idx = random.randrange(8) if not self.eval_dataset else 0
+            flip = (transform_idx // 4) == 1
+            rotate_k = transform_idx % 4
+            
             data = torch.from_numpy(f[key][:, i:i+h, j:j+w])
             
-        assert data.shape[-1] > 0, f"Crop is empty. i: {i}, j: {j}, h: {h}, w: {w}"
+        assert data.shape[-1] > 0, f"Crop is empty. i: {i}, j: {j}, h: {h}, w: {w}, image shape: {data_shape}"
             
         # Apply transforms
         if flip:
@@ -186,7 +184,7 @@ class H5SuperresTerrainDataset(Dataset):
         
         self.keys = [set() for _ in range(num_subsets)]
         with h5py.File(self.h5_file, 'r') as f:
-            assert f"split:{split}" in f.attrs, f"Split '{split}' not found in dataset."
+            assert split is None or f"split:{split}" in f.attrs, f"Split '{split}' not found in dataset."
             for i, (pct_land_range, res) in enumerate(zip(pct_land_ranges, subset_resolutions)):
                 if pct_land_range is None:
                     pct_land_range = [0, 1]
@@ -217,23 +215,25 @@ class H5SuperresTerrainDataset(Dataset):
         key_latent = base_key + '$latent'
         key_highfreq = base_key + '$highfreq'
         
-        if self.dummy_data_latent is None:
-            with h5py.File(self.h5_file, 'r') as f:
-                self.dummy_data_latent = torch.from_numpy(f[key_latent][0, :1, :, :])
-                self.dummy_data_highfreq = torch.from_numpy(f[key_highfreq][:1, :, :])
-                
-        upscale_factor = self.dummy_data_highfreq.shape[1] // self.dummy_data_latent.shape[1]
+        with h5py.File(self.h5_file, 'r') as f:
+            latent_shape = f[key_latent].shape
+            highfreq_shape = f[key_highfreq].shape
+            
+        upscale_factor = highfreq_shape[1] // latent_shape[2]
         latent_crop_size = self.crop_size // upscale_factor
+        
         if not self.eval_dataset:
             if self.clip_edges:
-                i, j, h, w = T.RandomCrop.get_params(self.dummy_data_latent[:, 1:-1, 1:-1], output_size=(latent_crop_size, latent_crop_size))
-                i, j = i + 1, j + 1
+                i = random.randint(1, latent_shape[2] - latent_crop_size - 1)
+                j = random.randint(1, latent_shape[3] - latent_crop_size - 1)
             else:
-                i, j, h, w = T.RandomCrop.get_params(self.dummy_data_latent, output_size=(latent_crop_size, latent_crop_size))
+                i = random.randint(0, latent_shape[2] - latent_crop_size)
+                j = random.randint(0, latent_shape[3] - latent_crop_size)
         else:
-            i, j = (self.dummy_data_latent.shape[-2] - latent_crop_size) // 2, (self.dummy_data_latent.shape[-1] - latent_crop_size) // 2
-            h, w = latent_crop_size, latent_crop_size
+            i = (latent_shape[2] - latent_crop_size) // 2
+            j = (latent_shape[3] - latent_crop_size) // 2
             
+        h = w = latent_crop_size
         li, lj, lh, lw = i * upscale_factor, j * upscale_factor, h * upscale_factor, w * upscale_factor
             
         transform_idx = random.randrange(8) if not self.eval_dataset else 0
@@ -242,9 +242,9 @@ class H5SuperresTerrainDataset(Dataset):
         
         # Adjust highfreq crop for flips and rotations. Note that we are inverting the transformation so we do it in reverse.
         for _ in range(rotate_k):
-            li, lj = lj, self.dummy_data_highfreq.shape[-1] - li - lh
+            li, lj = lj, highfreq_shape[2] - li - lh
         if flip:
-            lj = self.dummy_data_highfreq.shape[-1] - lj - lw
+            lj = highfreq_shape[2] - lj - lw
             
         with h5py.File(self.h5_file, 'r') as f:
             data_latent = torch.from_numpy(f[key_latent][transform_idx, :, i:i+h, j:j+w])

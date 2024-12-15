@@ -52,8 +52,9 @@ def distill(config_path, ckpt_path, debug_run, resume_id):
     resolved = registry.resolve(config, validate=False)
 
     # Load anything that needs to be used for training.
-    model_pretrained = EDMUnet2D.from_pretrained(resolved['model']['path'])
-    model = EDMUnet2D.from_pretrained(resolved['model']['path'])
+    model_m_pretrained = EDMUnet2D.from_pretrained(resolved['model']['main_path'])
+    model_g_pretrained = EDMUnet2D.from_pretrained(resolved['model']['guide_path'])
+    model = EDMUnet2D.from_pretrained(resolved['model']['main_path'])
     
     # Reset logvar weights
     model.logvar_linear.weight.data.copy_(torch.randn_like(model.logvar_linear.weight.data))
@@ -81,7 +82,7 @@ def distill(config_path, ckpt_path, debug_run, resume_id):
         log_with=None
     )
     ema = ema.to(accelerator.device)
-    model, model_pretrained, dataloader, optimizer = accelerator.prepare(model, model_pretrained, dataloader, optimizer)
+    model, model_m_pretrained, model_g_pretrained, dataloader, optimizer = accelerator.prepare(model, model_m_pretrained, model_g_pretrained, dataloader, optimizer)
     accelerator.register_for_checkpointing(state)
     accelerator.register_for_checkpointing(ema)
     
@@ -144,6 +145,9 @@ def distill(config_path, ckpt_path, debug_run, resume_id):
                 sigma_data = config['training']['sigma_data']
                 sigma = torch.randn(images.shape[0], device=images.device).reshape(-1, 1, 1, 1)
                 sigma = (sigma * config['training']['P_std'] + config['training']['P_mean']).exp()  # Sample τ from proposal distribution
+                if config['evaluation'].get('scale_sigma', False):
+                    sigma = sigma * torch.maximum(torch.std(images, dim=[1, 2, 3], keepdim=True) / sigma_data, 
+                                                torch.tensor(config['evaluation'].get('sigma_scale_eps', 0.05), device=images.device))
                 t = torch.arctan(sigma / sigma_data)  # Convert to t using arctan
                 t.requires_grad_(True)
                 
@@ -156,7 +160,13 @@ def distill(config_path, ckpt_path, debug_run, resume_id):
                     scaled_x_t = x_t / sigma_data
                     if cond_img is not None:
                         scaled_x_t = torch.cat([scaled_x_t, cond_img], dim=1)
-                    pretrain_pred = model_pretrained(scaled_x_t, noise_labels=t.flatten(), conditional_inputs=conditional_inputs)
+                    m_pretrain_pred = model_m_pretrained(scaled_x_t, noise_labels=t.flatten(), conditional_inputs=conditional_inputs)
+                    if model_g_pretrained is not None:
+                        g_pretrain_pred = model_g_pretrained(scaled_x_t, noise_labels=t.flatten(), conditional_inputs=conditional_inputs)
+                        pretrain_pred = g_pretrain_pred + config['model']['guidance_scale'] * (m_pretrain_pred - g_pretrain_pred)
+                    else:
+                        pretrain_pred = m_pretrain_pred
+                    
                     dxt_dt = sigma_data * -pretrain_pred
 
                 # Calculate current model prediction

@@ -8,10 +8,11 @@ from terrain_diffusion.training.datasets.datasets import H5SuperresTerrainDatase
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib import colors
 
 scheduler = EDMDPMSolverMultistepScheduler(0.002, 10.0, 0.5)
 
-device = 'cpu'
+device = 'cuda'
 
 def get_model(channels, layers, tag, sigma_rel=None, ema_step=None, fs=1.0, checkpoint='latest_checkpoint'):
     model = EDMUnet2D(
@@ -24,7 +25,7 @@ def get_model(channels, layers, tag, sigma_rel=None, ema_step=None, fs=1.0, chec
         attn_resolutions=[],
         midblock_attention=False,
         concat_balance=0.5,
-        conditional_inputs=[],
+        conditional_inputs=[("embedding", 2, 0.2)],
         fourier_scale=fs
     )
 
@@ -40,35 +41,37 @@ def get_model(channels, layers, tag, sigma_rel=None, ema_step=None, fs=1.0, chec
 
 models = [
    # get_model(32, 2, '32x2', 0.05, fs='pos').to(device),
-    get_model(128, 3, '128x3', 0.05, fs='pos').to(device)
+    get_model(32, 2, '32x2', 0.05, fs='pos').to(device)
 ]
 
 # Enable parallel processing on CPU
 torch.set_num_threads(16)
 
-dataset = H5SuperresTerrainDataset('dataset_full_encoded.h5', 128, [[0.9999, 1], [0.0, 0.9999]], [480, 480], eval_dataset=True,
+dataset = H5SuperresTerrainDataset('dataset_full_encoded.h5', 128, [[0.9999, 1], [0.0, 0.9999]], [480, 480], eval_dataset=False,
                                    latents_mean=[0, 0.07, 0.12, 0.07],
                                    latents_std=[1.4127, 0.8170, 0.8386, 0.8414])
-train_dataset, val_dataset = dataset.split(0.1, generator=torch.Generator().manual_seed(68197))
-print(len(val_dataset))
 
-dataloader = DataLoader(val_dataset, batch_size=64)
+dataloader = DataLoader(dataset, batch_size=64)
 
 torch.set_grad_enabled(False)
 
 sigma_data = 0.5
 
 # Generate log-spaced sigma values from 0.002 to 80
-sigmas = torch.logspace(np.log10(0.002), np.log10(80), 10)
-mse_values = {i: [] for i in range(len(models))}
+sigmas = torch.logspace(np.log10(0.002), np.log10(80), 30)
+mse_values = {i: {j: [] for j in range(dataloader.batch_size)} for i in range(len(models))}
 
 batch = next(iter(dataloader))
 images = batch['image'].to(device)
 cond_img = batch.get('cond_img').to(device)
 
+image_std_ratio = torch.std(images, dim=(1, 2, 3), keepdim=True) / sigma_data
 step = 0
 for sigma in tqdm(sigmas):
     sigma = sigma.to(device)
+    sigma = sigma.expand(images.shape[0]).view(-1, 1, 1, 1)
+    #sigma = sigma * image_std_ratio
+    
     t = torch.atan(sigma / sigma_data)
     cnoise = t.flatten()
     
@@ -81,37 +84,67 @@ for sigma in tqdm(sigmas):
     x = torch.cat([scaled_input, cond_img], dim=1)
     
     for i, model in enumerate(models):
-        model_output = model(x, noise_labels=cnoise, conditional_inputs=[])
+        model_output = model(x, noise_labels=cnoise, conditional_inputs=[torch.zeros(x.shape[0], device=device, dtype=torch.int64)])
         pred_v_t = -sigma_data * model_output
         
-        # Calculate MSE
+        # Calculate MSE for each sample
         v_t = torch.cos(t) * noise - torch.sin(t) * images
-        mse = (1 / sigma_data ** 2) * ((pred_v_t - v_t) ** 2).mean().item()
-        mse_values[i].append(mse)
+        mse = (1 / sigma_data ** 2) * ((pred_v_t - v_t) ** 2).mean(dim=(1,2,3))
+        
+        # Store MSE for each sample
+        for j in range(images.shape[0]):
+            mse_values[i][j].append(mse[j].item())
         
     step += 1
 
-# Plot MSE vs sigma
-plt.figure(figsize=(10, 6))
+image_std_ratio = image_std_ratio.to('cpu')
+# Plot MSE vs sigma for each sample
+fig, ax = plt.subplots(figsize=(15, 8))
+norm = colors.Normalize(vmin=image_std_ratio.min().item(), 
+                       vmax=image_std_ratio.max().item())
+cmap = plt.cm.viridis
+
 for i in range(len(models)):
-    plt.loglog(sigmas, mse_values[i], label=f'Model {i+1}')
-plt.grid(True)
-plt.xlabel('Sigma')
-plt.ylabel('MSE')
-plt.title('Average MSE vs Noise Level')
-plt.legend()
+    for j in range(images.shape[0]):
+        color = cmap(norm(image_std_ratio[j].item()))
+        snr = sigmas / max(0.05, image_std_ratio[j].item())
+        if j == 0:  # Only add label for first sample to avoid cluttered legend
+            ax.loglog(snr, mse_values[i][j], alpha=0.5, color=color, 
+                     label=f'Model {i+1}')
+        else:
+            ax.loglog(snr, mse_values[i][j], alpha=0.5, color=color)
+
+# Add colorbar
+sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+plt.colorbar(sm, ax=ax, label='Image STD Ratio')
+
+ax.grid(True)
+ax.set_xlabel('Sigma')
+ax.set_ylabel('MSE')
+ax.set_title('MSE vs Noise Level (Individual Samples)')
+ax.legend()
 plt.show()
 
-# Plot MSE ratios using first model as baseline
+# Plot MSE ratios if multiple models exist
 if len(models) > 1:
-    plt.figure(figsize=(10, 6))
-    for i in range(1, len(models)):
-        mse_ratios = [mse_values[0][j] / mse_values[i][j] for j in range(len(sigmas))]
-        plt.loglog(sigmas, mse_ratios, label=f'MSE Ratio (Model 1 / Model {i+1})')
-    plt.grid(True)
-    plt.xlabel('Sigma')
-    plt.ylabel('MSE Ratio')
-    plt.title('Relative MSE')
-    plt.axhline(y=1, color='r', linestyle='--')  # Add reference line at y=1
-    plt.legend()
+    fig, ax = plt.subplots(figsize=(15, 8))
+    for j in range(images.shape[0]):
+        mse_ratios = [mse_values[0][j][k] / mse_values[1][j][k] for k in range(len(sigmas))]
+        if j == 0:
+            ax.loglog(sigmas, mse_ratios, alpha=0.1, label='Individual Samples')
+        else:
+            ax.loglog(sigmas, mse_ratios, alpha=0.1)
+    
+    # Add mean ratio line
+    mean_ratios = np.mean([[mse_values[0][j][k] / mse_values[1][j][k] 
+                           for k in range(len(sigmas))] 
+                          for j in range(images.shape[0])], axis=0)
+    ax.loglog(sigmas, mean_ratios, linewidth=2, label='Mean Ratio', linestyle='--')
+    
+    ax.grid(True)
+    ax.set_xlabel('Sigma')
+    ax.set_ylabel('MSE Ratio')
+    ax.set_title('Relative MSE (Individual Samples)')
+    ax.axhline(y=1, color='r', linestyle='--')
+    ax.legend()
     plt.show()

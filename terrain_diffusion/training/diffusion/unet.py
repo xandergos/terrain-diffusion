@@ -508,6 +508,8 @@ class EDMUnet2D(ModelMixin, ConfigMixin):
         return emb
 
     def forward(self, x, noise_labels, conditional_inputs, return_logvar=False, precomputed_embeds=None):
+        assert len(conditional_inputs) == len(self.conditional_layers), "Invalid number of conditional inputs"
+        
         emb = precomputed_embeds if precomputed_embeds is not None else self.compute_embeddings(noise_labels, conditional_inputs)
 
         # Encoder.
@@ -620,7 +622,7 @@ class EDMAutoencoder(ModelMixin, ConfigMixin):
                 cout = channels
                 self.decoder.append(UNetBlock(cin, cout, 0, mode='dec', attention=(res in attn_resolutions), **block_kwargs))
         self.out_conv = MPConv(cout, out_channels, kernel=[3, 3])
-        self.out_gain = nn.Parameter(torch.ones([]))
+        self.out_gain = nn.Parameter(torch.ones([]) * 0.1)
 
     def preencode(self, x, conditional_inputs=None):
         encodings = self.encoder(x, noise_labels=None, conditional_inputs=conditional_inputs)
@@ -635,7 +637,7 @@ class EDMAutoencoder(ModelMixin, ConfigMixin):
         eps = torch.randn_like(std)
         return means + eps * std
     
-    def decode(self, z):
+    def decode(self, z, return_logvar=False):
         z = torch.cat([z, torch.ones_like(z[:, :1])], dim=1)  # Add ones channel to simulate bias
         z = self.decoder_conv(z)
         for block in self.decoder:

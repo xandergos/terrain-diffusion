@@ -41,11 +41,12 @@ from terrain_diffusion.training.utils import recursive_to
 @click.option("--batch-size", type=int, default=64, help="Batch size for generation")
 @click.option("--cpu", is_flag=True, help="Use CPU", default=False)
 @click.option("--scheduler-steps", type=int, default=32, help="Number of steps for scheduler")
-@click.option("--use-wandb", is_flag=True, help="Disable wandb logging")
+@click.option("--use-wandb", is_flag=True, help="Enable wandb logging")
 @click.option("--save-samples-dir", type=click.Path(file_okay=False, writable=True), help="Directory to save generated samples", default=None)
 @click.option("--fp16", is_flag=True, help="Use FP16", default=False)
+@click.option("--save-models", is_flag=True, help="Save models", default=False)
 def evaluate_sr_fid_cli(main_config, guide_config, main_sigma_rel, guide_sigma_rel, guide_ema_step, 
-         guidance_scale, log_samples, max_samples, batch_size, cpu, scheduler_steps, use_wandb, save_samples_dir, fp16):
+         guidance_scale, log_samples, max_samples, batch_size, cpu, scheduler_steps, use_wandb, save_samples_dir, fp16, save_models):
     """Generate samples and calculate FID score."""
     device = 'cuda' if not cpu else 'cpu'
     
@@ -101,6 +102,18 @@ def evaluate_sr_fid_cli(main_config, guide_config, main_sigma_rel, guide_sigma_r
         ema_g = PostHocEMA(model_g, **guide_resolved['ema'])
         ema_g.load_state_dict(torch.load(f"{guide_cfg['logging']['save_dir']}/latest_checkpoint/phema.pt", weights_only=True))
         ema_g.synthesize_ema_model(sigma_rel=guide_sigma_rel, step=guide_ema_step).copy_params_from_ema_to_model()
+        
+    if save_models:
+        checkpoint_path = main_cfg['logging']['save_dir']
+        model_m.save_pretrained(os.path.join(checkpoint_path, 'saved_model'))
+        save_path = os.path.join(checkpoint_path, 'saved_model')
+        print(f'Saved main model to {save_path}.')
+
+        if guide_cfg:
+            checkpoint_path = guide_cfg['logging']['save_dir']
+            model_g.save_pretrained(os.path.join(checkpoint_path, 'saved_model'))
+            save_path = os.path.join(checkpoint_path, 'saved_model')
+            print(f'Saved guidance model to {save_path}.')
     
     # Initialize dataset and dataloader
     val_dataset = main_resolved['val_dataset']
@@ -165,13 +178,11 @@ def evaluate_sr_fid_cli(main_config, guide_config, main_sigma_rel, guide_sigma_r
             real_min = torch.amin(real_samples, dim=(1, 2, 3), keepdim=True)
             real_max = torch.amax(real_samples, dim=(1, 2, 3), keepdim=True)
             
-            # Calculate 10% margin
-            margin = 0.1 * (real_max - real_min)
-            norm_min = real_min - margin
-            norm_max = real_max + margin
+            value_range = torch.maximum(real_max - real_min, torch.tensor(0.1))
+            value_mid = (real_min + real_max) / 2
             
             # Normalize samples to the adjusted range
-            samples_norm = torch.clamp((samples - norm_min) / (norm_max - norm_min) * 255, 0, 255)
+            samples_norm = torch.clamp(((samples - value_mid) / value_range + 0.5) * 255, 0, 255)
             samples_norm = samples_norm.repeat(1, 3, 1, 1)  # Convert to RGB
             samples_norm = samples_norm.to(torch.uint8)
             
@@ -179,7 +190,7 @@ def evaluate_sr_fid_cli(main_config, guide_config, main_sigma_rel, guide_sigma_r
             fid.update(samples_norm, real=False)
             
             # Normalize real samples to the same range
-            real_norm = torch.clamp((real_samples - norm_min) / (norm_max - norm_min) * 255, 0, 255)
+            real_norm = torch.clamp(((real_samples - value_mid) / value_range + 0.5) * 255, 0, 255)
             real_norm = real_norm.repeat(1, 3, 1, 1)  # Convert to RGB
             real_norm = real_norm.to(torch.uint8)
             fid.update(real_norm, real=True)
