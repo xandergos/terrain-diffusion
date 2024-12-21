@@ -75,17 +75,15 @@ class H5AutoencoderDataset(Dataset):
         
         self.keys = [set() for _ in range(num_subsets)]
         with h5py.File(self.h5_file, 'r') as f:
-            assert f"split:{split}" in f.attrs, f"Split '{split}' not found in dataset."
             for i, (pct_land_range, res) in enumerate(zip(pct_land_ranges, subset_resolutions)):
                 if pct_land_range is None:
                     pct_land_range = [0, 1]
                 for key in sorted(list(f.keys())):
                     dset = f[key]
-                    split_key = dset.attrs['filename'] + '$' + str(dset.attrs['chunk_id'])
                     pct_land_valid = pct_land_range[0] <= dset.attrs['pct_land'] <= pct_land_range[1]
                     resolution_valid = res is None or str(dset.attrs['resolution']) == str(res)
-                    split_valid = split is None or split_key in f.attrs[f"split:{split}"]
-
+                    split_valid = split is None or dset.attrs['split'] == split
+    
                     if pct_land_valid and resolution_valid and split_valid:
                         self.keys[i].add((dset.attrs['filename'], dset.attrs['resolution'], dset.attrs['chunk_id']))
         self.keys = [list(keys) for keys in self.keys]
@@ -184,22 +182,18 @@ class H5SuperresTerrainDataset(Dataset):
         
         self.keys = [set() for _ in range(num_subsets)]
         with h5py.File(self.h5_file, 'r') as f:
-            assert split is None or f"split:{split}" in f.attrs, f"Split '{split}' not found in dataset."
             for i, (pct_land_range, res) in enumerate(zip(pct_land_ranges, subset_resolutions)):
                 if pct_land_range is None:
                     pct_land_range = [0, 1]
                 for key in sorted(list(f.keys())):
                     dset = f[key]
-                    split_key = dset.attrs['filename'] + '$' + str(dset.attrs['chunk_id'])
                     pct_land_valid = pct_land_range[0] <= dset.attrs['pct_land'] <= pct_land_range[1]
                     resolution_valid = res is None or str(dset.attrs['resolution']) == str(res)
-                    split_valid = split is None or split_key in f.attrs[f"split:{split}"]
+                    split_valid = split is None or dset.attrs['split'] == split
 
                     if pct_land_valid and resolution_valid and split_valid:
                         self.keys[i].add((dset.attrs['filename'], dset.attrs['resolution'], dset.attrs['chunk_id']))
         self.keys = [list(keys) for keys in self.keys]
-        
-        self.dummy_data_latent = None
 
     def __len__(self):
         return max(len(keys) for keys in self.keys)
@@ -271,6 +265,139 @@ class H5SuperresTerrainDataset(Dataset):
             return {'image': img, 'cond_img': cond_img, 'cond_inputs': [torch.tensor(class_label)]}
         else:
             return {'image': img, 'cond_img': cond_img}
+
+class H5LatentsDataset(Dataset):
+    """Dataset for training diffusion models to generate terrain latents."""
+    def __init__(self, 
+                 h5_file, 
+                 crop_size, 
+                 pct_land_ranges, 
+                 subset_resolutions, 
+                 subset_weights=None,
+                 subset_class_labels=None,
+                 eval_dataset=False,
+                 latents_mean=None, 
+                 latents_std=None, 
+                 sigma_data=0.5, 
+                 clip_edges=True,
+                 split=None):
+        """
+        Args:
+            h5_file (str): Path to the HDF5 file containing the dataset.
+            crop_size (int): Size of the random crop to extract from each image.
+            pct_land_ranges (list): Ranges of acceptable pct_land values [min, max], for each subset. Elements can be None to include everything.
+            subset_resolutions (list): Resolutions to filter subsets by. Each subset will only include elevation data with the corresponding resolution. Elements be None to include all resolutions.
+            subset_weights (list): Weights for each subset, determining the relative probability of sampling from that subset. Default is None, which results in uniform sampling.
+            subset_class_labels (list): Class labels for each subset, determining the class of each subset. Defaults to None, which results in no class labels being returned.
+            eval_dataset (bool, optional): Whether the dataset should be transformed deterministically. Defaults to False.
+            latents_mean (list, optional): Mean values for normalizing latents. Defaults to None.
+            latents_std (list, optional): Standard deviation values for normalizing latents. Defaults to None.
+            sigma_data (float, optional): Data standard deviation. Defaults to 0.5.
+            clip_edges (bool, optional): Whether to clip edges when cropping. Defaults to True.
+            split (str, optional): Split to use. Defaults to None (all splits).
+        """
+        self.h5_file = h5_file
+        self.crop_size = crop_size
+        self.pct_land_ranges = pct_land_ranges or [[0, 1]]
+        self.subset_resolutions = subset_resolutions or [480]
+        self.subset_weights = subset_weights or [1.0]
+        self.subset_class_labels = subset_class_labels
+        self.latents_mean = torch.tensor(latents_mean).view(-1, 1, 1) if isinstance(latents_mean, list) else torch.clone(latents_mean).view(-1, 1, 1)
+        self.latents_std = torch.tensor(latents_std).view(-1, 1, 1) if isinstance(latents_std, list) else torch.clone(latents_std).view(-1, 1, 1)
+        self.sigma_data = sigma_data
+        self.split = split
+        self.eval_dataset = eval_dataset
+        self.clip_edges = clip_edges
+        
+        num_subsets = len(subset_weights)
+        assert len(pct_land_ranges) == len(subset_resolutions) == num_subsets, \
+            "Number of subsets must match between pct_land_ranges, dataset_resolutions, and subset_weights."
+        assert subset_class_labels is None or len(subset_class_labels) == num_subsets, \
+            "Number of subset class labels must match number of subsets."
+        
+        self.keys = [set() for _ in range(num_subsets)]
+        with h5py.File(self.h5_file, 'r') as f:
+            for i, (pct_land_range, res) in enumerate(zip(pct_land_ranges, subset_resolutions)):
+                if pct_land_range is None:
+                    pct_land_range = [0, 1]
+                for key in sorted(list(f.keys())):
+                    dset = f[key]
+                    pct_land_valid = pct_land_range[0] <= dset.attrs['pct_land'] <= pct_land_range[1]
+                    resolution_valid = res is None or str(dset.attrs['resolution']) == str(res)
+                    split_valid = split is None or dset.attrs['split'] == split
+
+                    if pct_land_valid and resolution_valid and split_valid:
+                        self.keys[i].add((dset.attrs['filename'], dset.attrs['resolution'], dset.attrs['chunk_id']))
+        self.keys = [list(keys) for keys in self.keys]
+
+    def __len__(self):
+        return max(len(keys) for keys in self.keys)
+
+    def __getitem__(self, idx):
+        # Draw a random subset based on subset weights
+        subset_idx = random.choices(range(len(self.subset_weights)), weights=self.subset_weights, k=1)[0]
+        index = random.randrange(len(self.keys[subset_idx]))
+        class_label = self.subset_class_labels[subset_idx] if self.subset_class_labels is not None else None
+        
+        file, res, chunk_id = self.keys[subset_idx][index]
+        base_key = '$'.join([file, f'{res}m', chunk_id])
+        key_latent = base_key + '$latent'
+        key_lowfreq = base_key + '$lowfreq'
+        
+        with h5py.File(self.h5_file, 'r') as f:
+            shape = f[key_latent].shape
+        
+        if not self.eval_dataset:
+            if self.clip_edges:
+                i = random.randint(1, shape[2] - self.crop_size - 1)
+                j = random.randint(1, shape[3] - self.crop_size - 1)
+            else:
+                i = random.randint(0, shape[2] - self.crop_size)
+                j = random.randint(0, shape[3] - self.crop_size)
+        else:
+            i = (shape[2] - self.crop_size) // 2
+            j = (shape[3] - self.crop_size) // 2
+            
+        h = w = self.crop_size
+        li, lj, lh, lw = i, j, h, w
+            
+        transform_idx = random.randrange(8) if not self.eval_dataset else 0
+        flip = (transform_idx // 4) == 1
+        rotate_k = transform_idx % 4
+        
+        # Adjust lowfreq crop for flips and rotations. Note that we are inverting the transformation so we do it in reverse.
+        for _ in range(rotate_k):
+            li, lj = lj, shape[2] - li - lh
+        if flip:
+            lj = shape[2] - lj - lw
+            
+        with h5py.File(self.h5_file, 'r') as f:
+            data_latent = torch.from_numpy(f[key_latent][transform_idx, :, i:i+h, j:j+w])
+            data_lowfreq = torch.from_numpy(f[key_lowfreq][:, li:li+lh, lj:lj+lw])
+            
+        assert data_latent.shape[-1] > 0, f"Latent crop is empty. i: {i}, j: {j}, h: {h}, w: {w}"
+            
+        # Apply transforms to lowfreq to match latent
+        if flip:
+            data_lowfreq = torch.flip(data_lowfreq, dims=[-1])
+        if rotate_k != 0:
+            data_lowfreq = torch.rot90(data_lowfreq, k=rotate_k, dims=[-2, -1])
+            
+        latent_channels = data_latent.shape[0]
+        means, logvars = data_latent[:latent_channels//2], data_latent[latent_channels//2:]
+        sampled_latent = torch.randn_like(means) * (logvars * 0.5).exp() + means
+        sampled_latent = (sampled_latent - self.latents_mean) / self.latents_std * self.sigma_data
+        
+        img = torch.cat([sampled_latent, data_lowfreq], dim=0)
+        cond_img_sigma = torch.exp(torch.randn([1, 1, 1], dtype=torch.float32) * 2.0 + 1)
+        cond_t = torch.atan(cond_img_sigma / self.sigma_data)
+        cond_img = torch.cos(cond_t) * data_lowfreq + torch.sin(cond_t) * torch.randn_like(data_lowfreq) * self.sigma_data
+        cond_img = cond_img / self.sigma_data
+        
+        if class_label is not None:
+            return {'image': img, 'cond_img': cond_img, 'cond_inputs': [torch.tensor(class_label), cond_t.squeeze()]}
+        else:
+            return {'image': img, 'cond_img': cond_img, 'cond_inputs': [cond_t.squeeze()]}
 
 
 class LongDataset(Dataset):

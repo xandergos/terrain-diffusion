@@ -25,17 +25,11 @@ from ema_pytorch import PostHocEMA
 from torch.utils.data import DataLoader
 import wandb
 from torchmetrics.image.fid import FrechetInceptionDistance
+from terrain_diffusion.inference.evaluation.utils import create_models, get_dataloader
 from terrain_diffusion.training.datasets.datasets import LongDataset
 from terrain_diffusion.training.diffusion.registry import build_registry
 from terrain_diffusion.training.utils import recursive_to
 from PIL import Image
-
-def get_dataloader(main_resolved_cfg, batch_size):
-    val_dataset = main_resolved_cfg['val_dataset']
-    dataloader = DataLoader(LongDataset(val_dataset, shuffle=True), 
-                            batch_size=batch_size,
-                            **main_resolved_cfg['dataloader_kwargs'])
-    return dataloader
 
 
 def create_models(main_resolved, guide_resolved=None, main_sigma_rel=0.05, guide_sigma_rel=0.05, 
@@ -103,8 +97,7 @@ def evaluate_models_fid(model_m,
                         scheduler_steps=15, 
                         save_samples_dir=None, 
                         log_samples=None, 
-                        dtype=torch.float32,
-                        fid_metric=None):
+                        dtype=torch.float32):
     """
     Evaluate models using Fréchet Inception Distance (FID).
     
@@ -120,8 +113,6 @@ def evaluate_models_fid(model_m,
         log_samples (int, optional): Number of samples between logging (if enabled). Defaults to num_samples.
         save_samples_dir (str, optional): Directory to save generated samples. Defaults to None.
         dtype (torch.dtype, optional): Data type for inputs. Defaults to torch.float32.
-        fid_metric (FrechetInceptionDistance, optional): Preloaded FID metric to use. Defaults to None (initializes new one).
-        enable_logging (bool, optional): Enable logging of FID scores. Defaults to True.
     Returns:
         float: Final FID score
     """
@@ -228,7 +219,7 @@ def evaluate_models_fid(model_m,
 @click.option("--num-samples", type=int, default=2048, help="Number of samples to generate (Default and minimum 2048)")
 @click.option("--batch-size", type=int, default=64, help="Batch size for generation (default: 64)")
 @click.option("--scheduler-steps", type=int, default=15, help="Number of steps for scheduler (default: 15)")
-@click.option("--log-samples", type=int, default=2048, help="Number of samples to generate between logs (Default is num_samples, default: 2048)")
+@click.option("--log-samples", type=int, default=None, help="Number of samples to generate between logs (Default: num_samples)")
 @click.option("--save-samples-dir", type=click.Path(file_okay=False, writable=True), help="Directory to save generated samples (default: None)", default=None)
 @click.option("--save-models", is_flag=True, help="Save models to disk (default: False)", default=False)
 @click.option("--device", type=str, default='cuda', help="Device to run evaluation on (default: 'cuda')")

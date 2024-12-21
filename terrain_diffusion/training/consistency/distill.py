@@ -18,7 +18,7 @@ from tqdm import tqdm
 import wandb
 from torch.utils.data import DataLoader
 from terrain_diffusion.training.utils import SerializableEasyDict as EasyDict
-from terrain_diffusion.training.diffusion.unet import EDMUnet2D
+from terrain_diffusion.training.unet import EDMUnet2D
 
 def get_optimizer(model, config):
     """Get optimizer based on config settings.
@@ -58,7 +58,8 @@ def distill(config_path, ckpt_path, debug_run, resume_id):
     
     # Reset logvar weights
     model.logvar_linear.weight.data.copy_(torch.randn_like(model.logvar_linear.weight.data))
-    model_pretrained.eval()
+    model_m_pretrained.eval()
+    model_g_pretrained.eval()
     model.eval()
     
     lr_scheduler = resolved['lr_sched']
@@ -100,6 +101,7 @@ def distill(config_path, ckpt_path, debug_run, resume_id):
             **config['wandb'],
             config=config
         )
+        print("Run ID:", wandb.run.id)
         
     def safe_rmtree(path):
         """Removes a tree but only checkpoint files."""
@@ -145,9 +147,9 @@ def distill(config_path, ckpt_path, debug_run, resume_id):
                 sigma_data = config['training']['sigma_data']
                 sigma = torch.randn(images.shape[0], device=images.device).reshape(-1, 1, 1, 1)
                 sigma = (sigma * config['training']['P_std'] + config['training']['P_mean']).exp()  # Sample τ from proposal distribution
-                if config['evaluation'].get('scale_sigma', False):
+                if config['training'].get('scale_sigma', False):
                     sigma = sigma * torch.maximum(torch.std(images, dim=[1, 2, 3], keepdim=True) / sigma_data, 
-                                                torch.tensor(config['evaluation'].get('sigma_scale_eps', 0.05), device=images.device))
+                                                  torch.tensor(config['training'].get('sigma_scale_eps', 0.05), device=images.device))
                 t = torch.arctan(sigma / sigma_data)  # Convert to t using arctan
                 t.requires_grad_(True)
                 
@@ -190,23 +192,21 @@ def distill(config_path, ckpt_path, debug_run, resume_id):
                     F_theta_minus = F_theta.detach()
                 
                 # Warmup ratio
-                r = min(1.0, state.step / config['training'].get('warmup_steps', 10000))
+                r = min(1.0, state.step / config['training'].get('warmup_steps', 10000) / accelerator.gradient_accumulation_steps)
                 # Calculate gradient g using JVP rearrangement
                 g = -torch.cos(t)**2 * (sigma_data * F_theta_minus - dxt_dt)
                 second_term = -r * torch.cos(t) * torch.sin(t) * x_t - r * sigma_data * F_theta_grad
                 g = g + second_term
                 
                 # Tangent normalization
-                g_norm = torch.linalg.vector_norm(g, dim=(1, 2, 3), keepdim=True)
-                g_norm = g_norm * np.sqrt(g_norm.numel() / g.numel())
+                g_norm = torch.sqrt(torch.mean(g**2, dim=(1,2,3), keepdim=True))
                 g = g / (g_norm + config['training'].get('const_c', 0.1))
                 
                 # Tangent clipping (Only use this OR normalization)
                 # g = torch.clamp(g, min=-1, max=1)
                 
                 # Calculate loss with adaptive weighting
-                weight = 1 / sigma
-                loss = (weight / torch.exp(logvar)) * torch.square(F_theta - F_theta_minus - g) + logvar
+                loss = (1 / torch.exp(logvar)) * torch.square(F_theta - F_theta_minus - g) + logvar
                 loss = loss.mean()
 
                 state.seen += images.shape[0]
@@ -225,7 +225,7 @@ def distill(config_path, ckpt_path, debug_run, resume_id):
                     ema.update()
 
                 stats_hist['loss'].append(loss.item())
-                progress_bar.set_postfix({'loss': np.mean(stats_hist['loss']), 
+                progress_bar.set_postfix({'loss': f"{np.mean(stats_hist['loss']):.4f}", 
                                         "lr": lr,
                                         "grad_norm": grad_norm.item()})
                 progress_bar.update(1)
@@ -233,13 +233,12 @@ def distill(config_path, ckpt_path, debug_run, resume_id):
         state.epoch += 1
         if accelerator.is_main_process:
             wandb.log({
-                "avg_loss": np.mean(stats_hist['loss']),
-                "loss": np.median(stats_hist['loss']),
+                "loss": np.mean(stats_hist['loss']),
                 "lr": lr,
                 "step": state.step,
                 "epoch": state.epoch,
                 "seen": state.seen
-            }, step=state.epoch)
+            }, step=state.epoch, commit=True)
             if state.epoch % config['logging']['temp_save_epochs'] == 0:
                 save_checkpoint(f"{config['logging']['save_dir']}/latest", overwrite=True)
             if state.epoch % config['logging']['save_epochs'] == 0:

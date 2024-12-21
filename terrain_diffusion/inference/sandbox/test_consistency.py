@@ -1,7 +1,7 @@
 import os
 import numpy as np
 import torch
-from terrain_diffusion.training.diffusion.unet import EDMUnet2D
+from terrain_diffusion.training.unet import EDMUnet2D
 from safetensors.torch import load_model
 from ema_pytorch import PostHocEMA
 from terrain_diffusion.training.datasets.datasets import H5SuperresTerrainDataset
@@ -45,7 +45,9 @@ def get_model(checkpoint_path, ema_step=None, sigma_rel=None, model_config_path=
 model = get_model("checkpoints/consistency_x8-64x3/latest_checkpoint", sigma_rel=0.05,
                   model_config_path="checkpoints/consistency_x8-64x3/latest_checkpoint/model_config")
 
-dataset = H5SuperresTerrainDataset('dataset_full_encoded.h5', 128, [0.9999, 1], '480m', eval_dataset=False,
+
+dataset = H5SuperresTerrainDataset('dataset_full_encoded.h5', 128, [[0.9999, 1], [0.0, 0.9999]], [480, 480], 
+                                   subset_weights=[1, 0.01], eval_dataset=False,
                                    latents_mean=[0, 0.07, 0.12, 0.07],
                                    latents_std=[1.4127, 0.8170, 0.8386, 0.8414])
 
@@ -60,7 +62,7 @@ for batch in dataloader:
     conditional_inputs = batch.get('cond_inputs')
     images_np = images.squeeze().cpu().numpy()
     
-    timesteps = torch.as_tensor([np.arctan(80/0.5), 1.1], device=device)
+    timesteps = torch.as_tensor([np.arctan(80/0.5), 0.5 * (torch.std(images).item() / 0.5)], device=device)
     #timesteps = torch.as_tensor([np.arctan(80/0.5), 1.3, 1.0, 0.7, 0.3, 0.05], device=device)
     
     z = torch.randn_like(images) * sigma_data
@@ -69,7 +71,7 @@ for batch in dataloader:
         x_t = torch.cos(t) * pred_x0 + torch.sin(t) * z
         t = t.view(1).to(device)
         model_input = torch.cat([x_t / 0.5, cond_img], dim=1)
-        pred = -model(model_input, noise_labels=t.flatten(), conditional_inputs=[])
+        pred = -model(model_input, noise_labels=t.flatten(), conditional_inputs=[torch.zeros(x_t.shape[0], dtype=torch.int64, device=device)])
         pred_x0 = torch.cos(t) * x_t - torch.sin(t) * sigma_data * pred
     
         # Plot the predictions and original image side by side

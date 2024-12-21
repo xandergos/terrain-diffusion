@@ -21,7 +21,7 @@ import networkx as nx
 
 from confection import registry, Config
 
-from terrain_diffusion.training.diffusion.unet import EDMUnet2D
+from terrain_diffusion.training.unet import EDMUnet2D
 
 @dataclass
 class Tile:

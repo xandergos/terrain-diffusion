@@ -1,10 +1,10 @@
 import catalogue
 from confection import registry
-from terrain_diffusion.training.datasets.datasets import H5AutoencoderDataset, H5SuperresTerrainDataset
+from terrain_diffusion.training.datasets.datasets import *
 from terrain_diffusion.data.laplacian_encoder import *
 from terrain_diffusion.training.loss import SqrtLRScheduler
 from terrain_diffusion.inference.scheduler.dpmsolver import EDMDPMSolverMultistepScheduler
-from terrain_diffusion.training.diffusion.unet import EDMAutoencoder, EDMUnet2D
+from terrain_diffusion.training.unet import EDMAutoencoder, EDMUnet2D
     
 
 def build_registry():
@@ -21,6 +21,7 @@ def build_registry():
     registry.dataset = catalogue.create("confection", "datasets", entry_points=False)
     registry.dataset.register("h5_superres_terrain", func=H5SuperresTerrainDataset)
     registry.dataset.register("h5_autoencoder", func=H5AutoencoderDataset)
+    registry.dataset.register("h5_latents", func=H5LatentsDataset)
     
     registry.utils = catalogue.create("confection", "utils", entry_points=False)
     registry.utils.register("create_list", func=lambda *args: list(args))

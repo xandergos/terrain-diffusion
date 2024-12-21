@@ -16,7 +16,7 @@ from tqdm import tqdm
 import wandb
 from torch.utils.data import DataLoader
 import lpips
-from terrain_diffusion.training.diffusion.unet import EDMAutoencoder
+from terrain_diffusion.training.unet import EDMAutoencoder
 from terrain_diffusion.training.utils import *
 from terrain_diffusion.training.utils import SerializableEasyDict as EasyDict
 
@@ -32,10 +32,9 @@ def get_optimizer(model, config):
         raise ValueError(f"Unknown optimizer type: {config['optimizer']['type']}")
     return optimizer
 
-def variance_adjusted_loss(reconstruction, reference):
+def variance_adjusted_loss(reconstruction, reference, eps=0.25):
     ref_min = torch.amin(reference, dim=(1, 2, 3), keepdim=True)
     ref_max = torch.amax(reference, dim=(1, 2, 3), keepdim=True)
-    eps = 0.25
     
     ref_range = torch.maximum(ref_max - ref_min, torch.tensor(eps))
     ref_center = (ref_min + ref_max) / 2
@@ -173,7 +172,7 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
         validation_stats = {
             'loss': [], 
             'kl_loss': [], 
-            'rec_mse_loss': [], 
+            'rec_direct_loss': [], 
             'rec_percep_loss': []
         }
         pbar = tqdm(total=repeats * len(val_dataset), desc=pbar_title)
@@ -323,7 +322,7 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
             wandb_logs = {
                 "loss": np.mean(stats_hist['loss']),
                 "kl_loss": np.mean(stats_hist['kl_loss']),
-                "rec_mse_loss": np.mean(stats_hist['rec_mse_loss']),
+                "rec_direct_loss": np.mean(stats_hist['rec_direct_loss']),
                 "rec_percep_loss": np.mean(stats_hist['rec_percep_loss']),
                 "lr": lr,
                 "step": state.step,
