@@ -16,30 +16,16 @@ import h5py
 from tqdm import tqdm
 import click
 from terrain_diffusion.data.laplacian_encoder import LaplacianPyramidEncoder
-from terrain_diffusion.training.diffusion.unet import EDMUnet2D
-
-def preprocess_elevation(img):
-    ocean = torch.from_numpy(img[:, :, 1])
-    land = torch.from_numpy(img[:, :, 0])
-
-    land = F.interpolate(land[None, None], (4096, 4096), mode='area')[0, 0]
-    ocean = F.interpolate(ocean[None, None], (4096, 4096), mode='area')[0, 0]
-    ocean = torch.minimum(ocean, torch.tensor(-1.0))
-
-    land_mask = land > 0
-    
-    ocean = F.adaptive_avg_pool2d(ocean[None], (256, 256))
-    ocean = F.interpolate(ocean[None], (4096, 4096), mode='bicubic')[0, 0]
-    ocean = torch.minimum(ocean, torch.tensor(-1.0))
-    
-    img = land * land_mask.float() + ocean * (1 - land_mask.float())
-    
-    return img.numpy()
+from terrain_diffusion.training.unet import EDMAutoencoder, EDMUnet2D
+import multiprocessing as mp
+from functools import partial
+from terrain_diffusion.data.preprocessing.utils import ElevationDataset, process_single_file_base
 
 @click.command()
 @click.option('--base-resolution', default=240, help='Resolution input images are in meters')
 @click.option('--target-resolution', default=480, help='Resolution output images should be in meters')
 @click.option('--num-chunks', default=2, help='Number of chunks to write to HDF5 file (along each axis)')
+@click.option('--image-size', default=4096, help='Size of the input image')
 @click.option('--lapl-enc-resize', default=8, help='How much to downsample the input image for the low-res channel')
 @click.option('--lapl-enc-sigma', default=5, help='Amount to blur the low-res channel')
 @click.option('--lapl-enc-lowres-mean', default=-2651, help='Mean value for encoder normalization (low res)')
@@ -48,14 +34,14 @@ def preprocess_elevation(img):
 @click.option('--lapl-enc-highres-std', default=160, help='Std value for encoder normalization (high res)')
 @click.option('--output-file', default='dataset.h5', help='Output HDF5 filename')
 @click.option('--elevation-folder', required=True, help='Folder containing elevation .tiff/tif files')
-def process_base_dataset(base_resolution, target_resolution, num_chunks, lapl_enc_resize, lapl_enc_sigma, 
-                   lapl_enc_lowres_mean, lapl_enc_lowres_std, lapl_enc_highres_mean, lapl_enc_highres_std, 
-                   output_file, elevation_folder):
+@click.option('--num-workers', type=int, default=None, help='Number of workers to use for encoding')
+def process_base_dataset(base_resolution, target_resolution, num_chunks, image_size, lapl_enc_resize, lapl_enc_sigma, lapl_enc_lowres_mean, lapl_enc_lowres_std, 
+                   lapl_enc_highres_mean, lapl_enc_highres_std, output_file, elevation_folder, num_workers):
     """
-    Process elevation dataset into HDF5 format with high and low frequency components.
+    Process elevation dataset into encoded HDF5 format.
     
-    Processes .tiff files from elevation-folder at input-resolution, decomposing them into
-    high and low frequency components using a Laplacian pyramid. Creates datasets at specified
+    Processes .tiff files from elevation-folder at input-resolution, encoding them using
+    a Laplacian pyramid encoder and a learned encoder model. Creates datasets at specified
     resolution in meters.
     
     Input .tiff files should contain elevation data in any resolution, with 1 channel: The elevation
@@ -63,64 +49,52 @@ def process_base_dataset(base_resolution, target_resolution, num_chunks, lapl_en
     Output HDF5 file will contain the following datasets for each input file:
     - {filename}_{target_resolution}m_highfreq: High frequency residual (1 channel)
     - {filename}_{target_resolution}m_lowfreq: Low frequency residual (1 channel)
+    - {filename}_{target_resolution}m_latent: Encoded latents from the encoder model (encoder output channels)
     """
-    
     if os.path.exists(output_file):
         print(f"{output_file} already exists. Appending to it.")
     else:
         print(f"{output_file} does not exist. Creating it and building datasets.")
     with h5py.File(output_file, 'a') as f:
         encoder = LaplacianPyramidEncoder([lapl_enc_resize], lapl_enc_sigma, 
-                                        [lapl_enc_highres_mean, lapl_enc_lowres_mean], 
-                                        [lapl_enc_highres_std, lapl_enc_lowres_std])
-        for file in tqdm(os.listdir(elevation_folder)):
-            img = tiff.imread(os.path.join(elevation_folder, file)).astype(np.float32)
-            img = preprocess_elevation(img)
-            
-            downsample_factor = target_resolution // base_resolution
-            img = F.adaptive_avg_pool2d(torch.from_numpy(img)[None], 
-                                      (img.shape[0] // downsample_factor, img.shape[1] // downsample_factor))
-            
-            # Calculate number of chunks needed
-            h, w = img.shape[-2:]
-            chunk_size = h // num_chunks
-            assert h == w, "Image must be square"
-            num_chunks_h = (h + chunk_size - 1) // chunk_size
-            num_chunks_w = (w + chunk_size - 1) // chunk_size
-            
-            # Process each chunk
-            for chunk_h in range(num_chunks_h):
-                for chunk_w in range(num_chunks_w):
-                    start_h = chunk_h * chunk_size
-                    start_w = chunk_w * chunk_size
-                    end_h = min(start_h + chunk_size, h)
-                    end_w = min(start_w + chunk_size, w)
-                    
-                    img_chunk = img[..., start_h:end_h, start_w:end_w]
-                    pct_land = torch.mean((img_chunk > 0).float()).item()
-                    
-                    encoded, downsampled_encoding = encoder.encode(img_chunk, return_downsampled=True)
-                    highfreq = encoded[:1]
-                    lowfreq = downsampled_encoding[-1]
-                    
-                    chunk_id = f'chunk_{chunk_h}_{chunk_w}'
-                    dset = f.create_dataset(f'{file}${target_resolution}m${chunk_id}$highfreq', 
-                                         data=highfreq.numpy(), compression='lzf')
-                    dset.attrs['pct_land'] = pct_land
-                    dset.attrs['resolution'] = target_resolution
-                    dset.attrs['data_type'] = 'highfreq'
-                    dset.attrs['filename'] = file
-                    dset.attrs['chunk_id'] = chunk_id
-                    
-                    dset = f.create_dataset(f'{file}${target_resolution}m${chunk_id}$lowfreq', 
-                                         data=lowfreq.numpy(), compression='lzf')
-                    dset.attrs['pct_land'] = pct_land
-                    dset.attrs['resolution'] = target_resolution
-                    dset.attrs['data_type'] = 'lowfreq'
-                    dset.attrs['filename'] = file
-                    dset.attrs['chunk_id'] = chunk_id
-
-        print(f"Finished processing. Total datasets in file: {len(f.keys())}")
+                                        [lapl_enc_highres_mean, lapl_enc_lowres_mean], [lapl_enc_highres_std, lapl_enc_lowres_std])
         
+        files = os.listdir(elevation_folder)
+        
+        # Filter out files that are already in the HDF5 file
+        existing_files = set()
+        for key in f.keys():
+            filename = f[key].attrs['filename']
+            existing_files.add(filename)
+        
+        files = [f for f in files if f not in existing_files]
+        if len(files) == 0:
+            print("All files have already been processed. Exiting.")
+        print(f"Processing {len(files)} new files...")
+        
+        dataset = ElevationDataset(files, elevation_folder, image_size, base_resolution, target_resolution, num_chunks, encoder)
+        dataloader = torch.utils.data.DataLoader(dataset, batch_size=None, shuffle=False, num_workers=num_workers)
+        
+        # Process files in parallel
+        for chunks_data in tqdm(dataloader, total=len(files)):
+            for chunk in chunks_data:
+                # Save to HDF5
+                for data_type, data in [
+                    ('highfreq', chunk['highfreq'].numpy()),
+                    ('lowfreq', chunk['lowfreq'].numpy())
+                ]:
+                    dset_name = f"{chunk['filename']}${target_resolution}m${chunk['chunk_id']}${data_type}"
+                    dset = f.create_dataset(dset_name, data=data, compression='lzf')
+                    dset.attrs.update({
+                        'pct_land': chunk['pct_land'],
+                        'resolution': target_resolution,
+                        'data_type': data_type,
+                        'filename': chunk['filename'],
+                        'chunk_id': chunk['chunk_id']
+                    })
+        
+        print(f"Finished processing. Total datasets in file: {len(f.keys())}")
+
+
 if __name__ == '__main__':
     process_base_dataset()

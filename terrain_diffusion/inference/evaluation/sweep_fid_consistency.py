@@ -1,11 +1,13 @@
 from datetime import time
+import math
 import multiprocessing
 import click
 import optuna
 import torch
 from confection import Config, registry
 from terrain_diffusion.inference.evaluation.evaluate_fid import evaluate_models_fid
-from terrain_diffusion.inference.evaluation.utils import get_dataloader, create_models
+from terrain_diffusion.inference.evaluation.evaluate_fid_consistency import evaluate_models_fid_consistency
+from terrain_diffusion.inference.evaluation.utils import create_models_consistency, get_dataloader, create_models
 from terrain_diffusion.training.diffusion.registry import build_registry
 
 gpu_lock = multiprocessing.Lock()
@@ -21,53 +23,40 @@ def objective(config, trial):
         float: FID score (lower is better)
     """
     # Hyperparameters to optimize
-    guidance_scale = trial.suggest_float("guidance_scale", 1.0, 2.5)
-    main_sigma_rel = trial.suggest_float("main_sigma_rel", 0.015, 0.25)
-    guide_sigma_rel = trial.suggest_float("guide_sigma_rel", 0.015, 0.25)
-    guide_ema_step = trial.suggest_int("guide_ema_step", 23040, 51712, step=512)
+    main_sigma_rel = trial.suggest_float("main_sigma_rel", 0.015, 0.5)
+    intermediate_sigma = trial.suggest_float("intermediate_sigma", 0.01, 20, log=True)
+    scale_timesteps = trial.suggest_categorical("scale_timesteps", [True, False])
     
     # Fixed configurations
-    main_config = config['main_config']
-    guide_config = config['guide_config']
+    main_config = config['config']
     batch_size = config['batch_size']
     device = config['device']
     dtype = config['dtype']
     num_samples = config['num_samples']
-    scheduler_steps = config['scheduler_steps']
     
     # Build and resolve configs
     build_registry()
     main_cfg = Config().from_disk(main_config)
-    guide_cfg = Config().from_disk(guide_config)
     
     main_resolved = registry.resolve(main_cfg, validate=False)
-    guide_resolved = registry.resolve(guide_cfg, validate=False)
     
     # Setup models and dataloader
     dataloader = get_dataloader(main_resolved, batch_size)
-    model_m, model_g = create_models(
+    model = create_models_consistency(
         main_resolved,
-        guide_resolved,
-        main_sigma_rel=main_sigma_rel,
-        guide_sigma_rel=guide_sigma_rel,
-        guide_ema_step=guide_ema_step
+        main_sigma_rel=main_sigma_rel
     )
     
     # Move models to device
-    model_m = model_m.to(device)
-    model_g = model_g.to(device)
-    
-    scheduler = main_resolved['scheduler']
+    model = model.to(device)
     
     # Evaluate FID
-    fid_score = evaluate_models_fid(
-        model_m=model_m,
-        model_g=model_g,
-        scheduler=scheduler,
+    fid_score = evaluate_models_fid_consistency(
+        model=model,
         dataloader=dataloader,
+        intermediate_timestep=math.atan(intermediate_sigma / 0.5),
+        scale_timesteps=scale_timesteps,
         num_samples=num_samples,
-        guidance_scale=guidance_scale,
-        scheduler_steps=scheduler_steps,
         dtype={'float16': torch.float16, 'bfloat16': torch.bfloat16, 'float32': torch.float32}[dtype]
     )
     
@@ -80,10 +69,9 @@ def sweep_fid(config_path):
     Perform hyperparameter optimization using Optuna to minimize FID score.
     
     The function optimizes the following hyperparameters:
-    - guidance_scale: Controls the influence of the guidance model
     - main_sigma_rel: EMA sigma relative value for main model
-    - guide_sigma_rel: EMA sigma relative value for guidance model
-    - scheduler_steps: Number of diffusion steps
+    - intermediate_timestep: Intermediate timestep for consistency evaluation
+    - scale_timesteps: Whether to scale timesteps to match input distribution
     """
     config = Config().from_disk(config_path)
     

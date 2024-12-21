@@ -27,8 +27,11 @@ def split_dataset(dataset_file, val_pct=0.2, seed=68197):
         train_filenames = filenames[:length_train]
         val_filenames = filenames[length_train:]
         
-        f.attrs['split:train'] = train_filenames
-        f.attrs['split:val'] = val_filenames
+        for key in f.keys():
+            if f[key].attrs['filename'] + '$' + str(f[key].attrs['chunk_id']) in train_filenames:
+                f[key].attrs['split'] = 'train'
+            else:
+                f[key].attrs['split'] = 'val'
 
         print(f"Finished splitting dataset. Training set: {len(train_filenames)} unique files, Validation set: {len(val_filenames)} unique files.")
     

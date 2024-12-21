@@ -2,7 +2,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 from terrain_diffusion.inference.scheduler.dpmsolver import EDMDPMSolverMultistepScheduler
-from terrain_diffusion.training.diffusion.unet import EDMUnet2D
+from terrain_diffusion.training.unet import EDMUnet2D
 from safetensors.torch import load_model
 from ema_pytorch import PostHocEMA
 from terrain_diffusion.training.datasets.datasets import H5SuperresTerrainDataset

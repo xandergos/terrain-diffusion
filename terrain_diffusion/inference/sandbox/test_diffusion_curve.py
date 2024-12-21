@@ -1,7 +1,7 @@
 import torch
 from tqdm import tqdm
 from terrain_diffusion.inference.scheduler.dpmsolver import EDMDPMSolverMultistepScheduler
-from terrain_diffusion.training.diffusion.unet import EDMUnet2D
+from terrain_diffusion.training.unet import EDMUnet2D
 from safetensors.torch import load_model
 from ema_pytorch import PostHocEMA
 from terrain_diffusion.training.datasets.datasets import H5SuperresTerrainDataset
@@ -48,8 +48,8 @@ models = [
 torch.set_num_threads(16)
 
 dataset = H5SuperresTerrainDataset('dataset_full_encoded.h5', 128, [[0.9999, 1], [0.0, 0.9999]], [480, 480], eval_dataset=False,
-                                   latents_mean=[0, 0.07, 0.12, 0.07],
-                                   latents_std=[1.4127, 0.8170, 0.8386, 0.8414])
+                                   latents_mean=[0, 0, 0, 0],
+                                   latents_std=[1, 1, 1, 1])
 
 dataloader = DataLoader(dataset, batch_size=64)
 

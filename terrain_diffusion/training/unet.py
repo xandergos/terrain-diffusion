@@ -183,7 +183,7 @@ class MPConv(nn.Module):
 
     `gain` is used to scale the output of the layer to potentially provide more control. The default value of 1 keeps output magnitudes similar to input magnitudes.
     """
-    def __init__(self, in_channels, out_channels, kernel, groups=1):
+    def __init__(self, in_channels, out_channels, kernel, groups=1, no_padding=False):
         super().__init__()
         self.out_channels = out_channels
         assert in_channels % groups == 0, "in_channels must be divisible by groups"
@@ -191,7 +191,7 @@ class MPConv(nn.Module):
         
         self.weight = nn.Parameter(torch.randn(out_channels, in_channels // groups, *kernel))
         self.groups = groups
-        
+        self.no_padding = no_padding
     def forward(self, x, gain=1):
         # Keep weight in float32 during normalization
         w = self.weight.to(torch.float32)
@@ -212,7 +212,7 @@ class MPConv(nn.Module):
         
         # Otherwise do a 2D convolution
         assert w.ndim == 4
-        return nn.functional.conv2d(x, w, padding=(w.shape[-1]//2,), groups=self.groups)
+        return nn.functional.conv2d(x, w, padding=(0 if self.no_padding else w.shape[-1]//2,), groups=self.groups)
     
     def norm_weights(self):
         with torch.no_grad():
@@ -258,7 +258,8 @@ class UNetBlock(nn.Module):
         expansion_factor=1,
         resample_type='pooling',
         resample_filter=4,
-        resample_skip_weight=0.5
+        resample_skip_weight=0.5,
+        no_padding=False
     ):
         """
         Block module for the EDM2Unet2D architecture.
@@ -303,15 +304,15 @@ class UNetBlock(nn.Module):
         
         self.conv_type = conv_type
         if conv_type == 'fused' or conv_type == 'default':
-            self.conv_res0 = MPConv(out_channels if mode == 'enc' else in_channels, out_channels * expansion_factor, kernel=[3, 3])
+            self.conv_res0 = MPConv(out_channels if mode == 'enc' else in_channels, out_channels * expansion_factor, kernel=[3, 3], no_padding=no_padding)
         elif conv_type == 'mobile':
             self.conv_res0 = nn.ModuleList([
                 MPConv(out_channels if mode == 'enc' else in_channels, out_channels * expansion_factor, kernel=[1, 1]),
-                MPConv(out_channels * expansion_factor, out_channels * expansion_factor, kernel=[3, 3], groups=out_channels * expansion_factor),
+                MPConv(out_channels * expansion_factor, out_channels * expansion_factor, kernel=[3, 3], groups=out_channels * expansion_factor, no_padding=no_padding),
             ])
             
         self.emb_linear = MPConv(emb_channels, out_channels * expansion_factor, kernel=[]) if emb_channels > 0 else None
-        self.conv_res1 = MPConv(out_channels * expansion_factor, out_channels, kernel=[3, 3] if conv_type == 'default' else [1, 1])
+        self.conv_res1 = MPConv(out_channels * expansion_factor, out_channels, kernel=[3, 3] if conv_type == 'default' else [1, 1], no_padding=no_padding)
         self.conv_skip = MPConv(in_channels, out_channels, kernel=[1, 1]) if in_channels != out_channels else None
         self.attn_qkv = MPConv(out_channels, out_channels * 3, kernel=[1, 1]) if self.num_heads != 0 else None
         self.attn_proj = MPConv(out_channels, out_channels, kernel=[1, 1]) if self.num_heads != 0 else None
@@ -436,9 +437,9 @@ class EDMUnet2D(ModelMixin, ConfigMixin):
         block_channels = [model_channels * m for m in model_channel_mults]
 
         if fourier_scale == 'pos':
-            self.noise_fourier = MPPositionalEmbedding(model_channels) if noise_emb_dims > 0 else None
+            self.noise_fourier = MPPositionalEmbedding(noise_emb_dims) if noise_emb_dims > 0 else None
         else:
-            self.noise_fourier = MPFourier(model_channels, s=fourier_scale) if noise_emb_dims > 0 else None
+            self.noise_fourier = MPFourier(noise_emb_dims, s=fourier_scale) if noise_emb_dims > 0 else None
         self.noise_linear = MPConv(noise_emb_dims, emb_channels, kernel=[]) if noise_emb_dims > 0 else None
         self.conditional_layers = nn.ModuleList([])
         self.conditional_weights = [1] if self.noise_linear is not None else []
@@ -508,6 +509,7 @@ class EDMUnet2D(ModelMixin, ConfigMixin):
         return emb
 
     def forward(self, x, noise_labels, conditional_inputs, return_logvar=False, precomputed_embeds=None):
+        conditional_inputs = conditional_inputs or []
         assert len(conditional_inputs) == len(self.conditional_layers), "Invalid number of conditional inputs"
         
         emb = precomputed_embeds if precomputed_embeds is not None else self.compute_embeddings(noise_labels, conditional_inputs)
@@ -652,3 +654,12 @@ class EDMAutoencoder(ModelMixin, ConfigMixin):
             int: Total number of trainable parameters.
         """
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+class Logvar(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.logvar_fourier = MPFourier(channels)
+        self.logvar_linear = MPConv(channels, 1, kernel=[])
+
+    def forward(self, x):
+        return self.logvar_linear(self.logvar_fourier(x))

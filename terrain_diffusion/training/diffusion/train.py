@@ -17,7 +17,7 @@ from torch.utils.data import DataLoader
 from schedulefree import AdamWScheduleFree
 from heavyball.foreach_soap import ForeachSOAP
 from heavyball.foreach_adamw import ForeachAdamW
-from terrain_diffusion.training.diffusion.unet import EDMUnet2D
+from terrain_diffusion.training.unet import EDMUnet2D
 import torch._dynamo.config
 import torch._inductor.config
 from terrain_diffusion.training.utils import *
