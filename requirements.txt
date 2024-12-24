@@ -20,3 +20,4 @@ tifffile>=2024.9.20
 torch>=2.4.1
 torchvision>=0.19.1
 tqdm>=4.66.5
+hamiltorch>=0.1.0

@@ -25,9 +25,9 @@ from ema_pytorch import PostHocEMA
 from torch.utils.data import DataLoader
 import wandb
 from torchmetrics.image.fid import FrechetInceptionDistance
-from terrain_diffusion.inference.evaluation.utils import create_models, get_dataloader
+from terrain_diffusion.inference.evaluation.utils import get_dataloader
 from terrain_diffusion.training.datasets.datasets import LongDataset
-from terrain_diffusion.training.diffusion.registry import build_registry
+from terrain_diffusion.training.registry import build_registry
 from terrain_diffusion.training.utils import recursive_to
 from PIL import Image
 
@@ -120,9 +120,8 @@ def evaluate_models_fid(model_m,
         log_samples = num_samples
     
     # Initialize FID metric
-    if fid_metric is None:
-        fid_metric = FrechetInceptionDistance(feature=2048)
-        fid_metric = fid_metric.to(model_m.device)
+    fid_metric = FrechetInceptionDistance(feature=2048)
+    fid_metric = fid_metric.to(model_m.device)
     
     # Generate samples and calculate FID
     last_log = 0

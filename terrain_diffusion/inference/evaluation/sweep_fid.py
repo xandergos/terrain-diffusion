@@ -4,9 +4,9 @@ import click
 import optuna
 import torch
 from confection import Config, registry
-from terrain_diffusion.inference.evaluation.evaluate_fid import evaluate_models_fid
-from terrain_diffusion.inference.evaluation.utils import get_dataloader, create_models
-from terrain_diffusion.training.diffusion.registry import build_registry
+from terrain_diffusion.inference.evaluation.evaluate_fid import evaluate_models_fid, create_models
+from terrain_diffusion.inference.evaluation.utils import get_dataloader
+from terrain_diffusion.training.registry import build_registry
 
 gpu_lock = multiprocessing.Lock()
 
@@ -24,7 +24,7 @@ def objective(config, trial):
     guidance_scale = trial.suggest_float("guidance_scale", 1.0, 2.5)
     main_sigma_rel = trial.suggest_float("main_sigma_rel", 0.015, 0.25)
     guide_sigma_rel = trial.suggest_float("guide_sigma_rel", 0.015, 0.25)
-    guide_ema_step = trial.suggest_int("guide_ema_step", 23040, 51712, step=512)
+    guide_ema_step = trial.suggest_int("guide_ema_step", 2048, config['max_ema_step'], step=512)
     
     # Fixed configurations
     main_config = config['main_config']

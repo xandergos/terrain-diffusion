@@ -39,6 +39,10 @@ def mp_hardsilu(x):
 def mp_sigmoid(x):
     return torch.sigmoid(x) / 0.208
 
+def mp_leaky_relu(x, alpha):
+    factor = np.sqrt(2)/2 + (1 - np.sqrt(2)/2) * alpha
+    return torch.nn.functional.leaky_relu(x, alpha) / factor
+
 
 def mp_sum(args, w=None):
     """
@@ -259,7 +263,8 @@ class UNetBlock(nn.Module):
         resample_type='pooling',
         resample_filter=4,
         resample_skip_weight=0.5,
-        no_padding=False
+        no_padding=False,
+        activation='silu'
     ):
         """
         Block module for the EDM2Unet2D architecture.
@@ -302,6 +307,13 @@ class UNetBlock(nn.Module):
         self.clip_act = clip_act
         self.emb_gain = nn.Parameter(torch.zeros([]))
         
+        if activation == 'silu':
+            self.activation = mp_silu
+        elif activation == 'leaky_relu':
+            self.activation = partial(mp_leaky_relu, alpha=0.2)
+        else:
+            raise ValueError(f"Activation {activation} not supported")
+        
         self.conv_type = conv_type
         if conv_type == 'fused' or conv_type == 'default':
             self.conv_res0 = MPConv(out_channels if mode == 'enc' else in_channels, out_channels * expansion_factor, kernel=[3, 3], no_padding=no_padding)
@@ -339,16 +351,16 @@ class UNetBlock(nn.Module):
 
         # Residual branch.
         if self.conv_type == 'mobile':
-            y = self.conv_res0[0](mp_silu(x))
-            y = self.conv_res0[1](mp_silu(y))
+            y = self.conv_res0[0](self.activation(x))
+            y = self.conv_res0[1](self.activation(y))
         else:
-            y = self.conv_res0(mp_silu(x))
+            y = self.conv_res0(self.activation(x))
         if self.emb_linear is not None:
             c = self.emb_linear(emb, gain=self.emb_gain) + 1
             c = c / torch.sqrt(torch.mean(c ** 2, dim=1, keepdim=True) + 1e-8)
-            y = mp_silu(y * c.unsqueeze(2).unsqueeze(3).to(y.dtype))
+            y = self.activation(y * c.unsqueeze(2).unsqueeze(3).to(y.dtype))
         else:
-            y = mp_silu(y)
+            y = self.activation(y)
         if self.training and self.dropout != 0:
             y = nn.functional.dropout(y, p=self.dropout)
         y = self.conv_res1(y)
@@ -356,6 +368,11 @@ class UNetBlock(nn.Module):
         # Connect the branches.
         if self.mode == 'dec' and self.conv_skip is not None:
             x = self.conv_skip(x)
+        
+        if x.shape[2:] != y.shape[2:]:
+            diff_h = x.shape[2] - y.shape[2]
+            diff_w = x.shape[3] - y.shape[3]
+            x = x[:, :, diff_h//2:-(diff_h-diff_h//2), diff_w//2:-(diff_w-diff_w//2)]
         x = mp_sum([x, y], w=self.res_balance)
 
         if self.num_heads != 0:

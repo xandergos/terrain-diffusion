@@ -4,9 +4,9 @@ import torch.nn as nn
 from diffusers.models.modeling_utils import ModelMixin
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 
-from ..unet import MPConv, UNetBlock, mp_silu, mp_concat, normalize
+from terrain_diffusion.training.unet import MPConv, UNetBlock, mp_silu, mp_concat, normalize, resample, mp_sum
 
-class GANGenerator(ModelMixin, ConfigMixin):
+class MPGenerator(ModelMixin, ConfigMixin):
     """
     A GAN generator that upsamples a latent vector to an image while maintaining translation invariance.
     The architecture is based on EDMUnet2D's decoder path but removes padding for translation invariance.
@@ -14,7 +14,6 @@ class GANGenerator(ModelMixin, ConfigMixin):
     @register_to_config
     def __init__(
         self,
-        latent_size,
         latent_channels,
         out_channels,
         model_channels=32,
@@ -24,7 +23,6 @@ class GANGenerator(ModelMixin, ConfigMixin):
     ):
         """
         Args:
-            latent_size (int): Size of input latent (will be upsampled 2x per block)
             latent_channels (int): Number of input channels in latent
             out_channels (int): Number of output channels
             model_channels (int): Base channel count (Default: 32)
@@ -34,12 +32,8 @@ class GANGenerator(ModelMixin, ConfigMixin):
         """
         super().__init__()
         
-        self.latent_size = latent_size
-        self.out_size = latent_size * 64  # 64x upsampling
-        
         block_kwargs = block_kwargs or {}
-        model_channel_mults = model_channel_mults or [8, 4, 2, 1]  # Reversed from encoder since we're going up
-        attn_resolutions = attn_resolutions or []
+        model_channel_mults = model_channel_mults or [8, 4, 2, 1]
         
         # Initial projection of latent
         self.initial_conv = MPConv(latent_channels, model_channels * model_channel_mults[0], 
@@ -52,22 +46,24 @@ class GANGenerator(ModelMixin, ConfigMixin):
         # For each resolution level
         for level, mult in enumerate(model_channel_mults):
             channels = model_channels * mult
-                
-            # Add specified number of blocks at this resolution
-            for _ in range(layers_per_block):
-                cin = cout
-                cout = channels
-                self.blocks.append(UNetBlock(cin, cout, 0, mode='dec',
-                                             attention=False,
-                                             no_padding=True,
-                                             **block_kwargs))
             
-            # Add upsampling block if not at final resolution
-            if level != len(model_channel_mults) - 1:
-                self.blocks.append(UNetBlock(cout, cout, 0, mode='dec',
-                                             resample_mode='up',
-                                             no_padding=True,
-                                             **block_kwargs))
+            # Replace GeneratorBlock with UNetBlock
+            for i in range(layers_per_block - 1):
+                self.blocks.append(UNetBlock(cout if i == 0 else channels, channels, 
+                                            emb_channels=0,
+                                            mode='dec',
+                                            resample_mode='keep',
+                                            no_padding=True,
+                                            **block_kwargs))
+                
+            self.blocks.append(UNetBlock(cout if layers_per_block == 1 else channels, channels, 
+                                         emb_channels=0,
+                                         mode='dec',
+                                         resample_mode='up' if level != len(model_channel_mults) - 1 else 'keep',
+                                         no_padding=True,
+                                         **block_kwargs))
+            
+            cout = channels
         
         # Final output convolution
         self.out_conv = MPConv(cout, out_channels, kernel=[1, 1], no_padding=True)
@@ -86,7 +82,7 @@ class GANGenerator(ModelMixin, ConfigMixin):
         x = self.initial_conv(z)
         
         for block in self.blocks:
-            x = block(x, None)  # None for emb since we don't use conditioning
+            x = block(x, emb=None)
             
         return self.out_conv(x, gain=self.out_gain)
 
@@ -95,3 +91,12 @@ class GANGenerator(ModelMixin, ConfigMixin):
         for module in self.modules():
             if module != self and hasattr(module, 'norm_weights'):
                 module.norm_weights()
+
+if __name__ == "__main__":
+    latent = torch.randn(1, 64, 5, 5)
+    model = MPGenerator(latent_channels=64, out_channels=1,
+                         model_channels=8,
+                         model_channel_mults=[128, 64, 32, 16, 8, 4, 2, 1],
+                         layers_per_block=1)
+    print(model)
+    print(model(latent).shape)

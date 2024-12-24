@@ -10,7 +10,7 @@ from confection import Config, registry
 from ema_pytorch import PostHocEMA
 from terrain_diffusion.training.datasets.datasets import LongDataset
 from terrain_diffusion.data.laplacian_encoder import *
-from terrain_diffusion.training.diffusion.registry import build_registry
+from terrain_diffusion.training.registry import build_registry
 from tqdm import tqdm
 import wandb
 from torch.utils.data import DataLoader
@@ -142,10 +142,10 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
         torch.serialization.add_safe_globals([np.core.multiarray.scalar])
         accelerator.load_state(ckpt_path)
         
-    def validate(repeats, dataloader, pbar_title):
+    def validate(steps, dataloader, pbar_title):
         validation_stats = {'loss': []}
         generator = torch.Generator(device=accelerator.device).manual_seed(config['training']['seed'])
-        pbar = tqdm(total=repeats * len(val_dataset), desc=pbar_title)
+        pbar = tqdm(total=steps, desc=pbar_title)
         val_dataloader_iter = iter(dataloader)
         while pbar.n < pbar.total:
             batch = next(val_dataloader_iter)
@@ -274,16 +274,16 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
         if config['evaluation']['validate_epochs'] > 0 and (state.epoch + 1) % config['evaluation']['validate_epochs'] == 0:
             if config['evaluation'].get('val_ema_idx', -1) >= 0 and config['evaluation']['val_ema_idx'] < len(ema.ema_models):
                 with temporary_ema_to_model(ema.ema_models[config['evaluation']['val_ema_idx']]):
-                    val_loss = validate(config['evaluation']['validation_repeats'], val_dataloader, "Validation Loss")
+                    val_loss = validate(config['evaluation']['validation_steps'], val_dataloader, "Validation Loss")
                     if config['evaluation'].get('training_eval', False):
-                        eval_loss = validate(config['evaluation']['validation_repeats'], dataloader, "Eval Loss")
+                        eval_loss = validate(config['evaluation']['validation_steps'], dataloader, "Eval Loss")
             else:
                 if config['evaluation'].get('val_ema_idx', -1) >= 0:
                     warnings.warn(f"Invalid val_ema_idx: {config['evaluation']['val_ema_idx']}. "
                                   "Falling back to using the model's parameters.")
-                val_loss = validate(config['evaluation']['validation_repeats'], val_dataloader, "Validation Loss")
+                val_loss = validate(config['evaluation']['validation_steps'], val_dataloader, "Validation Loss")
                 if config['evaluation'].get('training_eval', False):
-                    eval_loss = validate(config['evaluation']['validation_repeats'], dataloader, "Eval Loss")
+                    eval_loss = validate(config['evaluation']['validation_steps'], dataloader, "Eval Loss")
 
         state.epoch += 1
         if accelerator.is_main_process:
