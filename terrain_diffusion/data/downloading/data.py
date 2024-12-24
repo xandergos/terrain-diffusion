@@ -2,6 +2,8 @@ import click
 import ee
 import os
 from typing import Tuple, List
+
+from tqdm import tqdm
 from terrain_diffusion.data.downloading.world_grid import create_equal_area_grid
 import numpy as np
 from global_land_mask import globe
@@ -85,8 +87,8 @@ def calculate_land_percentage(cell: Tuple[float, float, float, float], resolutio
 @click.command()
 @click.option('--image', type=str, help='Image to export. Options: "dem" or "landcover" or "gtopo')
 @click.option('--output_dir', type=str, default="terrain_data", help='Directory where the exported data will be saved')
-@click.option('--output_size', type=int, default=8192, help='Output size of the image in pixels')
-@click.option('--output_resolution', type=int, default=60, help='Output resolution of the image in meters')
+@click.option('--output_size', type=int, default=4096, help='Output size of the image in pixels')
+@click.option('--output_resolution', type=int, default=90, help='Output resolution of the image in meters')
 @click.option('--land_threshold', type=float, default=0.1, help='Required land coverage percentage per export cell (Default 0.1%)')
 def download_data_cli(image, output_dir, output_size, output_resolution, land_threshold):
     """
@@ -104,20 +106,20 @@ def download_data_cli(image, output_dir, output_size, output_resolution, land_th
     
     # Get grid cells
     grid_cells = create_equal_area_grid((output_size*output_resolution, output_size*output_resolution))
-    
-    # Load datasets
-    landcover = ee.ImageCollection("COPERNICUS/Landcover/100m/Proba-V-C3/Global") \
-        .select(['discrete_classification', 'water-permanent-coverfraction']) \
-        .mosaic()
-    
-    dem = ee.Image('MERIT/DEM/v1_0_3')
         
     if image == "dem":
-        export_image = dem
+        export_image = ee.Image('MERIT/DEM/v1_0_3')
         image_name = "dem"
-    elif image == "landcover":
-        export_image = landcover
-        image_name = "landcover"
+    elif image == "landcover_class":
+        export_image = ee.ImageCollection("COPERNICUS/Landcover/100m/Proba-V-C3/Global") \
+            .select('discrete_classification') \
+            .mosaic()
+        image_name = "landcover_class"
+    elif image == "landcover_water":
+        export_image = ee.ImageCollection("COPERNICUS/Landcover/100m/Proba-V-C3/Global") \
+            .select('water-permanent-coverfraction') \
+            .mosaic()
+        image_name = "landcover_water"
     else:
         raise ValueError(f"Invalid image option: {image}. Please choose 'dem' or 'landcover'.")
         
@@ -138,7 +140,7 @@ def download_data_cli(image, output_dir, output_size, output_resolution, land_th
         
     # Create export tasks
     tasks = []
-    for i, cell in filtered_cells:
+    for i, cell in tqdm(filtered_cells, desc="Exporting cells"):
         task = export_cell_data(export_image, cell, output_dir, i, output_size, image_name)
         tasks.append(task)
         
