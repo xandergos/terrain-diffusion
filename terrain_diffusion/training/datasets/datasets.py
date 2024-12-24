@@ -140,8 +140,6 @@ class H5SuperresTerrainDataset(Dataset):
                  subset_weights=None,
                  subset_class_labels=None,
                  eval_dataset=False,
-                 latents_mean=None, 
-                 latents_std=None, 
                  sigma_data=0.5, 
                  clip_edges=True,
                  split=None):
@@ -168,8 +166,6 @@ class H5SuperresTerrainDataset(Dataset):
         self.subset_resolutions = subset_resolutions
         self.subset_weights = subset_weights
         self.subset_class_labels = subset_class_labels
-        self.latents_mean = torch.tensor(latents_mean).view(-1, 1, 1) if isinstance(latents_mean, list) else torch.clone(latents_mean).view(-1, 1, 1)
-        self.latents_std = torch.tensor(latents_std).view(-1, 1, 1) if isinstance(latents_std, list) else torch.clone(latents_std).view(-1, 1, 1)
         self.sigma_data = sigma_data
         self.clip_edges = clip_edges
         self.eval_dataset = eval_dataset
@@ -255,7 +251,6 @@ class H5SuperresTerrainDataset(Dataset):
         latent_channels = data_latent.shape[0]
         means, logvars = data_latent[:latent_channels//2], data_latent[latent_channels//2:]
         sampled_latent = torch.randn_like(means) * (logvars * 0.5).exp() + means
-        sampled_latent = (sampled_latent - self.latents_mean) / self.latents_std
         upsampled_latent = torch.nn.functional.interpolate(sampled_latent[None], (self.crop_size, self.crop_size), mode='nearest')[0]
         
         img = data_highfreq
@@ -429,3 +424,47 @@ def stacking_collate_fn(batch):
         else:
             stacked_tensors.append(stacking_collate_fn([item[i] for item in batch]))
     return tuple(stacked_tensors)
+
+class ETOPODataset(Dataset):
+    def __init__(self, folder, size, mean, std, crop_size=None, blur_sigma=None, eval_dataset=False):
+        self.folder = folder
+        self.size = size
+        self.mean = mean
+        self.std = std
+        self.crop_size = crop_size
+        self.blur_sigma = blur_sigma
+        self.eval_dataset = eval_dataset
+
+        files = os.listdir(folder)
+        self.files = [os.path.join(folder, file) for file in files if file.endswith('.tif') or file.endswith('.tiff')]
+
+    def __len__(self):
+        return len(self.files)
+
+    def __getitem__(self, index):
+        file = self.files[index]
+        img = Image.open(file)
+        img = img.resize((self.size, self.size), resample=Image.Resampling.BICUBIC)
+        img = np.array(img)
+        img = (img - self.mean) / self.std
+        img = img.astype(np.float32)
+        img = torch.from_numpy(img)[None]
+        
+        if self.crop_size is not None:
+            i = random.randint(0, img.shape[1] - self.crop_size)
+            j = random.randint(0, img.shape[2] - self.crop_size)
+            img = img[:, i:i+self.crop_size, j:j+self.crop_size]
+            
+        if self.blur_sigma is not None:
+            img = TF.gaussian_blur(img, kernel_size=(1+2*self.blur_sigma, 1+2*self.blur_sigma), sigma=(self.blur_sigma, self.blur_sigma))
+            
+        transform_idx = random.randrange(8) if not self.eval_dataset else 0
+        flip = (transform_idx // 4) == 1
+        rotate_k = transform_idx % 4
+        if flip:
+            img = torch.flip(img, dims=[-1])
+        if rotate_k != 0:
+            img = torch.rot90(img, k=rotate_k, dims=[-2, -1])
+            
+        return {'image': img}
+        

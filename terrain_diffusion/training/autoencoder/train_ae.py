@@ -11,7 +11,7 @@ from confection import Config, registry
 from ema_pytorch import PostHocEMA
 from terrain_diffusion.training.datasets.datasets import LongDataset
 from terrain_diffusion.data.laplacian_encoder import *
-from terrain_diffusion.training.diffusion.registry import build_registry
+from terrain_diffusion.training.registry import build_registry
 from tqdm import tqdm
 import wandb
 from torch.utils.data import DataLoader

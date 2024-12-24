@@ -8,7 +8,7 @@ from confection import Config, registry
 from terrain_diffusion.inference.evaluation.evaluate_fid import evaluate_models_fid
 from terrain_diffusion.inference.evaluation.evaluate_fid_consistency import evaluate_models_fid_consistency
 from terrain_diffusion.inference.evaluation.utils import create_models_consistency, get_dataloader, create_models
-from terrain_diffusion.training.diffusion.registry import build_registry
+from terrain_diffusion.training.registry import build_registry
 
 gpu_lock = multiprocessing.Lock()
 
