@@ -1,3 +1,4 @@
+from functools import lru_cache
 import itertools
 import json
 import math
@@ -426,14 +427,14 @@ def stacking_collate_fn(batch):
     return tuple(stacked_tensors)
 
 class ETOPODataset(Dataset):
-    def __init__(self, folder, size, mean, std, crop_size=None, blur_sigma=None, eval_dataset=False):
+    def __init__(self, folder, size, mean, std, crop_size=None, eval_dataset=False, blur_sigma=None):
         self.folder = folder
         self.size = size
         self.mean = mean
         self.std = std
         self.crop_size = crop_size
-        self.blur_sigma = blur_sigma
         self.eval_dataset = eval_dataset
+        self.blur_sigma = blur_sigma
 
         files = os.listdir(folder)
         self.files = [os.path.join(folder, file) for file in files if file.endswith('.tif') or file.endswith('.tiff')]
@@ -441,22 +442,26 @@ class ETOPODataset(Dataset):
     def __len__(self):
         return len(self.files)
 
-    def __getitem__(self, index):
-        file = self.files[index]
+    @lru_cache(maxsize=300)
+    def read_image(self, file):
         img = Image.open(file)
-        img = img.resize((self.size, self.size), resample=Image.Resampling.BICUBIC)
+        img = img.resize((self.size, self.size), resample=Image.Resampling.NEAREST)
         img = np.array(img)
         img = (img - self.mean) / self.std
         img = img.astype(np.float32)
         img = torch.from_numpy(img)[None]
+        if self.blur_sigma is not None:
+            img = TF.gaussian_blur(img, kernel_size=(1+2*self.blur_sigma, 1+2*self.blur_sigma), sigma=(self.blur_sigma, self.blur_sigma))
+        
+        return img
+    
+    def __getitem__(self, index):
+        img = self.read_image(self.files[index])
         
         if self.crop_size is not None:
             i = random.randint(0, img.shape[1] - self.crop_size)
             j = random.randint(0, img.shape[2] - self.crop_size)
             img = img[:, i:i+self.crop_size, j:j+self.crop_size]
-            
-        if self.blur_sigma is not None:
-            img = TF.gaussian_blur(img, kernel_size=(1+2*self.blur_sigma, 1+2*self.blur_sigma), sigma=(self.blur_sigma, self.blur_sigma))
             
         transform_idx = random.randrange(8) if not self.eval_dataset else 0
         flip = (transform_idx // 4) == 1

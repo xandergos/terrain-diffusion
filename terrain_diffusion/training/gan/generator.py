@@ -20,6 +20,7 @@ class MPGenerator(ModelMixin, ConfigMixin):
         model_channel_mults=None,
         layers_per_block=2,
         block_kwargs=None,
+        stem_width=7,
     ):
         """
         Args:
@@ -37,7 +38,7 @@ class MPGenerator(ModelMixin, ConfigMixin):
         
         # Initial projection of latent
         self.initial_conv = MPConv(latent_channels, model_channels * model_channel_mults[0], 
-                                 kernel=[1, 1], no_padding=True)
+                                 kernel=[stem_width, stem_width], no_padding=True)
         
         # Build decoder blocks
         self.blocks = nn.ModuleList()
@@ -93,10 +94,9 @@ class MPGenerator(ModelMixin, ConfigMixin):
                 module.norm_weights()
 
 if __name__ == "__main__":
-    latent = torch.randn(1, 64, 5, 5)
+    latent = torch.randn(1, 64, 19, 19)
     model = MPGenerator(latent_channels=64, out_channels=1,
                          model_channels=8,
-                         model_channel_mults=[128, 64, 32, 16, 8, 4, 2, 1],
-                         layers_per_block=1)
-    print(model)
+                         model_channel_mults=[4, 2, 1],
+                         layers_per_block=2)
     print(model(latent).shape)
