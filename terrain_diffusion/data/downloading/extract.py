@@ -33,10 +33,9 @@ def extract_grid_data(tiff_path: str, grid_cells: List[Tuple[float, float, float
         
         # Apply gaussian blur to valid data only
         valid_data = np.ma.masked_where(nodata_mask, data)
-        blurred_data = gaussian_filter(valid_data, sigma=10)
         
         # Restore nodata values
-        blurred_data[nodata_mask] = src.nodata
+        valid_data[nodata_mask] = src.nodata
         
         for idx, cell in tqdm(enumerate(grid_cells)):
             min_lon, min_lat, max_lon, max_lat = cell
@@ -45,7 +44,7 @@ def extract_grid_data(tiff_path: str, grid_cells: List[Tuple[float, float, float
             window = from_bounds(min_lon, min_lat, max_lon, max_lat, src.transform)
             
             # Extract the blurred data for this window
-            cell_data = blurred_data[window.toslices()]
+            cell_data = valid_data[window.toslices()]
             
             # If the window is empty or contains only nodata values, skip
             if cell_data.size != 0 and np.any(cell_data != src.nodata):
@@ -74,8 +73,8 @@ def extract_grid_data(tiff_path: str, grid_cells: List[Tuple[float, float, float
 # Example usage:
 if __name__ == "__main__":
     # Create grid cells
-    grid_cells = create_equal_area_grid((4096*90, 4096*90))
+    grid_cells = create_equal_area_grid((4096*90*4, 4096*90*4))
     
     # Extract data for each cell
-    tiff_path = "/home/agos/Downloads/ETOPO_2022_v1_60s_N90W180_bed.tif"
-    cell_data = extract_grid_data(tiff_path, grid_cells, output_dir="/mnt/ntfs2/shared/data/terrain/etopo", output_prefix="etopo")
+    tiff_path = "./world_elevation.tif"
+    cell_data = extract_grid_data(tiff_path, grid_cells, output_dir="/mnt/ntfs2/shared/data/terrain/etopo_large", output_prefix="etopo")

@@ -27,11 +27,9 @@ def create_equal_area_grid(target_size: Tuple[float, float]) -> List[Tuple[float
     
     # Generate latitude bands, stopping before exceeding MAX_LAT
     current_lat = MIN_LAT
-    while current_lat < MAX_LAT:
+    while current_lat + base_lat_spacing < MAX_LAT:
         # Ensure we don't exceed MAX_LAT
-        next_lat = min(current_lat + base_lat_spacing, MAX_LAT)
-        if next_lat - current_lat < base_lat_spacing * 0.5:  # Skip if resulting cell would be too small
-            break
+        next_lat = current_lat + base_lat_spacing
             
         # Adjust longitude spacing based on latitude to maintain equal area
         cos_lat = np.cos(np.radians(current_lat + (next_lat - current_lat)/2))
@@ -69,7 +67,7 @@ def plot_equal_area_grid():
     ax.add_feature(cfeature.LAND, alpha=0.3)
     
     # Get grid cells
-    grid_cells = create_equal_area_grid((1024*360, 1024*360))
+    grid_cells = create_equal_area_grid((4096*90*4, 4096*90*4))
     
     # Initialize counters
     water_only_cells = 0
