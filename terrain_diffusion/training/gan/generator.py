@@ -94,9 +94,9 @@ class MPGenerator(ModelMixin, ConfigMixin):
                 module.norm_weights()
 
 if __name__ == "__main__":
-    latent = torch.randn(1, 64, 25, 25)
+    latent = torch.randn(1, 64, 22, 22)
     model = MPGenerator(latent_channels=64, out_channels=1,
                          model_channels=8,
-                         model_channel_mults=[4, 2, 1],
+                         model_channel_mults=[8, 4, 2, 1],
                          layers_per_block=2)
     print(model(latent).shape)

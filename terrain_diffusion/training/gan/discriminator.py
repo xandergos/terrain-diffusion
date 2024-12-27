@@ -80,6 +80,6 @@ class MPDiscriminator(nn.Module):
                 module.norm_weights()
 
 if __name__ == '__main__':
-    x = torch.randn(1, 1, 256, 256)
-    d = MPDiscriminator(1, 32, [1, 1, 1, 1, 2, 4, 8])
+    x = torch.randn(1, 1, 32, 32)
+    d = MPDiscriminator(1, 32, [1, 2, 4, 8])
     print(d(x).shape)
