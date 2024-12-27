@@ -41,6 +41,17 @@ def main(ctx, config_path, ckpt_path, debug_run, resume_id):
     build_registry()
     config = Config().from_disk(config_path)
     
+    if os.path.exists(f"{config['logging']['save_dir']}/latest_checkpoint") and not ckpt_path:
+        print("The save_dir directory already exists. Would you like to resume training from the latest checkpoint? (y/n)")
+        if input().lower() == "y":
+            ckpt_path = f"{config['logging']['save_dir']}/latest_checkpoint"
+        elif input().lower() == "n":
+            print("Beginning new training run...")
+            return
+        else:
+            print("Unexpected input. Exiting...")
+            return
+        
     if debug_run:
         config['wandb']['mode'] = 'disabled'
     if resume_id:
@@ -165,12 +176,14 @@ def main(ctx, config_path, ckpt_path, debug_run, resume_id):
                     fake_pred = discriminator(fake_images)
                     g_loss = torch.nn.functional.softplus(-fake_pred).mean()
                     
-                    #std = torch.std(fake_images)
-                    #std_loss = std - torch.log(std) - 1
-                    #g_loss = g_loss + std_loss
+                    # KL divergence loss to encourage generator to produce samples from N(0, 1)
+                    mean = torch.mean(fake_images.flatten())
+                    std = torch.std(fake_images.flatten())
+                    kl_loss = 0.5 * (std**2 + mean**2 - 2 * torch.log(std) - 1)
+                    total_g_loss = g_loss + kl_loss * config['training'].get('kl_weight', 0.0)
                 
                 g_optimizer.zero_grad()
-                accelerator.backward(g_loss)
+                accelerator.backward(total_g_loss)
                 if accelerator.sync_gradients:
                     generator_grad_norm = accelerator.clip_grad_norm_(generator.parameters(), 1.0)
                 g_optimizer.step()
@@ -180,7 +193,7 @@ def main(ctx, config_path, ckpt_path, debug_run, resume_id):
 
             stats_hist['d_loss'].append(d_loss.item())
             stats_hist['g_loss'].append(g_loss.item())
-            
+            stats_hist['kl_loss'].append(kl_loss.item())
             state['seen'] += batch_size
             state['step'] += 1
             
@@ -193,6 +206,7 @@ def main(ctx, config_path, ckpt_path, debug_run, resume_id):
             progress_bar.set_postfix({
                 'd_loss': f"{np.mean(stats_hist['d_loss'][-10:]):.4f}",
                 'g_loss': f"{np.mean(stats_hist['g_loss'][-10:]):.4f}",
+                'kl_loss': f"{np.mean(stats_hist['kl_loss'][-10:]):.4f}",
                 'lr': lr,
                 'd_grad_norm': f"{discriminator_grad_norm:.4f}",
                 'g_grad_norm': f"{generator_grad_norm:.4f}"
@@ -206,6 +220,7 @@ def main(ctx, config_path, ckpt_path, debug_run, resume_id):
             log_values = {
                 'train/d_loss': np.mean(stats_hist['d_loss']),
                 'train/g_loss': np.mean(stats_hist['g_loss']),
+                'train/kl_loss': np.mean(stats_hist['kl_loss']),
                 'epoch': state['epoch'],
                 'step': state['step'],
                 'seen': state['seen'],

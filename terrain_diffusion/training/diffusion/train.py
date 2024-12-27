@@ -48,8 +48,18 @@ def get_optimizer(model, config):
 @click.pass_context
 def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, override):
     build_registry()
-    
     config = Config().from_disk(config_path) if config_path else None
+    
+    if os.path.exists(f"{config['logging']['save_dir']}/latest_checkpoint") and not ckpt_path:
+        print("The save_dir directory already exists. Would you like to resume training from the latest checkpoint? (y/n)")
+        if input().lower() == "y":
+            ckpt_path = f"{config['logging']['save_dir']}/latest_checkpoint"
+        elif input().lower() == "n":
+            print("Beginning new training run...")
+            return
+        else:
+            print("Unexpected input. Exiting...")
+            return
     
     # Handle both explicit overrides (-o flag) and wandb sweep parameters
     all_overrides = list(override)
