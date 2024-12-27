@@ -68,7 +68,7 @@ class MPGenerator(ModelMixin, ConfigMixin):
         
         # Final output convolution
         self.out_conv = MPConv(cout, out_channels, kernel=[1, 1], no_padding=True)
-        self.out_gain = nn.Parameter(torch.zeros([]))
+        self.out_gain = nn.Parameter(torch.ones([]))
 
     def forward(self, z):
         """
@@ -94,7 +94,7 @@ class MPGenerator(ModelMixin, ConfigMixin):
                 module.norm_weights()
 
 if __name__ == "__main__":
-    latent = torch.randn(1, 64, 19, 19)
+    latent = torch.randn(1, 64, 25, 25)
     model = MPGenerator(latent_channels=64, out_channels=1,
                          model_channels=8,
                          model_channel_mults=[4, 2, 1],

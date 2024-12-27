@@ -155,7 +155,7 @@ def main(ctx, config_path, ckpt_path, debug_run, resume_id):
                 d_optimizer.zero_grad()
                 accelerator.backward(d_loss)
                 if accelerator.sync_gradients:
-                    discriminator_grad_norm = accelerator.clip_grad_norm_(discriminator.parameters(), 1.0)
+                    discriminator_grad_norm = accelerator.clip_grad_norm_(discriminator.parameters(), 10.0)
                 d_optimizer.step()
 
             # Train generator
@@ -164,20 +164,13 @@ def main(ctx, config_path, ckpt_path, debug_run, resume_id):
                     discriminator.eval()
                     fake_pred = discriminator(fake_images)
                     g_loss = torch.nn.functional.softplus(-fake_pred).mean()
-                
-                    # KL Divergence loss to encourage fake_pred to follow a standard normal distribution
-                    fake_pred_flat = fake_pred.flatten()
-                    pred_mean = fake_pred_flat.mean()
-                    pred_std = fake_pred_flat.std()
                     
-                    # KL Divergence for Normal distribution: 
-                    # KL(N(μ,σ²) || N(0,1)) = log(1/σ) + (σ² + μ²)/2 - 1/2
-                    kl_loss = -torch.log(pred_std) + (pred_std**2 + pred_mean**2)/2 - 0.5
-                    
-                    full_g_loss = g_loss + kl_loss * config['training'].get('kl_weight', 0.0)
+                    #std = torch.std(fake_images)
+                    #std_loss = std - torch.log(std) - 1
+                    #g_loss = g_loss + std_loss
                 
                 g_optimizer.zero_grad()
-                accelerator.backward(full_g_loss)
+                accelerator.backward(g_loss)
                 if accelerator.sync_gradients:
                     generator_grad_norm = accelerator.clip_grad_norm_(generator.parameters(), 1.0)
                 g_optimizer.step()
@@ -187,7 +180,6 @@ def main(ctx, config_path, ckpt_path, debug_run, resume_id):
 
             stats_hist['d_loss'].append(d_loss.item())
             stats_hist['g_loss'].append(g_loss.item())
-            stats_hist['kl_loss'].append(kl_loss.item())
             
             state['seen'] += batch_size
             state['step'] += 1
@@ -201,7 +193,6 @@ def main(ctx, config_path, ckpt_path, debug_run, resume_id):
             progress_bar.set_postfix({
                 'd_loss': f"{np.mean(stats_hist['d_loss'][-10:]):.4f}",
                 'g_loss': f"{np.mean(stats_hist['g_loss'][-10:]):.4f}",
-                'kl_loss': f"{np.mean(stats_hist['kl_loss'][-10:]):.4f}",
                 'lr': lr,
                 'd_grad_norm': f"{discriminator_grad_norm:.4f}",
                 'g_grad_norm': f"{generator_grad_norm:.4f}"
@@ -215,7 +206,6 @@ def main(ctx, config_path, ckpt_path, debug_run, resume_id):
             log_values = {
                 'train/d_loss': np.mean(stats_hist['d_loss']),
                 'train/g_loss': np.mean(stats_hist['g_loss']),
-                'train/kl_loss': np.mean(stats_hist['kl_loss']),
                 'epoch': state['epoch'],
                 'step': state['step'],
                 'seen': state['seen'],
