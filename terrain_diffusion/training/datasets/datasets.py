@@ -46,7 +46,8 @@ class H5AutoencoderDataset(Dataset):
                  subset_weights=None,
                  subset_class_labels=None,
                  eval_dataset=False,
-                 split=None):
+                 split=None,
+                 sigma_data=0.5):
         """
         Args:
             h5_file (str): Path to the HDF5 file containing the dataset.
@@ -57,6 +58,7 @@ class H5AutoencoderDataset(Dataset):
             subset_class_labels (list): Class labels for each subset, determining the class of each subset. Defaults to None, which results in no class labels being returned.
             eval_dataset (bool, optional): Whether the dataset should be transformed deterministically. Defaults to False.
             split (str, optional): Split to use. Defaults to None (all splits).
+            sigma_data (float, optional): Data standard deviation. Defaults to 0.5.
         """
         if subset_weights is None:
             subset_weights = [1] * len(pct_land_ranges)
@@ -67,6 +69,7 @@ class H5AutoencoderDataset(Dataset):
         self.subset_weights = subset_weights
         self.subset_class_labels = subset_class_labels
         self.eval_dataset = eval_dataset
+        self.sigma_data = sigma_data
         
         num_subsets = len(subset_weights)
         assert len(pct_land_ranges) == len(subset_resolutions) == num_subsets, \
@@ -86,7 +89,7 @@ class H5AutoencoderDataset(Dataset):
                     split_valid = split is None or dset.attrs['split'] == split
     
                     if pct_land_valid and resolution_valid and split_valid:
-                        self.keys[i].add((dset.attrs['filename'], dset.attrs['resolution'], dset.attrs['chunk_id']))
+                        self.keys[i].add((dset.attrs['chunk_id'], dset.attrs['resolution'], dset.attrs['subchunk_id']))
         self.keys = [list(keys) for keys in self.keys]
 
     def __len__(self):
@@ -98,12 +101,14 @@ class H5AutoencoderDataset(Dataset):
         index = random.randrange(len(self.keys[subset_idx]))
         class_label = self.subset_class_labels[subset_idx] if self.subset_class_labels is not None else None
         
-        file, res, chunk_id = self.keys[subset_idx][index]
-        key = '$'.join([file, f'{res}m', chunk_id, 'highfreq'])
+        chunk_id, res, subchunk_id = self.keys[subset_idx][index]
+        key = '$'.join([chunk_id, f'{res}m', subchunk_id, 'residual'])
         
                 
         with h5py.File(self.h5_file, 'r') as f:
             data_shape = f[key].shape
+            dset_mean = f[key].attrs['residual_mean']
+            dset_std = f[key].attrs['residual_std']
             if not self.eval_dataset:
                 i = random.randint(0, data_shape[-2] - self.crop_size)
                 j = random.randint(0, data_shape[-1] - self.crop_size)
@@ -116,8 +121,8 @@ class H5AutoencoderDataset(Dataset):
             flip = (transform_idx // 4) == 1
             rotate_k = transform_idx % 4
             
-            data = torch.from_numpy(f[key][:, i:i+h, j:j+w])
-            
+            data = torch.from_numpy(f[key][i:i+h, j:j+w])[None]
+            data = (data - dset_mean) / dset_std
         assert data.shape[-1] > 0, f"Crop is empty. i: {i}, j: {j}, h: {h}, w: {w}, image shape: {data_shape}"
             
         # Apply transforms
@@ -189,7 +194,7 @@ class H5SuperresTerrainDataset(Dataset):
                     split_valid = split is None or dset.attrs['split'] == split
 
                     if pct_land_valid and resolution_valid and split_valid:
-                        self.keys[i].add((dset.attrs['filename'], dset.attrs['resolution'], dset.attrs['chunk_id']))
+                        self.keys[i].add((dset.attrs['chunk_id'], dset.attrs['resolution'], dset.attrs['subchunk_id']))
         self.keys = [list(keys) for keys in self.keys]
 
     def __len__(self):
@@ -201,16 +206,16 @@ class H5SuperresTerrainDataset(Dataset):
         index = random.randrange(len(self.keys[subset_idx]))
         class_label = self.subset_class_labels[subset_idx] if self.subset_class_labels is not None else None
         
-        file, res, chunk_id = self.keys[subset_idx][index]
-        base_key = '$'.join([file, f'{res}m', chunk_id])
+        chunk_id, res, subchunk_id = self.keys[subset_idx][index]
+        base_key = '$'.join([chunk_id, f'{res}m', subchunk_id])
         key_latent = base_key + '$latent'
-        key_highfreq = base_key + '$highfreq'
+        key_residual = base_key + '$residual'
         
         with h5py.File(self.h5_file, 'r') as f:
             latent_shape = f[key_latent].shape
-            highfreq_shape = f[key_highfreq].shape
+            residual_shape = f[key_residual].shape
             
-        upscale_factor = highfreq_shape[1] // latent_shape[2]
+        upscale_factor = residual_shape[-2] // latent_shape[2]
         latent_crop_size = self.crop_size // upscale_factor
         
         if not self.eval_dataset:
@@ -231,30 +236,34 @@ class H5SuperresTerrainDataset(Dataset):
         flip = (transform_idx // 4) == 1
         rotate_k = transform_idx % 4
         
-        # Adjust highfreq crop for flips and rotations. Note that we are inverting the transformation so we do it in reverse.
+        # Adjust residual crop for flips and rotations. Note that we are inverting the transformation so we do it in reverse.
         for _ in range(rotate_k):
-            li, lj = lj, highfreq_shape[2] - li - lh
+            li, lj = lj, residual_shape[-1] - li - lh
         if flip:
-            lj = highfreq_shape[2] - lj - lw
+            lj = residual_shape[-1] - lj - lw
             
         with h5py.File(self.h5_file, 'r') as f:
             data_latent = torch.from_numpy(f[key_latent][transform_idx, :, i:i+h, j:j+w])
-            data_highfreq = torch.from_numpy(f[key_highfreq][:, li:li+lh, lj:lj+lw])
+            data_residual = torch.from_numpy(f[key_residual][li:li+lh, lj:lj+lw])[None]
+            residual_std = f[key_residual].attrs['residual_std']
+            residual_mean = f[key_residual].attrs['residual_mean']
+            
+        data_residual = (data_residual - residual_mean) / residual_std * self.sigma_data
             
         assert data_latent.shape[-1] > 0, f"Latent crop is empty. i: {i}, j: {j}, h: {h}, w: {w}"
             
-        # Apply transforms to highfreq to match latent
+        # Apply transforms to residual to match latent
         if flip:
-            data_highfreq = torch.flip(data_highfreq, dims=[-1])
+            data_residual = torch.flip(data_residual, dims=[-1])
         if rotate_k != 0:
-            data_highfreq = torch.rot90(data_highfreq, k=rotate_k, dims=[-2, -1])
+            data_residual = torch.rot90(data_residual, k=rotate_k, dims=[-2, -1])
             
         latent_channels = data_latent.shape[0]
         means, logvars = data_latent[:latent_channels//2], data_latent[latent_channels//2:]
         sampled_latent = torch.randn_like(means) * (logvars * 0.5).exp() + means
         upsampled_latent = torch.nn.functional.interpolate(sampled_latent[None], (self.crop_size, self.crop_size), mode='nearest')[0]
         
-        img = data_highfreq
+        img = data_residual
         cond_img = upsampled_latent
         
         if class_label is not None:
@@ -276,7 +285,9 @@ class H5LatentsDataset(Dataset):
                  latents_std=None, 
                  sigma_data=0.5, 
                  clip_edges=True,
-                 split=None):
+                 split=None,
+                 cond_p_mean=1,
+                 cond_p_std=2):
         """
         Args:
             h5_file (str): Path to the HDF5 file containing the dataset.
@@ -304,6 +315,8 @@ class H5LatentsDataset(Dataset):
         self.split = split
         self.eval_dataset = eval_dataset
         self.clip_edges = clip_edges
+        self.cond_p_mean = cond_p_mean
+        self.cond_p_std = cond_p_std
         
         num_subsets = len(subset_weights)
         assert len(pct_land_ranges) == len(subset_resolutions) == num_subsets, \
@@ -323,13 +336,16 @@ class H5LatentsDataset(Dataset):
                     split_valid = split is None or dset.attrs['split'] == split
 
                     if pct_land_valid and resolution_valid and split_valid:
-                        self.keys[i].add((dset.attrs['filename'], dset.attrs['resolution'], dset.attrs['chunk_id']))
+                        self.keys[i].add((dset.attrs['chunk_id'], dset.attrs['resolution'], dset.attrs['subchunk_id']))
         self.keys = [list(keys) for keys in self.keys]
 
     def __len__(self):
         return max(len(keys) for keys in self.keys)
 
     def __getitem__(self, idx):
+        LOWFREQ_MEAN = -2128
+        LOWFREQ_STD = 2353
+        
         # Draw a random subset based on subset weights
         subset_idx = random.choices(range(len(self.subset_weights)), weights=self.subset_weights, k=1)[0]
         index = random.randrange(len(self.keys[subset_idx]))
@@ -342,6 +358,7 @@ class H5LatentsDataset(Dataset):
         
         with h5py.File(self.h5_file, 'r') as f:
             shape = f[key_latent].shape
+            assert f[key_lowfreq].shape == shape[2:]
         
         if not self.eval_dataset:
             if self.clip_edges:
@@ -369,7 +386,10 @@ class H5LatentsDataset(Dataset):
             
         with h5py.File(self.h5_file, 'r') as f:
             data_latent = torch.from_numpy(f[key_latent][transform_idx, :, i:i+h, j:j+w])
-            data_lowfreq = torch.from_numpy(f[key_lowfreq][:, li:li+lh, lj:lj+lw])
+            data_lowfreq = torch.from_numpy(f[key_lowfreq][li:li+lh, lj:lj+lw])[None]
+            
+        data_lowfreq = data_lowfreq.float()
+        data_lowfreq = (data_lowfreq - LOWFREQ_MEAN) / LOWFREQ_STD * self.sigma_data
             
         assert data_latent.shape[-1] > 0, f"Latent crop is empty. i: {i}, j: {j}, h: {h}, w: {w}"
             
@@ -385,7 +405,7 @@ class H5LatentsDataset(Dataset):
         sampled_latent = (sampled_latent - self.latents_mean) / self.latents_std * self.sigma_data
         
         img = torch.cat([sampled_latent, data_lowfreq], dim=0)
-        cond_img_sigma = torch.exp(torch.randn([1, 1, 1], dtype=torch.float32) * 2.0 + 1)
+        cond_img_sigma = torch.exp(torch.randn([1, 1, 1], dtype=torch.float32) * self.cond_p_std + self.cond_p_mean)
         cond_t = torch.atan(cond_img_sigma / self.sigma_data)
         cond_img = torch.cos(cond_t) * data_lowfreq + torch.sin(cond_t) * torch.randn_like(data_lowfreq) * self.sigma_data
         cond_img = cond_img / self.sigma_data
