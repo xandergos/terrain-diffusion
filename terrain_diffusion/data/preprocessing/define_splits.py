@@ -14,26 +14,26 @@ def split_dataset(dataset_file, val_pct=0.2, seed=68197):
         dataset_file (str): Path to the HDF5 file containing the dataset.
         val_pct (float): Percentage of the dataset to be used for validation.
     """
-    filenames = set()
+    tags = set()
     with h5py.File(dataset_file, 'a') as f:
         for key in f.keys():
-            filenames.add(f[key].attrs['filename'] + '$' + str(f[key].attrs['chunk_id']))
+            tags.add(f[key].attrs['chunk_id'])
 
-        filenames = list(filenames)
-        filenames.sort()
-        length_train = int((1 - val_pct) * len(filenames))
-        indices = torch.randperm(len(filenames), generator=torch.Generator().manual_seed(seed)).tolist()
-        filenames = [filenames[i] for i in indices]
-        train_filenames = filenames[:length_train]
-        val_filenames = filenames[length_train:]
+        tags = list(tags)
+        tags.sort()
+        length_train = int((1 - val_pct) * len(tags))
+        indices = torch.randperm(len(tags), generator=torch.Generator().manual_seed(seed)).tolist()
+        tags = [tags[i] for i in indices]
+        train_tags = tags[:length_train]
+        val_tags = tags[length_train:]
         
         for key in f.keys():
-            if f[key].attrs['filename'] + '$' + str(f[key].attrs['chunk_id']) in train_filenames:
+            if f[key].attrs['chunk_id'] in train_tags:
                 f[key].attrs['split'] = 'train'
             else:
                 f[key].attrs['split'] = 'val'
 
-        print(f"Finished splitting dataset. Training set: {len(train_filenames)} unique files, Validation set: {len(val_filenames)} unique files.")
+        print(f"Finished splitting dataset. Training set: {len(train_tags)} unique tags, Validation set: {len(val_tags)} unique tags.")
     
     
 

@@ -1,105 +1,148 @@
 """Shared utilities for preprocessing elevation data."""
 
+import skimage
 import torch
 import torch.nn.functional as F
 import tifffile as tiff
 import os
 import numpy as np
+import rasterio
+import scipy.interpolate
+def read_raster(file):
+    with rasterio.open(file) as src:
+        data = src.read(1)
+        return data
 
-def preprocess_elevation(img, image_size):
-    """Preprocess elevation data by resizing and handling ocean/land masks."""
-    if len(img.shape) == 2:
-        img = torch.from_numpy(img)
-        img = F.interpolate(img[None, None], (image_size, image_size), mode='area')[0, 0]
-        return img.numpy()
-    ocean = torch.from_numpy(img[:, :, 1]) if img.shape[2] == 2 else torch.from_numpy(np.zeros_like(img[:, :, 0]))
-    land = torch.from_numpy(img[:, :, 0])
-
-    land = F.interpolate(land[None, None], (image_size, image_size), mode='area')[0, 0]
-    ocean = F.interpolate(ocean[None, None], (image_size, image_size), mode='area')[0, 0]
-    ocean = torch.minimum(ocean, torch.tensor(-1.0))
-
-    land_mask = land > 0
-    
-    ocean = F.adaptive_avg_pool2d(ocean[None], (256, 256))
-    ocean = F.interpolate(ocean[None], (image_size, image_size), mode='bicubic')[0, 0]
-    ocean = torch.minimum(ocean, torch.tensor(-1.0))
-    
-    img = land * land_mask.float() + ocean * (1 - land_mask.float())
-    
-    return img.numpy()
-
-def process_single_file_base(file, elevation_folder, image_size, base_resolution, target_resolution, num_chunks, encoder):
+def process_single_file_base(
+    chunk_id, 
+    highres_elevation_folder, 
+    lowres_elevation_folder, 
+    highres_size, 
+    lowres_size,
+    lowres_sigma,
+    num_chunks=1,
+    landcover_folder=None,
+    watercover_folder=None,
+):
     """
     Process a single elevation file and return the preprocessed chunks.
     
     Args:
-        file (str): Filename to process
-        elevation_folder (str): Path to folder containing elevation files
-        image_size (int): Size to resize images to
-        base_resolution (int): Resolution of input images in meters
-        target_resolution (int): Target resolution in meters
-        num_chunks (int): Number of chunks to split the image into
-        encoder: LaplacianPyramidEncoder instance
+        chunk_id (int|str): The chunk id to process.
+        highres_elevation_folder (str): Path to the folder containing high-resolution elevation files.
+        lowres_elevation_folder (str): Path to the folder containing low-resolution elevation files.
+        highres_size (int): The size of the high-resolution images.
+        lowres_size (int): The size of the low-resolution images.
+        num_chunks (int): The number of chunks to divide the image into for processing. (Default: 1)
+        landcover_folder (str): Path to the folder containing land cover data. (Optional)
+        watercover_folder (str): Path to the folder containing water cover data. (Optional)
     
     Returns:
         list: List of dictionaries containing preprocessed chunks and metadata
     """
-    img = tiff.imread(os.path.join(elevation_folder, file)).astype(np.float32)
-    if len(img.shape) == 2 and np.any(img <= 0):
-        return []
+    file = chunk_id + '.tif'
+    highres_dem = read_raster(os.path.join(highres_elevation_folder, file)).astype(np.float32)
+    if not np.isnan(highres_dem).all():
+        highres_dem = skimage.transform.resize(highres_dem, (highres_size, highres_size), order=0, preserve_range=True)
+    else:
+        highres_dem = np.nan * np.ones((highres_size, highres_size), dtype=np.float32)
+    
+    lowres_dem = read_raster(os.path.join(lowres_elevation_folder, file)).astype(np.float32)
+    lowres_dem = skimage.transform.resize(lowres_dem, (lowres_size, lowres_size), order=1, preserve_range=True)
+    lowres_dem = skimage.filters.gaussian(lowres_dem, sigma=lowres_sigma)
+    
+    scaled_lowres_dem = skimage.transform.resize(lowres_dem, (highres_size, highres_size), order=1, preserve_range=True)
+    residual = highres_dem - scaled_lowres_dem
+    
+    # Replace NaN values over 10 pixels from non-NaN pixels with 0
+    if np.isnan(residual).all():
+        residual = np.zeros_like(residual)
+    elif np.isnan(residual).any():
+        # Create a mask of non-NaN pixels
+        nan_mask = np.isnan(residual)
+        distance = scipy.ndimage.distance_transform_edt(nan_mask)
+        residual[nan_mask] = -scaled_lowres_dem[nan_mask] * np.maximum(0, 1 - distance[nan_mask]/256)
+
+    if landcover_folder is not None:
+        landcover = read_raster(os.path.join(landcover_folder, file)).astype(np.float32)
+        landcover = skimage.transform.resize(landcover, (highres_size, highres_size), order=0, preserve_range=True)
+    else:
+        landcover = None
+    
+    if watercover_folder is not None:
+        watercover = read_raster(os.path.join(watercover_folder, file)).astype(np.float32)
+        watercover = skimage.transform.resize(watercover, (highres_size, highres_size), order=0, preserve_range=True)
+    else:
+        watercover = None
         
-    img = preprocess_elevation(img, image_size)
-    
-    downsample_factor = target_resolution // base_resolution
-    img = F.adaptive_avg_pool2d(torch.from_numpy(img)[None], 
-                              (img.shape[0] // downsample_factor, img.shape[1] // downsample_factor))
-    
-    h, w = img.shape[-2:]
-    chunk_size = h // num_chunks
+    highres_chunk_size = highres_size // num_chunks
+    lowres_chunk_size = lowres_size // num_chunks
     chunks_data = []
     
-    for chunk_h in range((h + chunk_size - 1) // chunk_size):
-        for chunk_w in range((w + chunk_size - 1) // chunk_size):
-            start_h = chunk_h * chunk_size
-            start_w = chunk_w * chunk_size
-            end_h = min(start_h + chunk_size, h)
-            end_w = min(start_w + chunk_size, w)
+    num_chunks = (highres_size + highres_chunk_size - 1) // highres_chunk_size
+    for chunk_h in range(num_chunks):
+        for chunk_w in range(num_chunks):
+            highres_start_h = chunk_h * highres_chunk_size
+            highres_start_w = chunk_w * highres_chunk_size
+            highres_end_h = min(highres_start_h + highres_chunk_size, highres_size)
+            highres_end_w = min(highres_start_w + highres_chunk_size, highres_size)
             
-            img_chunk = img[..., start_h:end_h, start_w:end_w]
-            pct_land = torch.mean((img_chunk > 0).float()).item()
+            lowres_start_h = chunk_h * lowres_chunk_size
+            lowres_start_w = chunk_w * lowres_chunk_size
+            lowres_end_h = min(lowres_start_h + lowres_chunk_size, lowres_size)
+            lowres_end_w = min(lowres_start_w + lowres_chunk_size, lowres_size)
             
-            encoded, downsampled_encoding = encoder.encode(img_chunk, return_downsampled=True)
+            pct_land = np.mean(lowres_dem[..., lowres_start_h:lowres_end_h, lowres_start_w:lowres_end_w] > 0)
             
             chunks_data.append({
-                'highfreq': encoded[:1],
-                'lowfreq': downsampled_encoding[-1],
+                'residual': residual[..., highres_start_h:highres_end_h, highres_start_w:highres_end_w],
+                'highfreq': highres_dem[..., highres_start_h:highres_end_h, highres_start_w:highres_end_w],
+                'lowfreq': lowres_dem[..., lowres_start_h:lowres_end_h, lowres_start_w:lowres_end_w],
+                'landcover': landcover[..., highres_start_h:highres_end_h, highres_start_w:highres_end_w] if landcover is not None else None,
+                'watercover': watercover[..., highres_start_h:highres_end_h, highres_start_w:highres_end_w] if watercover is not None else None,
                 'pct_land': pct_land,
-                'filename': file,
-                'chunk_id': f'chunk_{chunk_h}_{chunk_w}'
+                'chunk_id': chunk_id,
+                'subchunk_id': f'chunk_{chunk_h}_{chunk_w}'
             })
     
     return chunks_data
 
+
 class ElevationDataset(torch.utils.data.Dataset):
-    def __init__(self, dataset_files, elevation_folder, image_size, base_resolution, target_resolution, num_chunks, encoder):
-        self.dataset_files = dataset_files
-        self.elevation_folder = elevation_folder
-        self.image_size = image_size
-        self.base_resolution = base_resolution
-        self.target_resolution = target_resolution
+    def __init__(self, 
+                 highres_elevation_folder, 
+                 lowres_elevation_folder, 
+                 highres_size, 
+                 lowres_size,
+                 lowres_sigma,
+                 num_chunks=1,
+                 landcover_folder=None,
+                 watercover_folder=None,
+                 skip_chunk_ids=None):
+        self.chunk_ids = list(map(lambda x: x.split('.')[0], os.listdir(highres_elevation_folder)))
+        self.highres_elevation_folder = highres_elevation_folder
+        self.lowres_elevation_folder = lowres_elevation_folder
+        self.highres_size = highres_size
+        self.lowres_size = lowres_size
+        self.lowres_sigma = lowres_sigma
         self.num_chunks = num_chunks
-        self.encoder = encoder
+        self.landcover_folder = landcover_folder
+        self.watercover_folder = watercover_folder
+        if skip_chunk_ids is not None:
+            skip_chunk_ids = set(str(x) for x in skip_chunk_ids)
+            self.chunk_ids = [f for f in self.chunk_ids if str(f) not in skip_chunk_ids]
     
     def __len__(self):
-        return len(self.dataset_files)
+        return len(self.chunk_ids)
     
     def __getitem__(self, idx):
-        file = self.dataset_files[idx]
-        return process_single_file_base(file, 
-                                        self.elevation_folder, 
-                                        self.image_size, 
-                                        self.base_resolution, 
-                                        self.target_resolution, 
+        cid = self.chunk_ids[idx]
+        return process_single_file_base(cid, 
+                                        self.highres_elevation_folder, 
+                                        self.lowres_elevation_folder, 
+                                        self.highres_size, 
+                                        self.lowres_size,
+                                        self.lowres_sigma,
                                         self.num_chunks, 
-                                        self.encoder)
+                                        self.landcover_folder, 
+                                        self.watercover_folder)

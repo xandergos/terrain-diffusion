@@ -238,6 +238,7 @@ class MPEmbedding(nn.Module):
         w = normalize(w)
         w = w.to(x.dtype)
 
+        assert torch.max(x) < self.weight.shape[0], f"Embedding index out of bounds: {torch.max(x).item()}"
         return nn.functional.embedding(x, self.weight)
     
     def norm_weights(self):
@@ -656,7 +657,7 @@ class EDMAutoencoder(ModelMixin, ConfigMixin):
         eps = torch.randn_like(std)
         return means + eps * std
     
-    def decode(self, z, return_logvar=False):
+    def decode(self, z):
         z = torch.cat([z, torch.ones_like(z[:, :1])], dim=1)  # Add ones channel to simulate bias
         z = self.decoder_conv(z)
         for block in self.decoder:

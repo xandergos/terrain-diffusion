@@ -22,21 +22,32 @@ from functools import partial
 from terrain_diffusion.data.preprocessing.utils import ElevationDataset, process_single_file_base
 
 @click.command()
-@click.option('--base-resolution', default=240, help='Resolution input images are in meters')
-@click.option('--target-resolution', default=480, help='Resolution output images should be in meters')
-@click.option('--num-chunks', default=2, help='Number of chunks to write to HDF5 file (along each axis)')
-@click.option('--image-size', default=4096, help='Size of the input image')
-@click.option('--lapl-enc-resize', default=8, help='How much to downsample the input image for the low-res channel')
-@click.option('--lapl-enc-sigma', default=5, help='Amount to blur the low-res channel')
-@click.option('--lapl-enc-lowres-mean', default=-2651, help='Mean value for encoder normalization (low res)')
-@click.option('--lapl-enc-lowres-std', default=2420, help='Std value for encoder normalization (low res)')
-@click.option('--lapl-enc-highres-mean', default=0, help='Mean value for encoder normalization (high res)')
-@click.option('--lapl-enc-highres-std', default=160, help='Std value for encoder normalization (high res)')
-@click.option('--output-file', default='dataset.h5', help='Output HDF5 filename')
-@click.option('--elevation-folder', required=True, help='Folder containing elevation .tiff/tif files')
-@click.option('--num-workers', type=int, default=None, help='Number of workers to use for encoding')
-def process_base_dataset(base_resolution, target_resolution, num_chunks, image_size, lapl_enc_resize, lapl_enc_sigma, lapl_enc_lowres_mean, lapl_enc_lowres_std, 
-                   lapl_enc_highres_mean, lapl_enc_highres_std, output_file, elevation_folder, num_workers):
+@click.option('--highres-elevation-folder', type=str, required=True, help='Path to the folder containing high-resolution elevation files')
+@click.option('--lowres-elevation-folder', type=str, required=True, help='Path to the folder containing low-resolution elevation files')
+@click.option('--highres-size', type=int, default=4096, help='Size of the high-resolution images')
+@click.option('--lowres-size', type=int, default=128, help='Size of the low-resolution images')
+@click.option('--lowres-sigma', type=float, default=5.0, help='Sigma for Gaussian smoothing of low-resolution images')
+@click.option('--resolution', type=int, default=90, help='Resolution of the input images in meters. Only used for labeling.')
+@click.option('--num-chunks', type=int, default=1, help='Number of chunks to divide the image into for processing')
+@click.option('--landcover-folder', type=str, default=None, help='Path to the folder containing land cover data (optional)')
+@click.option('--watercover-folder', type=str, default=None, help='Path to the folder containing water cover data (optional)')
+@click.option('-o', '--output-file', type=str, default='dataset.h5', help='Path to the output HDF5 file')
+@click.option('--num-workers', type=int, default=mp.cpu_count()-1, help='Number of parallel workers for processing')
+@click.option('--overwrite', is_flag=True, help='Overwrite existing datasets in the output file')
+def process_base_dataset(
+    highres_elevation_folder,
+    lowres_elevation_folder,
+    highres_size,
+    lowres_size,
+    lowres_sigma,
+    resolution,
+    num_chunks,
+    landcover_folder,
+    watercover_folder,
+    output_file,
+    num_workers,
+    overwrite
+):
     """
     Process elevation dataset into encoded HDF5 format.
     
@@ -56,42 +67,85 @@ def process_base_dataset(base_resolution, target_resolution, num_chunks, image_s
     else:
         print(f"{output_file} does not exist. Creating it and building datasets.")
     with h5py.File(output_file, 'a') as f:
-        encoder = LaplacianPyramidEncoder([lapl_enc_resize], lapl_enc_sigma, 
-                                        [lapl_enc_highres_mean, lapl_enc_lowres_mean], [lapl_enc_highres_std, lapl_enc_lowres_std])
-        
-        files = os.listdir(elevation_folder)
-        
         # Filter out files that are already in the HDF5 file
-        existing_files = set()
-        for key in f.keys():
-            filename = f[key].attrs['filename']
-            existing_files.add(filename)
+        if not overwrite:
+            skip_chunk_ids = set()
+            for key in f.keys():
+                if f[key].attrs['resolution'] == resolution:
+                    chunk_id = f[key].attrs['chunk_id']
+                    skip_chunk_ids.add(chunk_id)
+            print(f"Skipping {len(skip_chunk_ids)} existing chunk ids")
+        else:
+            for key in f.keys():
+                if f[key].attrs['resolution'] == resolution:
+                    del f[key]
+            skip_chunk_ids = set()
         
-        files = [f for f in files if f not in existing_files]
-        if len(files) == 0:
-            print("All files have already been processed. Exiting.")
-        print(f"Processing {len(files)} new files...")
+        dataset = ElevationDataset(
+            highres_elevation_folder,
+            lowres_elevation_folder,
+            highres_size,
+            lowres_size,
+            lowres_sigma,
+            num_chunks,
+            landcover_folder,
+            watercover_folder,
+            skip_chunk_ids
+        )
+        dataloader = torch.utils.data.DataLoader(dataset, batch_size=None, shuffle=False, num_workers=num_workers, prefetch_factor=6)
         
-        dataset = ElevationDataset(files, elevation_folder, image_size, base_resolution, target_resolution, num_chunks, encoder)
-        dataloader = torch.utils.data.DataLoader(dataset, batch_size=None, shuffle=False, num_workers=num_workers)
-        
-        # Process files in parallel
-        for chunks_data in tqdm(dataloader, total=len(files)):
+        # Process files in parallel with initial assumption
+        for chunks_data in tqdm(dataloader, desc="Saving datasets"):
             for chunk in chunks_data:
                 # Save to HDF5
                 for data_type, data in [
-                    ('highfreq', chunk['highfreq'].numpy()),
-                    ('lowfreq', chunk['lowfreq'].numpy())
+                    ('residual', chunk['residual']),
+                    ('lowfreq', chunk['lowfreq']),
+                    ('landcover', chunk['landcover']),
+                    ('watercover', chunk['watercover'])
                 ]:
-                    dset_name = f"{chunk['filename']}${target_resolution}m${chunk['chunk_id']}${data_type}"
-                    dset = f.create_dataset(dset_name, data=data, compression='lzf')
+                    if data is None:
+                        continue
+                    dset_name = f"{chunk['chunk_id']}${resolution}m${chunk['subchunk_id']}${data_type}"
+                    if dset_name in f:
+                        del f[dset_name]
+                    dset = f.create_dataset(dset_name, data=data.numpy(), compression='lzf')
                     dset.attrs.update({
                         'pct_land': chunk['pct_land'],
-                        'resolution': target_resolution,
+                        'resolution': resolution,
                         'data_type': data_type,
-                        'filename': chunk['filename'],
-                        'chunk_id': chunk['chunk_id']
+                        'chunk_id': chunk['chunk_id'],
+                        'subchunk_id': chunk['subchunk_id']
                     })
+                    f.flush()
+        
+        # Calculate std using saved residual datasets
+        print("Calculating residual mean and std using Welford's algorithm...")
+        mean = 0.0
+        M2 = 0.0
+        count = 0
+        
+        for key in tqdm(f.keys()):
+            if 'residual' in key and f[key].attrs['resolution'] == resolution:
+                data = f[key][:].flatten()
+                count += len(data)
+                delta = data - mean
+                mean += np.sum(delta) / count
+                delta2 = data - mean
+                M2 += np.sum(delta * delta2)
+        
+        residual_mean = mean
+        residual_std = np.sqrt(M2 / (count - 1))
+        print(f"Residual mean: {residual_mean}")
+        print(f"Residual std: {residual_std}")
+        
+        print("Adding residual std to dataset...")
+        for key in tqdm(f.keys()):
+            if f[key].attrs['resolution'] == resolution and 'residual' in key:
+                f[key].attrs['residual_std'] = residual_std
+                f[key].attrs['residual_mean'] = residual_mean
+            f.attrs[f'residual_std:{resolution}'] = residual_std
+            f.attrs[f'residual_mean:{resolution}'] = residual_mean
         
         print(f"Finished processing. Total datasets in file: {len(f.keys())}")
 

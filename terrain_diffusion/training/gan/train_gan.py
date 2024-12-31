@@ -114,7 +114,7 @@ def main(ctx, config_path, ckpt_path, debug_run, resume_id):
     # Training loop
     train_iter = iter(train_dataloader)
     while state['epoch'] < config['training']['epochs']:
-        stats_hist = {'g_loss': [], 'd_loss': [], 'kl_loss': []}
+        stats_hist = {'g_loss': [], 'd_loss': [], 'kl_loss': [], 'range_loss': []}
         progress_bar = tqdm(train_iter, desc=f"Epoch {state['epoch']}", 
                           total=config['training']['epoch_steps'])
         
@@ -181,6 +181,12 @@ def main(ctx, config_path, ckpt_path, debug_run, resume_id):
                     std = torch.std(fake_images.flatten())
                     kl_loss = 0.5 * (std**2 + mean**2 - 2 * torch.log(std) - 1)
                     total_g_loss = g_loss + kl_loss * config['training'].get('kl_weight', 0.0)
+                    
+                    # Range loss to encourage values between -2 and 3.2
+                    below_min = torch.nn.functional.relu(-2 - fake_images)
+                    above_max = torch.nn.functional.relu(fake_images - 3.2)
+                    range_loss = (below_min**2 + above_max**2).mean()
+                    total_g_loss = total_g_loss + range_loss * config['training'].get('range_weight', 1.0)
                 
                 g_optimizer.zero_grad()
                 accelerator.backward(total_g_loss)
@@ -194,6 +200,7 @@ def main(ctx, config_path, ckpt_path, debug_run, resume_id):
             stats_hist['d_loss'].append(d_loss.item())
             stats_hist['g_loss'].append(g_loss.item())
             stats_hist['kl_loss'].append(kl_loss.item())
+            stats_hist['range_loss'].append(range_loss.item())
             state['seen'] += batch_size
             state['step'] += 1
             
@@ -207,6 +214,7 @@ def main(ctx, config_path, ckpt_path, debug_run, resume_id):
                 'd_loss': f"{np.mean(stats_hist['d_loss'][-10:]):.4f}",
                 'g_loss': f"{np.mean(stats_hist['g_loss'][-10:]):.4f}",
                 'kl_loss': f"{np.mean(stats_hist['kl_loss'][-10:]):.4f}",
+                'range_loss': f"{np.mean(stats_hist['range_loss'][-10:]):.4f}",
                 'lr': lr,
                 'd_grad_norm': f"{discriminator_grad_norm:.4f}",
                 'g_grad_norm': f"{generator_grad_norm:.4f}"
