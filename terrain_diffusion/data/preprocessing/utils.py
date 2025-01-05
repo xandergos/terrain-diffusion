@@ -8,6 +8,8 @@ import os
 import numpy as np
 import rasterio
 import scipy.interpolate
+from terrain_diffusion.data.laplacian_encoder import laplacian_encode
+
 def read_raster(file):
     with rasterio.open(file) as src:
         data = src.read(1)
@@ -47,33 +49,43 @@ def process_single_file_base(
     else:
         highres_dem = np.nan * np.ones((highres_size, highres_size), dtype=np.float32)
     
-    lowres_dem = read_raster(os.path.join(lowres_elevation_folder, file)).astype(np.float32)
-    lowres_dem = skimage.transform.resize(lowres_dem, (lowres_size, lowres_size), order=1, preserve_range=True)
-    lowres_dem = skimage.filters.gaussian(lowres_dem, sigma=lowres_sigma)
+    base_lowres_dem = read_raster(os.path.join(lowres_elevation_folder, file)).astype(np.float32)
+    base_lowres_dem = skimage.transform.resize(base_lowres_dem, (lowres_size, lowres_size), order=1, preserve_range=True)
+    base_lowres_dem = skimage.filters.gaussian(base_lowres_dem, sigma=lowres_sigma)
     
-    scaled_lowres_dem = skimage.transform.resize(lowres_dem, (highres_size, highres_size), order=1, preserve_range=True)
-    residual = highres_dem - scaled_lowres_dem
+    scaled_base_lowres_dem = skimage.transform.resize(base_lowres_dem, (highres_size, highres_size), order=1, preserve_range=True)
     
     # Replace NaN values over 10 pixels from non-NaN pixels with 0
-    if np.isnan(residual).all():
-        residual = np.zeros_like(residual)
-    elif np.isnan(residual).any():
+    if np.isnan(highres_dem).all():
+        highres_dem = np.zeros_like(highres_dem)
+    elif np.isnan(highres_dem).any():
         # Create a mask of non-NaN pixels
-        nan_mask = np.isnan(residual)
+        nan_mask = np.isnan(highres_dem)
         distance = scipy.ndimage.distance_transform_edt(nan_mask)
-        residual[nan_mask] = -scaled_lowres_dem[nan_mask] * np.maximum(0, 1 - distance[nan_mask]/256)
+        alpha = np.minimum(1, distance[nan_mask]/32)
+        highres_dem[nan_mask] = scaled_base_lowres_dem[nan_mask] * alpha
 
     if landcover_folder is not None:
-        landcover = read_raster(os.path.join(landcover_folder, file)).astype(np.float32)
-        landcover = skimage.transform.resize(landcover, (highres_size, highres_size), order=0, preserve_range=True)
+        try:
+            landcover = read_raster(os.path.join(landcover_folder, file)).astype(np.float32)
+            landcover = skimage.transform.resize(landcover, (highres_size, highres_size), order=0, preserve_range=True)
+        except Exception:
+            print(f"Error reading landcover file {file}")
+            landcover = None
     else:
         landcover = None
     
     if watercover_folder is not None:
-        watercover = read_raster(os.path.join(watercover_folder, file)).astype(np.float32)
-        watercover = skimage.transform.resize(watercover, (highres_size, highres_size), order=0, preserve_range=True)
+        try:
+            watercover = read_raster(os.path.join(watercover_folder, file)).astype(np.float32)
+            watercover = skimage.transform.resize(watercover, (highres_size, highres_size), order=0, preserve_range=True)
+        except Exception:
+            print(f"Error reading watercover file {file}")
+            watercover = None
     else:
         watercover = None
+        
+    residual, lowres_dem = laplacian_encode(highres_dem, lowres_size, lowres_sigma)
         
     highres_chunk_size = highres_size // num_chunks
     lowres_chunk_size = lowres_size // num_chunks

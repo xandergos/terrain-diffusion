@@ -32,13 +32,13 @@ def get_model(checkpoint_path, sigma_rel=None, ema_step=None):
     return model
 
 models = [
-    get_model('checkpoints/diffusion_base-64x3/latest_checkpoint', sigma_rel=0.05).to(device)
+    get_model('checkpoints/diffusion_base-128x3/latest_checkpoint', sigma_rel=0.05).to(device)
 ]
 
 # Enable parallel processing on CPU
 torch.set_num_threads(16)
 
-dataset = H5LatentsDataset('dataset_encoded.h5', 64, [[0.9999, 1], [0.0, 0.9999]], [480, 480], [1, 0], [0, 0], eval_dataset=False,
+dataset = H5LatentsDataset('dataset.h5', 64, [[0, 1], [0, 1], [0, 1]], [90, 180, 360], [0, 0, 1], [0, 1, 2], eval_dataset=False,
                                    latents_mean=[0, 0, 0, 0],
                                    latents_std=[1, 1, 1, 1])
 

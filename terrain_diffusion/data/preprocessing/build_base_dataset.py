@@ -15,7 +15,6 @@ import torch.nn.functional as F
 import h5py
 from tqdm import tqdm
 import click
-from terrain_diffusion.data.laplacian_encoder import LaplacianPyramidEncoder
 from terrain_diffusion.training.unet import EDMAutoencoder, EDMUnet2D
 import multiprocessing as mp
 from functools import partial
@@ -34,6 +33,7 @@ from terrain_diffusion.data.preprocessing.utils import ElevationDataset, process
 @click.option('-o', '--output-file', type=str, default='dataset.h5', help='Path to the output HDF5 file')
 @click.option('--num-workers', type=int, default=mp.cpu_count()-1, help='Number of parallel workers for processing')
 @click.option('--overwrite', is_flag=True, help='Overwrite existing datasets in the output file')
+@click.option('--prefetch', type=int, default=2, help='Number of prefetch factor for the dataloader')
 def process_base_dataset(
     highres_elevation_folder,
     lowres_elevation_folder,
@@ -46,7 +46,8 @@ def process_base_dataset(
     watercover_folder,
     output_file,
     num_workers,
-    overwrite
+    overwrite,
+    prefetch
 ):
     """
     Process elevation dataset into encoded HDF5 format.
@@ -92,7 +93,7 @@ def process_base_dataset(
             watercover_folder,
             skip_chunk_ids
         )
-        dataloader = torch.utils.data.DataLoader(dataset, batch_size=None, shuffle=False, num_workers=num_workers, prefetch_factor=6)
+        dataloader = torch.utils.data.DataLoader(dataset, batch_size=None, shuffle=False, num_workers=num_workers, prefetch_factor=prefetch)
         
         # Process files in parallel with initial assumption
         for chunks_data in tqdm(dataloader, desc="Saving datasets"):
