@@ -30,6 +30,3 @@ def build_registry():
     
     registry.utils = catalogue.create("confection", "utils", entry_points=False)
     registry.utils.register("create_list", func=lambda *args: list(args))
-    
-    registry.encoder = catalogue.create("confection", "encoder", entry_points=False)
-    registry.encoder.register("laplacian_pyramid_encoder", func=LaplacianPyramidEncoder)

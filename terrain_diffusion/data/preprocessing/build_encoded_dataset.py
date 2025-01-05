@@ -15,7 +15,6 @@ import torch.nn.functional as F
 import h5py
 from tqdm import tqdm
 import click
-from terrain_diffusion.data.laplacian_encoder import LaplacianPyramidEncoder
 from terrain_diffusion.training.unet import EDMAutoencoder, EDMUnet2D
 import multiprocessing as mp
 from functools import partial

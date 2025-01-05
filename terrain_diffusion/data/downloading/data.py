@@ -47,7 +47,7 @@ def export_cell_data(image, cell: Tuple[float, float, float, float], output_dir:
     # Configure export parameters
     export_params = {
         'image': image,
-        'description': f'cell_{cell_index}' if image_name is None else f'{image_name}_cell_{cell_index}',
+        'description': f'{cell_index}',
         'folder': os.path.basename(output_dir),
         'region': region,
         'crs': 'EPSG:4326',
