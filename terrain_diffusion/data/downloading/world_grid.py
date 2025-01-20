@@ -38,8 +38,8 @@ def create_equal_area_grid(target_size: Tuple[float, float]) -> List[Tuple[float
         # Generate longitude divisions for this latitude band
         current_lon = -180
         while current_lon < 180:
-            next_lon = min(current_lon + adjusted_lon_spacing, 180)
-            if next_lon - current_lon < adjusted_lon_spacing * 0.5:  # Skip if resulting cell would be too small
+            next_lon = current_lon + adjusted_lon_spacing
+            if next_lon > 180:  # Skip if resulting cell would be too small
                 break
                 
             cell = (current_lon, current_lat, next_lon, next_lat)
@@ -67,7 +67,7 @@ def plot_equal_area_grid():
     ax.add_feature(cfeature.LAND, alpha=0.3)
     
     # Get grid cells
-    grid_cells = create_equal_area_grid((4096*90*4, 4096*90*4))
+    grid_cells = create_equal_area_grid((4096*90, 4096*90))
     
     # Initialize counters
     water_only_cells = 0

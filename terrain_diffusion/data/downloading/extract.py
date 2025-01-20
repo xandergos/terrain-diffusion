@@ -4,14 +4,12 @@ from rasterio.windows import from_bounds
 import numpy as np
 from typing import List, Tuple, Optional
 from tqdm import tqdm
-from scipy.ndimage import gaussian_filter
 from terrain_diffusion.data.downloading.world_grid import create_equal_area_grid
 
 def extract_grid_data(tiff_path: str, grid_cells: List[Tuple[float, float, float, float]],
-                      output_dir, output_prefix) -> List[Optional[np.ndarray]]:
+                      output_dir) -> List[Optional[np.ndarray]]:
     """
-    Extracts data from a GeoTIFF file for each grid cell in the provided list,
-    applying Gaussian blur preprocessing to the entire raster first.
+    Extracts data from a GeoTIFF file for each grid cell in the provided list.
     
     Args:
         tiff_path: Path to the GeoTIFF file
@@ -49,7 +47,7 @@ def extract_grid_data(tiff_path: str, grid_cells: List[Tuple[float, float, float
             # If the window is empty or contains only nodata values, skip
             if cell_data.size != 0 and np.any(cell_data != src.nodata):
                 # Create output path
-                output_path = f"{output_dir}/{output_prefix}_cell_{idx}.tif"
+                output_path = os.path.join(output_dir, f"{idx}.tif")
                 
                 # Get the transform for this window
                 window_transform = rasterio.windows.transform(window, src.transform)
@@ -73,8 +71,8 @@ def extract_grid_data(tiff_path: str, grid_cells: List[Tuple[float, float, float
 # Example usage:
 if __name__ == "__main__":
     # Create grid cells
-    grid_cells = create_equal_area_grid((4096*90*4, 4096*90*4))
+    grid_cells = create_equal_area_grid((4096*90, 4096*90))
     
     # Extract data for each cell
-    tiff_path = "./world_elevation.tif"
-    cell_data = extract_grid_data(tiff_path, grid_cells, output_dir="/mnt/ntfs2/shared/data/terrain/etopo_large", output_prefix="etopo")
+    tiff_path = "/mnt/ntfs2/shared/data/terrain/koppen_geiger.tif"
+    cell_data = extract_grid_data(tiff_path, grid_cells, output_dir="/mnt/ntfs2/shared/data/terrain/koppen_geiger")

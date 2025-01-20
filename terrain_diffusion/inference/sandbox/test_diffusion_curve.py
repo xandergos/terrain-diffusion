@@ -25,7 +25,7 @@ def get_model(channels, layers, tag, sigma_rel=None, ema_step=None, fs=1.0, chec
         attn_resolutions=[],
         midblock_attention=False,
         concat_balance=0.5,
-        conditional_inputs=[("embedding", 2, 0.2)],
+        conditional_inputs=[("embedding", 4, 0.2)],
         fourier_scale=fs
     )
 
@@ -41,17 +41,18 @@ def get_model(channels, layers, tag, sigma_rel=None, ema_step=None, fs=1.0, chec
 
 models = [
    # get_model(32, 2, '32x2', 0.05, fs='pos').to(device),
-    get_model(32, 2, '32x2', 0.05, fs='pos').to(device)
+    get_model(64, 3, '64x3', 0.05, fs='pos').to(device)
 ]
 
 # Enable parallel processing on CPU
 torch.set_num_threads(16)
 
-dataset = H5SuperresTerrainDataset('dataset_full_encoded.h5', 128, [[0.9999, 1], [0.0, 0.9999]], [480, 480], eval_dataset=False,
-                                   latents_mean=[0, 0, 0, 0],
-                                   latents_std=[1, 1, 1, 1])
+dataset = H5SuperresTerrainDataset('dataset.h5', 128, [[0, 1], [0, 1], [0, 1]], [90, 180, 360], eval_dataset=False,
+                                   subset_weights=[4, 2, 1],
+                                   subset_class_labels=[0, 1, 2],
+                                   sigma_data=0.5)
 
-dataloader = DataLoader(dataset, batch_size=64)
+dataloader = DataLoader(dataset, batch_size=16)
 
 torch.set_grad_enabled(False)
 
@@ -70,7 +71,7 @@ step = 0
 for sigma in tqdm(sigmas):
     sigma = sigma.to(device)
     sigma = sigma.expand(images.shape[0]).view(-1, 1, 1, 1)
-    #sigma = sigma * image_std_ratio
+    sigma = sigma * image_std_ratio
     
     t = torch.atan(sigma / sigma_data)
     cnoise = t.flatten()
@@ -105,14 +106,22 @@ norm = colors.Normalize(vmin=image_std_ratio.min().item(),
 cmap = plt.cm.viridis
 
 for i in range(len(models)):
+    model_mse_values = []
     for j in range(images.shape[0]):
         color = cmap(norm(image_std_ratio[j].item()))
-        snr = sigmas / max(0.05, image_std_ratio[j].item())
+        snr = sigmas# / max(0.05, image_std_ratio[j].item())
         if j == 0:  # Only add label for first sample to avoid cluttered legend
             ax.loglog(snr, mse_values[i][j], alpha=0.5, color=color, 
-                     label=f'Model {i+1}')
+                     label=f'Model {i+1} (Individual Samples)')
         else:
             ax.loglog(snr, mse_values[i][j], alpha=0.5, color=color)
+        
+        model_mse_values.append(mse_values[i][j])
+    
+    # Calculate and plot mean MSE
+    mean_mse_values = np.mean(model_mse_values, axis=0)
+    ax.loglog(snr, mean_mse_values, linewidth=2, color='black', 
+              linestyle='--', label=f'Model {i+1} (Mean)')
 
 # Add colorbar
 sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
