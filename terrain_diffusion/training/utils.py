@@ -20,6 +20,8 @@ def recursive_to(obj, device):
         return {k: recursive_to(v, device) for k, v in obj.items()}
     elif isinstance(obj, list):
         return [recursive_to(item, device) for item in obj]
+    elif isinstance(obj, tuple):
+        return tuple(recursive_to(item, device) for item in obj)
     return obj
 
 @contextmanager

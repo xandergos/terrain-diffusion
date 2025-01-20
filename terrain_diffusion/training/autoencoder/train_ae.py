@@ -154,6 +154,8 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
         )
 
     def percep_loss_fn(reconstruction, reference):
+        assert 1 == reconstruction.shape[1] == reference.shape[1]
+        
         ref_min = torch.amin(reference, dim=(1, 2, 3), keepdim=True)
         ref_max = torch.amax(reference, dim=(1, 2, 3), keepdim=True)
         eps = 0.1
@@ -198,9 +200,11 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
                 decoded_x = model.decode(z)
 
                 # Calculate losses
-                rec_direct_loss = variance_adjusted_loss(decoded_x, scaled_clean_images)
+                rec_direct_loss = variance_adjusted_loss(decoded_x[:, :1], scaled_clean_images[:, :1])
+                if decoded_x.shape[1] > 1:
+                    rec_direct_loss = rec_direct_loss + torch.nn.functional.binary_cross_entropy_with_logits(decoded_x[:, 1:], scaled_clean_images[:, 1:]).mean()
                 
-                rec_percep_loss = percep_loss_fn(decoded_x, scaled_clean_images)
+                rec_percep_loss = percep_loss_fn(decoded_x[:, :1], scaled_clean_images[:, :1])
                 kl_loss = -0.5 * torch.mean(1 + z_logvars - z_means**2 - z_logvars.exp())
                 
                 # Combine losses with weights
@@ -259,9 +263,11 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
                 decoded_x = model.decode(z)
                 
                 # Scaling MSE loss so large scale images don't dominate
-                rec_direct_loss = variance_adjusted_loss(decoded_x, scaled_clean_images)
+                rec_direct_loss = variance_adjusted_loss(decoded_x[:, :1], scaled_clean_images[:, :1])
+                if decoded_x.shape[1] > 1:
+                    rec_direct_loss = rec_direct_loss + torch.nn.functional.binary_cross_entropy_with_logits(decoded_x[:, 1:], scaled_clean_images[:, 1:]).mean()
                 
-                rec_percep_loss = percep_loss_fn(decoded_x, scaled_clean_images)
+                rec_percep_loss = percep_loss_fn(decoded_x[:, :1], scaled_clean_images[:, :1])
                 
                 kl_loss = -0.5 * torch.mean(1 + z_logvars - z_means**2 - z_logvars.exp())
                 

@@ -5,20 +5,12 @@ The output can be used to train superresolution or base diffusion models.
 Requires a pre-trained encoder model.
 """
 
-import asyncio
-import os
-import tifffile as tiff
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import torch.nn.functional as F
 import h5py
 from tqdm import tqdm
 import click
-from terrain_diffusion.training.unet import EDMAutoencoder, EDMUnet2D
-import multiprocessing as mp
-from functools import partial
-from terrain_diffusion.data.preprocessing.utils import ElevationDataset, process_single_file_base
+from terrain_diffusion.training.unet import EDMAutoencoder
 
 @click.command()
 @click.option('--dataset', required=True, help='Path to base HDF5 dataset containing highfreq/lowfreq')
@@ -32,78 +24,112 @@ def process_encoded_dataset(dataset, resolution, encoder_model_path, use_fp16, c
     Add latent encodings to an existing HDF5 dataset containing high/low frequency components.
     
     Takes a base HDF5 dataset containing highfreq/lowfreq components and adds corresponding latent
-    encodings using the specified encoder model.
+    encodings using the specified encoder model. Data is organized in groups:
+    {resolution}/{chunk_id}/{subchunk_id}/{data_type}
     """
     device = 'cuda'
     model = EDMAutoencoder.from_pretrained(encoder_model_path)
     model = model.encoder
+    use_watercover = model.config.in_channels == 2
     model.to(device)
 
     if compile_model:
         model = torch.compile(model)
 
-    # Open base dataset in append mode instead of reading two files
     with h5py.File(dataset, 'a') as f:
-        base_keys = list(f.keys())
-        base_keys = [k for k in base_keys if k.endswith('$residual')]
-        base_keys = [k for k in base_keys if str(f[k].attrs['resolution']) == str(resolution)]
+        if str(resolution) not in f:
+            raise ValueError(f"Resolution {resolution} not found in dataset")
         
-        for key in tqdm(base_keys):
-            latent_key = key.replace('$residual', '$latent')
-            if latent_key in f and not overwrite:
-                continue
-            
-            # Parse components from key
-            residual = torch.from_numpy(f[key][:])[None]
-            residual = (residual - f[key].attrs['residual_mean']) / f[key].attrs['residual_std']
-            
-            transformed_latent = []
-            for horiz_flip in [False, True]:
-                for rot_deg in [0, 90, 180, 270]:
-                    residual_transformed = residual
-                    if horiz_flip:
-                        residual_transformed = torch.flip(residual_transformed, dims=[-1])
-                    if rot_deg != 0:
-                        residual_transformed = torch.rot90(residual_transformed, k=rot_deg // 90, dims=[-2, -1])
-                    
-                    with torch.no_grad():
-                        input = residual_transformed[None].to(device=device)
-                        with torch.autocast(device_type=device, dtype=torch.float16 if use_fp16 else torch.float32):
-                            latent_residual = model(input, noise_labels=None, conditional_inputs=[]).cpu()[0]
-                    transformed_latent.append(latent_residual.numpy())
-            
-            transformed_latent = np.stack(transformed_latent)
-            
-            if latent_key in f:
-                del f[latent_key]
-            dset = f.create_dataset(latent_key, data=transformed_latent, compression='lzf')
-            dset.attrs.update(f[key].attrs)
-            dset.attrs['data_type'] = 'latent'
-            
-        # Calculate per-channel latent mean and std using Welford's algorithm
+        res_group = f[str(resolution)]
+        
+        # Process each chunk and subchunk
+        for chunk_id in tqdm(res_group.keys(), desc="Processing chunks"):
+            chunk_group = res_group[chunk_id]
+            for subchunk_id in chunk_group.keys():
+                subchunk_group = chunk_group[subchunk_id]
+                
+                # Skip if latent already exists and we're not overwriting
+                if 'latent' in subchunk_group and not overwrite:
+                    continue
+                
+                if 'residual' not in subchunk_group:
+                    print(f"No residual data found at resolution {resolution} for chunk {chunk_id}, subchunk {subchunk_id}")
+                    continue
+                
+                # Process residual data
+                residual = torch.from_numpy(subchunk_group['residual'][:])[None]
+                residual = (residual - res_group.attrs['residual_mean']) / \
+                          res_group.attrs['residual_std']
+                
+                input_data = residual
+                if use_watercover:
+                    # Add watercover channel, defaulting to zeros if not present
+                    watercover = torch.zeros_like(residual)
+                    if 'watercover' in subchunk_group:
+                        watercover = torch.from_numpy(subchunk_group['watercover'][:])[None] / 100
+                    input_data = torch.cat([residual, watercover], dim=0)
+                
+                transformed_latent = []
+                for horiz_flip in [False, True]:
+                    for rot_deg in [0, 90, 180, 270]:
+                        input_transformed = input_data
+                        if horiz_flip:
+                            input_transformed = torch.flip(input_transformed, dims=[-1])
+                        if rot_deg != 0:
+                            input_transformed = torch.rot90(input_transformed, k=rot_deg // 90, dims=[-2, -1])
+                        
+                        with torch.no_grad():
+                            model_input = input_transformed[None].to(device=device)
+                            with torch.autocast(device_type=device, dtype=torch.float16 if use_fp16 else torch.float32):
+                                latent_residual = model(model_input, noise_labels=None, conditional_inputs=[]).cpu()[0]
+                        transformed_latent.append(latent_residual.numpy())
+                
+                transformed_latent = np.stack(transformed_latent)
+                
+                if 'latent' in subchunk_group:
+                    del subchunk_group['latent']
+                dset = subchunk_group.create_dataset('latent', data=transformed_latent, compression='lzf', chunks=(1, 8, 32, 32))
+                dset.attrs.update(subchunk_group['residual'].attrs)
+                dset.attrs['data_type'] = 'latent'
+        
+        # Calculate per-channel latent statistics
         print("Calculating per-channel latent mean and std using Welford's algorithm...")
-        latent_keys = [k for k in f.keys() if k.endswith('$latent') and f[k].attrs['resolution'] == resolution]
-        if not latent_keys:
-            return
         
         # Initialize statistics arrays using first latent to get number of channels
-        num_channels = f[latent_keys[0]].shape[-1]
+        num_channels = None
+        for chunk_id in res_group:
+            for subchunk_id in res_group[chunk_id]:
+                if 'latent' in res_group[chunk_id][subchunk_id]:
+                    num_channels = res_group[chunk_id][subchunk_id]['latent'].shape[1] // 2
+                    break
+                
+        if num_channels is None:
+            print("No latent datasets found. Cannot calculate statistics.")
+            return
+            
         means = np.zeros(num_channels)
         M2s = np.zeros(num_channels)
         count = 0
         
-        for key in tqdm(latent_keys, desc="Computing statistics"):
-            # Data shape is (num_transforms, height, width, channels)
-            data = f[key][:]
-            batch_size = data.shape[0] * data.shape[1] * data.shape[2]
-            # Reshape to (N, channels)
-            data = data.reshape(-1, num_channels)
-            
-            count += batch_size
-            delta = data - means
-            means += np.sum(delta, axis=0) / count
-            delta2 = data - means
-            M2s += np.sum(delta * delta2, axis=0)
+        for chunk_id in tqdm(res_group.keys(), desc="Computing statistics"):
+            chunk_group = res_group[chunk_id]
+            for subchunk_id in chunk_group.keys():
+                subchunk_group = chunk_group[subchunk_id]
+                if 'latent' not in subchunk_group:
+                    continue
+                    
+                data = subchunk_group['latent'][:]
+                latent_mean, latent_logstd = data[:, :num_channels], data[:, num_channels:]
+                sampled_latent = np.random.randn(*latent_mean.shape) * np.exp(latent_logstd * 0.5) + latent_mean
+                
+                batch_size = sampled_latent.shape[0] * sampled_latent.shape[2] * sampled_latent.shape[3]
+                data = sampled_latent.transpose(0, 2, 3, 1).reshape(-1, num_channels)
+                
+                count += batch_size
+                delta = data - means
+                means += np.sum(delta, axis=0) / count
+                delta2 = data - means
+                M2s += np.sum(delta * delta2, axis=0)
         
         latent_means = means
         latent_stds = np.sqrt(M2s / (count - 1))
@@ -111,17 +137,11 @@ def process_encoded_dataset(dataset, resolution, encoder_model_path, use_fp16, c
         print(f"Latent means: {latent_means}")
         print(f"Latent stds: {latent_stds}")
         
-        print("Adding latent statistics to datasets...")
-        for key in tqdm(latent_keys, desc="Updating attributes"):
-            f[key].attrs['latent_stds'] = latent_stds
-            f[key].attrs['latent_means'] = latent_means
-        
         # Store in global attributes
-        f.attrs[f'latent_stds:{resolution}'] = latent_stds
-        f.attrs[f'latent_means:{resolution}'] = latent_means
+        res_group.attrs[f'latent_stds'] = latent_stds
+        res_group.attrs[f'latent_means'] = latent_means
 
-        print(f"Finished processing. Total datasets in file: {len(f.keys())}")
-
+        print(f"Finished processing resolution {resolution}")
 
 if __name__ == '__main__':
     process_encoded_dataset()

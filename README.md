@@ -38,3 +38,9 @@ Adjacent tiles become vastly more correlated. STD drops significantly. The image
 With full tile overlap (overlap = 32/64):
 The image is almost perfectly smooth, but there is not a significant change in STD, which tells us this may be overkill for many applications. Note how the image looks pretty similar to perlin noise! A good property to have when we are generating terrain.
 ![overlap32](https://github.com/user-attachments/assets/6eeef120-7af4-442b-a740-84008a22a9fb)
+
+### Datasets
+Koppen Geiger Climate Classification: https://www.nature.com/articles/s41597-023-02549-6
+WorldClim Bioclimatic Variables: https://www.worldclim.org/data/worldclim21.html
+Various EarthEngine Datasets: See data/downloading/data.py
+ETOPO Global Elevation (Using 60 arc-second here): https://www.ncei.noaa.gov/products/etopo-global-relief-model
