@@ -247,6 +247,14 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
                     if isinstance(optimizer, AdamWScheduleFree):
                         optimizer.train()
                     model.train()
+                    model_output, logvar = model(x, noise_labels=cnoise, conditional_inputs=conditional_inputs, return_logvar=True)
+                    
+                    pred_v_t = -sigma_data * model_output
+                    
+                    v_t = torch.cos(t) * noise - torch.sin(t) * images
+
+                    loss = 1 / (logvar.exp() * sigma_data ** 2) * ((pred_v_t - v_t) ** 2) + logvar
+                    loss = loss.mean()
 
                 state.seen += images.shape[0]
                 state.step += 1
