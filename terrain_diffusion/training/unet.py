@@ -20,12 +20,15 @@ def resample(x, mode='keep', factor=2):
     If mode is 'keep', the input tensor is returned as is.
     If the mode is 'down', the input tensor is downsampled by a factor of 2 by a 1x1 convolution with stride 2.
     If the mode is 'up', the input tensor is upsampled by a factor of 2 by a 2x2 convolution with stride 2 and uniform weight 1.
+    If the mode is 'up_bilinear', the input tensor is upsampled using bilinear interpolation.
     """
     if mode == 'keep':
         return x
     c = x.shape[1]
     if mode == 'down':
         return torch.nn.functional.conv2d(x, torch.ones([c, 1, 1, 1], device=x.device, dtype=x.dtype), groups=c, stride=factor)
+    if mode == 'up_bilinear':
+        return torch.nn.functional.interpolate(x, scale_factor=factor, mode='bilinear', align_corners=False)
     assert mode == 'up'
     return torch.nn.functional.conv_transpose2d(x, torch.ones([c, 1, factor, factor], device=x.device, dtype=x.dtype), groups=c, stride=factor)
 
@@ -40,7 +43,7 @@ def mp_sigmoid(x):
     return torch.sigmoid(x) / 0.208
 
 def mp_leaky_relu(x, alpha):
-    factor = np.sqrt(2)/2 + (1 - np.sqrt(2)/2) * alpha
+    factor = np.sqrt((1 + alpha**2) / 2)
     return torch.nn.functional.leaky_relu(x, alpha) / factor
 
 
@@ -135,10 +138,11 @@ class MPConvResample(nn.Module):
         """Resamples a tensor with MP convolution or transposed convolution.
 
         Args:
-            resample_mode (str): Either 'up' or 'down'.
+            resample_mode (str): Either 'up', 'up_bilinear', or 'down'.
             kernel (list): Kernel size for the convolution.
             in_channels (int): Number of input channels.
             out_channels (int): Number of output channels.
+            skip_weight (float): Weight for the skip connection.
         """
         super().__init__()
         self.resample_mode = resample_mode
@@ -147,7 +151,7 @@ class MPConvResample(nn.Module):
         self.skip_weight = skip_weight
         if self.resample_mode == 'down':
             self.weight = nn.Parameter(torch.ones(out_channels, in_channels, *kernel))
-        elif self.resample_mode == 'up':
+        elif self.resample_mode == 'up' or self.resample_mode == 'up_bilinear':
             self.weight = nn.Parameter(torch.ones(in_channels, out_channels, *kernel))
         else:
             raise ValueError("resample_mode must be either 'up' or 'down'")
@@ -406,7 +410,8 @@ class EDMUnet2D(ModelMixin, ConfigMixin):
         conditional_inputs=[],
         encode_only=False,
         disable_out_gain=False,
-        fourier_scale=1
+        fourier_scale=1,
+        n_logvar=1
     ):
         """
         Parameters:
@@ -434,6 +439,7 @@ class EDMUnet2D(ModelMixin, ConfigMixin):
                 The 'weight' of the noise input is fixed at 1.
             encode_only (bool, optional): Whether to only encode the input and not decode it. Default is False.
             fourier_scale (float, optional): The scale factor for the Fourier embedding. Default is 1. Can also use 'pos' to use a positional embedding.
+            n_logvar (int, optional): The number of logvar channels. Default is 1.
         """
         super().__init__()        
         self.concat_balance = concat_balance
@@ -511,7 +517,7 @@ class EDMUnet2D(ModelMixin, ConfigMixin):
         
         # logvar
         self.logvar_fourier = MPFourier(logvar_channels)
-        self.logvar_linear = MPConv(logvar_channels, 1, kernel=[])
+        self.logvar_linear = MPConv(logvar_channels, n_logvar, kernel=[])
 
     def compute_embeddings(self, noise_labels, conditional_inputs):
         conditional_inputs = conditional_inputs or []
@@ -575,7 +581,8 @@ class EDMAutoencoder(ModelMixin, ConfigMixin):
         logvar_channels=128,
         block_kwargs=None,
         conditional_inputs=[],
-        latent_channels=None
+        latent_channels=None,
+        n_logvar=1
     ):
         """
         EDMAutoencoder class that uses EDMUnet2D for encoding and UNetBlocks for decoding.
@@ -643,6 +650,8 @@ class EDMAutoencoder(ModelMixin, ConfigMixin):
                 self.decoder.append(UNetBlock(cin, cout, 0, mode='dec', attention=(res in attn_resolutions), **block_kwargs))
         self.out_conv = MPConv(cout, out_channels, kernel=[3, 3])
         self.out_gain = nn.Parameter(torch.ones([]) * 0.1)
+        
+        self.logvar = nn.Parameter(torch.zeros([n_logvar]))
 
     def preencode(self, x, conditional_inputs=None):
         encodings = self.encoder(x, noise_labels=None, conditional_inputs=conditional_inputs)
@@ -657,11 +666,14 @@ class EDMAutoencoder(ModelMixin, ConfigMixin):
         eps = torch.randn_like(std)
         return means + eps * std
     
-    def decode(self, z):
+    def decode(self, z, include_logvar=False):
         z = torch.cat([z, torch.ones_like(z[:, :1])], dim=1)  # Add ones channel to simulate bias
         z = self.decoder_conv(z)
         for block in self.decoder:
             z = block(z, None)
+        if include_logvar:
+            logvar = self.logvar.reshape(-1, 1, 1, 1)
+            return self.out_conv(z, gain=self.out_gain), logvar
         return self.out_conv(z, gain=self.out_gain)
 
     def count_parameters(self):
