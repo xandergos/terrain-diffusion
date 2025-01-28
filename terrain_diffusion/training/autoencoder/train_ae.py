@@ -9,6 +9,7 @@ import torch
 from accelerate import Accelerator
 from confection import Config, registry
 from ema_pytorch import PostHocEMA
+import yaml
 from terrain_diffusion.training.datasets.datasets import LongDataset
 from terrain_diffusion.data.laplacian_encoder import *
 from terrain_diffusion.training.registry import build_registry
@@ -55,8 +56,20 @@ def variance_adjusted_loss(reconstruction, reference, eps=0.25):
 def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, override):
     build_registry()
     
-    config = Config().from_disk(config_path) if config_path else None
+    with open(config_path, 'r') as f:
+        config = Config(yaml.safe_load(f))
     
+    if os.path.exists(f"{config['logging']['save_dir']}/latest_checkpoint") and not ckpt_path:
+        print("The save_dir directory already exists. Would you like to resume training from the latest checkpoint? (y/n)")
+        if input().lower() == "y":
+            ckpt_path = f"{config['logging']['save_dir']}/latest_checkpoint"
+        elif input().lower() == "n":
+            print("Beginning new training run...")
+            return
+        else:
+            print("Unexpected input. Exiting...")
+            return
+        
     # Handle both explicit overrides and wandb sweep parameters
     all_overrides = list(override)
     for param in ctx.args:
@@ -85,6 +98,7 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
     print("Run ID:", wandb.run.id)
     
     resolved = registry.resolve(config, validate=False)
+    tasks = resolved['training']['tasks']
 
     # Load anything that needs to be used for training.
     model = resolved['model']
@@ -169,15 +183,10 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
         
         rec_perceptual_loss = perceptual_loss(normalized_ref.repeat(1, 3, 1, 1), normalized_rec.repeat(1, 3, 1, 1))
         return rec_perceptual_loss.mean()
-
-    def validate(repeats, dataloader, pbar_title):
-        validation_stats = {
-            'loss': [], 
-            'kl_loss': [], 
-            'rec_direct_loss': [], 
-            'rec_percep_loss': []
-        }
-        pbar = tqdm(total=repeats * len(val_dataset), desc=pbar_title)
+    
+    def validate(total_steps, dataloader, pbar_title):
+        validation_stats = defaultdict(list)
+        pbar = tqdm(total=total_steps, desc=pbar_title)
         val_dataloader_iter = iter(dataloader)
         
         while pbar.n < pbar.total:
@@ -185,41 +194,55 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
             images = batch['image']
             cond_img = batch.get('cond_img')
             conditional_inputs = batch.get('cond_inputs')
-
-            sigma_data = config['training']['sigma_data']
             
             model.eval()
             with torch.no_grad(), accelerator.autocast():
-                scaled_clean_images = images / sigma_data
+                scaled_clean_images = images
                 if cond_img is not None:
                     scaled_clean_images = torch.cat([scaled_clean_images, cond_img], dim=1)
                 
                 # Encode and decode
                 z_means, z_logvars = model.preencode(scaled_clean_images, conditional_inputs)
                 z = model.postencode(z_means, z_logvars)
-                decoded_x = model.decode(z)
+                decoded_x, logvar = model.decode(z, include_logvar=True)
 
                 # Calculate losses
-                rec_direct_loss = variance_adjusted_loss(decoded_x[:, :1], scaled_clean_images[:, :1])
-                if decoded_x.shape[1] > 1:
-                    rec_direct_loss = rec_direct_loss + torch.nn.functional.binary_cross_entropy_with_logits(decoded_x[:, 1:], scaled_clean_images[:, 1:]).mean()
+                loss = 0
+                cidx = 0
+                for tidx, task in enumerate(tasks):
+                    task_loss = 0
+                    channels = task['channels']
+                    pred = decoded_x[:, cidx:cidx+channels]
+                    target = scaled_clean_images[:, cidx:cidx+channels]
+                    for loss_type, loss_weight in zip(task['losses'], task['weights']):
+                        if loss_type == 'va_mae':
+                            task_loss = task_loss + variance_adjusted_loss(pred, target) * loss_weight
+                        elif loss_type == 'mse':
+                            task_loss = task_loss + torch.nn.functional.mse_loss(pred, target) * loss_weight
+                        elif loss_type == 'percep':
+                            task_loss = task_loss + percep_loss_fn(pred, target) * loss_weight
+                        elif loss_type == 'bce':
+                            task_loss = task_loss + torch.nn.functional.binary_cross_entropy_with_logits(pred, target) * loss_weight
+                        elif loss_type == 'categorical':
+                            task_loss = task_loss + torch.nn.functional.cross_entropy(pred, target) * loss_weight
+                        else:
+                            raise ValueError(f"Unknown loss type: {loss_type}")
+                        validation_stats[f"{task['name']}_{loss_type}"].append(task_loss.item())
+                    cidx += channels
+                    task_loss = task_loss * task['task_weight']
+                    loss = loss + task_loss
                 
-                rec_percep_loss = percep_loss_fn(decoded_x[:, :1], scaled_clean_images[:, :1])
                 kl_loss = -0.5 * torch.mean(1 + z_logvars - z_means**2 - z_logvars.exp())
                 
                 # Combine losses with weights
-                loss = (config['training']['direct_weight'] * rec_direct_loss + 
-                       config['training']['percep_weight'] * rec_percep_loss + 
-                       config['training']['kl_weight'] * kl_loss)
+                loss = loss + kl_loss * config['training']['kl_weight']
 
             # Record statistics
             validation_stats['loss'].append(loss.item())
             validation_stats['kl_loss'].append(kl_loss.item())
-            validation_stats['rec_direct_loss'].append(rec_direct_loss.item())
-            validation_stats['rec_percep_loss'].append(rec_percep_loss.item())
             
             pbar.update(images.shape[0])
-            pbar.set_postfix({k: f"{np.mean(v):.4f}" for k, v in validation_stats.items()})
+            pbar.set_postfix({k: f"{np.mean(v):.3f}" for k, v in validation_stats.items()})
         
         # Return average losses
         return {k: np.mean(v) for k, v in validation_stats.items()}
@@ -250,32 +273,46 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
             images = batch['image']
             cond_img = batch.get('cond_img')
             conditional_inputs = batch.get('cond_inputs')
-
-            sigma_data = config['training']['sigma_data']
             
             with accelerator.autocast(), accelerator.accumulate(model):
-                scaled_clean_images = images / sigma_data
+                scaled_clean_images = images
                 if cond_img is not None:
                     scaled_clean_images = torch.cat([scaled_clean_images, cond_img], dim=1)
                 
                 z_means, z_logvars = model.preencode(scaled_clean_images, conditional_inputs)
                 z = model.postencode(z_means, z_logvars)
-                decoded_x = model.decode(z)
-                
-                # Scaling MSE loss so large scale images don't dominate
-                rec_direct_loss = variance_adjusted_loss(decoded_x[:, :1], scaled_clean_images[:, :1])
-                if decoded_x.shape[1] > 1:
-                    rec_direct_loss = rec_direct_loss + torch.nn.functional.binary_cross_entropy_with_logits(decoded_x[:, 1:], scaled_clean_images[:, 1:]).mean()
-                
-                rec_percep_loss = percep_loss_fn(decoded_x[:, :1], scaled_clean_images[:, :1])
+                decoded_x, logvar = model.decode(z, include_logvar=True)
+
+                # Calculate losses
+                loss = 0
+                cidx = 0
+                for tidx, task in enumerate(tasks):
+                    task_loss = 0
+                    channels = task['channels']
+                    pred = decoded_x[:, cidx:cidx+channels]
+                    target = scaled_clean_images[:, cidx:cidx+channels]
+                    for loss_type, loss_weight in zip(task['losses'], task['weights']):
+                        if loss_type == 'va_mae':
+                            task_loss = task_loss + variance_adjusted_loss(pred, target) * loss_weight
+                        elif loss_type == 'mse':
+                            task_loss = task_loss + torch.nn.functional.mse_loss(pred, target) * loss_weight
+                        elif loss_type == 'percep':
+                            task_loss = task_loss + percep_loss_fn(pred, target) * loss_weight
+                        elif loss_type == 'bce':
+                            task_loss = task_loss + torch.nn.functional.binary_cross_entropy_with_logits(pred, target) * loss_weight
+                        elif loss_type == 'categorical':
+                            task_loss = task_loss + torch.nn.functional.cross_entropy(pred, target) * loss_weight
+                        else:
+                            raise ValueError(f"Unknown loss type: {loss_type}")
+                        stats_hist[f"{task['name']}_{loss_type}"].append(task_loss.item())
+                    cidx += channels
+                    task_loss = task_loss * task['task_weight']
+                    loss = loss + task_loss
                 
                 kl_loss = -0.5 * torch.mean(1 + z_logvars - z_means**2 - z_logvars.exp())
                 
-                percep_weight = config['training']['percep_weight']
-                direct_weight = config['training']['direct_weight']
-                kl_weight = config['training']['kl_weight'] * min(1, state.step / config['training'].get('warmup_steps', 1))
-                
-                loss = direct_weight * rec_direct_loss + percep_weight * rec_percep_loss + kl_weight * kl_loss
+                # Combine losses with weights
+                loss = loss + kl_loss * config['training']['kl_weight']
                 
                 state.seen += images.shape[0]
                 state.step += 1
@@ -294,15 +331,10 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
 
             stats_hist['loss'].append(loss.item())
             stats_hist['kl_loss'].append(kl_loss.item())
-            stats_hist['rec_direct_loss'].append(rec_direct_loss.item())
-            stats_hist['rec_percep_loss'].append(rec_percep_loss.item())
             stats_hist['grad_norm'].append(grad_norm)
-            progress_bar.set_postfix({'loss': np.mean(stats_hist['loss']), 
-                                    'rec_direct_loss': np.mean(stats_hist['rec_direct_loss']),
-                                    'rec_percep_loss': np.mean(stats_hist['rec_percep_loss']),
-                                    'kl_loss': np.mean(stats_hist['kl_loss']),
-                                    "lr": lr,
-                                    "grad_norm": grad_norm})
+            postfix = {k: f"{np.mean(v):.3f}" for k, v in stats_hist.items()}
+            postfix.update({'lr': lr})
+            progress_bar.set_postfix(postfix)
             progress_bar.update(1)
             
         progress_bar.close()
@@ -312,29 +344,26 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
         if config['evaluation']['validate_epochs'] > 0 and (state.epoch + 1) % config['evaluation']['validate_epochs'] == 0:
             if config['evaluation'].get('val_ema_idx', -1) >= 0 and config['evaluation']['val_ema_idx'] < len(ema.ema_models):
                 with temporary_ema_to_model(ema.ema_models[config['evaluation']['val_ema_idx']]):
-                    val_losses = validate(config['evaluation']['validation_repeats'], val_dataloader, "Validation Loss")
+                    val_losses = validate(config['evaluation']['validation_steps'], val_dataloader, "Validation Loss")
                     if config['evaluation'].get('training_eval', False):
-                        eval_losses = validate(config['evaluation']['validation_repeats'], train_dataloader, "Eval Loss")
+                        eval_losses = validate(config['evaluation']['validation_steps'], train_dataloader, "Eval Loss")
             else:
                 if config['evaluation'].get('val_ema_idx', -1) >= 0:
                     warnings.warn(f"Invalid val_ema_idx: {config['evaluation']['val_ema_idx']}. "
                                   "Falling back to using the model's parameters.")
-                val_losses = validate(config['evaluation']['validation_repeats'], val_dataloader, "Validation Loss")
+                val_losses = validate(config['evaluation']['validation_steps'], val_dataloader, "Validation Loss")
                 if config['evaluation'].get('training_eval', False):
-                    eval_losses = validate(config['evaluation']['validation_repeats'], train_dataloader, "Eval Loss")
+                    eval_losses = validate(config['evaluation']['validation_steps'], train_dataloader, "Eval Loss")
                     
         state.epoch += 1
         if accelerator.is_main_process:
             wandb_logs = {
-                "loss": np.mean(stats_hist['loss']),
-                "kl_loss": np.mean(stats_hist['kl_loss']),
-                "rec_direct_loss": np.mean(stats_hist['rec_direct_loss']),
-                "rec_percep_loss": np.mean(stats_hist['rec_percep_loss']),
                 "lr": lr,
                 "step": state.step,
                 "epoch": state.epoch,
                 "seen": state.seen
             }
+            wandb_logs.update({k: v for k, v in stats_hist.items()})
             if val_losses:
                 val_losses = {f"val_{k}": v for k, v in val_losses.items()}
                 wandb_logs.update(val_losses)

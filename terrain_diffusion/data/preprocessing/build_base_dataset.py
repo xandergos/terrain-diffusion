@@ -37,6 +37,8 @@ from terrain_diffusion.data.preprocessing.calculate_stds import calculate_stats_
 @click.option('--num-workers', type=int, default=mp.cpu_count()-1, help='Number of parallel workers for processing')
 @click.option('--overwrite', is_flag=True, help='Overwrite existing datasets in the output file')
 @click.option('--prefetch', type=int, default=2, help='Number of prefetch factor for the dataloader')
+@click.option('--edge-margin', type=int, default=0, help='Number of pixels to remove from the edges of the lowres image, automatically scaled up for the highres image')
+@click.option('--min-stat-landcover-pct', type=float, default=0.1, help='Minimum percentage of landcover to include in the statistics calculation')
 def process_base_dataset(
     highres_elevation_folder,
     lowres_elevation_folder,
@@ -52,7 +54,9 @@ def process_base_dataset(
     output_file,
     num_workers,
     overwrite,
-    prefetch
+    prefetch,
+    edge_margin,
+    min_stat_landcover_pct
 ):
     """
     Process elevation dataset into encoded HDF5 format.
@@ -99,6 +103,7 @@ def process_base_dataset(
         dataset = ElevationDataset(
             highres_elevation_folder,
             lowres_elevation_folder,
+            resolution,
             highres_size,
             lowres_size,
             lowres_sigma,
@@ -107,7 +112,8 @@ def process_base_dataset(
             watercover_folder,
             koppen_geiger_folder,
             climate_folder,
-            skip_chunk_ids
+            skip_chunk_ids,
+            edge_margin
         )
         dataloader = torch.utils.data.DataLoader(dataset, batch_size=None, shuffle=False, num_workers=num_workers, prefetch_factor=prefetch)
         
@@ -131,7 +137,7 @@ def process_base_dataset(
                     elif data_type in ['lowfreq', 'koppen_geiger']:
                         chunk_shape = (32, 32)
                     elif data_type == 'climate':
-                        chunk_shape = (1, 128, 128)
+                        chunk_shape = (1, 32, 32)
                     
                     if data is None:
                         continue
@@ -148,7 +154,7 @@ def process_base_dataset(
         # Calculate stats for residual and climate datasets
         datasets_to_process = ['residual', 'climate']
         for dataset_name in datasets_to_process:
-            means, stds = calculate_stats_welford(res_group, dataset_name)
+            means, stds = calculate_stats_welford(res_group, dataset_name, min_stat_landcover_pct)
             
             print(f"{dataset_name} mean: {means}")
             print(f"{dataset_name} std: {stds}")

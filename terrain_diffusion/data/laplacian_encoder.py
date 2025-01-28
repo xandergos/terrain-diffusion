@@ -49,6 +49,7 @@ def laplacian_decode(residual, lowres, interp_mode=TF.InterpolationMode.BILINEAR
     while squeeze_count > 0:
         residual = residual.squeeze(0)
         lowres = lowres.squeeze(0)
+        lowres_up = lowres_up.squeeze(0)
         squeeze_count -= 1
         
     if is_numpy:

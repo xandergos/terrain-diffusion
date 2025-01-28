@@ -11,6 +11,7 @@ import h5py
 from tqdm import tqdm
 import click
 from terrain_diffusion.training.unet import EDMAutoencoder
+import torch.nn.functional as F
 
 @click.command()
 @click.option('--dataset', required=True, help='Path to base HDF5 dataset containing highfreq/lowfreq')
@@ -30,11 +31,14 @@ def process_encoded_dataset(dataset, resolution, encoder_model_path, use_fp16, c
     device = 'cuda'
     model = EDMAutoencoder.from_pretrained(encoder_model_path)
     model = model.encoder
-    use_watercover = model.config.in_channels == 2
     model.to(device)
 
     if compile_model:
         model = torch.compile(model)
+
+    # Define which climate channels to use (same as in H5AutoencoderDataset)
+    climate_channels = [0, 3, 11, 14]  # temp, temp seasonality, precip, precip seasonality
+    num_landcover_classes = 23
 
     with h5py.File(dataset, 'a') as f:
         if str(resolution) not in f:
@@ -42,32 +46,74 @@ def process_encoded_dataset(dataset, resolution, encoder_model_path, use_fp16, c
         
         res_group = f[str(resolution)]
         
+        LOWFREQ_MEAN = -2128
+        LOWFREQ_STD = 2353
+        landcover_classes = [0, 20, 30, 40, 50, 60, 70, 80, 90, 100, 111, 112, 113, 114, 115, 116, 121, 122, 123, 124, 125, 126, 200]
+            
         # Process each chunk and subchunk
         for chunk_id in tqdm(res_group.keys(), desc="Processing chunks"):
             chunk_group = res_group[chunk_id]
             for subchunk_id in chunk_group.keys():
                 subchunk_group = chunk_group[subchunk_id]
                 
-                # Skip if latent already exists and we're not overwriting
                 if 'latent' in subchunk_group and not overwrite:
                     continue
                 
                 if 'residual' not in subchunk_group:
                     print(f"No residual data found at resolution {resolution} for chunk {chunk_id}, subchunk {subchunk_id}")
                     continue
-                
-                # Process residual data
+
+                # Process residual data (full resolution)
                 residual = torch.from_numpy(subchunk_group['residual'][:])[None]
-                residual = (residual - res_group.attrs['residual_mean']) / \
-                          res_group.attrs['residual_std']
-                
-                input_data = residual
-                if use_watercover:
-                    # Add watercover channel, defaulting to zeros if not present
-                    watercover = torch.zeros_like(residual)
-                    if 'watercover' in subchunk_group:
-                        watercover = torch.from_numpy(subchunk_group['watercover'][:])[None] / 100
-                    input_data = torch.cat([residual, watercover], dim=0)
+                residual = (residual - res_group.attrs['residual_mean']) / res_group.attrs['residual_std']
+                full_shape = residual.shape[-2:]
+
+                # Get lowres data (1/8 resolution) and upsample
+                lowres = torch.from_numpy(subchunk_group['lowfreq'][:])[None]
+                lowres = F.interpolate(lowres[None], size=full_shape, mode='nearest')[0]
+                lowres = (lowres - LOWFREQ_MEAN) / LOWFREQ_STD
+
+                # Process climate data (1/8 resolution) and upsample
+                if 'climate' in subchunk_group:
+                    climate_data = torch.from_numpy(subchunk_group['climate'][:][climate_channels])
+                    climate_data = (climate_data - res_group.attrs['climate_mean'][climate_channels, None, None]) / \
+                                 res_group.attrs['climate_std'][climate_channels, None, None]
+                    climate_data = F.interpolate(climate_data[None], size=full_shape, mode='nearest')[0]
+                    climate_mask = ~torch.isnan(climate_data[0:1])
+                    climate_data = torch.nan_to_num(climate_data, 0.0)
+                else:
+                    climate_data = torch.zeros((4, *full_shape))
+                    climate_mask = torch.zeros((1, *full_shape))
+
+                # Process landcover data
+                if 'landcover' in subchunk_group:
+                    landcover_data = torch.from_numpy(subchunk_group['landcover'][:]).long()
+                    max_class = landcover_classes[-1]
+                    lookup = torch.full((max_class + 1,), len(landcover_classes) - 1, dtype=torch.long)
+                    for idx, class_val in enumerate(landcover_classes):
+                        lookup[class_val] = idx
+                    landcover_indices = lookup[landcover_data]
+                    landcover_onehot = F.one_hot(landcover_indices, num_classes=len(landcover_classes))
+                    landcover_onehot = landcover_onehot.permute(2, 0, 1)  # [C, H, W] format
+                else:
+                    landcover_onehot = torch.zeros((len(landcover_classes), *full_shape))
+                    landcover_onehot[-1] = 1  # Set unknown class (200) to 1
+
+                # Process watercover data
+                if 'watercover' in subchunk_group:
+                    water_data = torch.from_numpy(subchunk_group['watercover'][:])[None] / 100
+                else:
+                    water_data = torch.zeros((1, *full_shape))
+
+                # Concatenate all channels
+                input_data = torch.cat([
+                    residual,         # 1 channel
+                    lowres,          # 1 channel
+                    climate_data,    # 4 channels
+                    climate_mask,    # 1 channel
+                    landcover_onehot,# 23 channels
+                    water_data,      # 1 channel
+                ], dim=0).float()
                 
                 transformed_latent = []
                 for horiz_flip in [False, True]:

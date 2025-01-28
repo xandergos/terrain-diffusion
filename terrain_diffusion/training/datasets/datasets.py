@@ -13,6 +13,9 @@ import torchvision.transforms.v2.functional as TF
 from tqdm import tqdm
 from .transforms import TupleTransform
 import h5py
+from torchvision.datasets import CIFAR10
+from collections import deque
+import torch.nn.functional as F
 
 class AreaResize(torch.nn.Module):
     """
@@ -46,23 +49,18 @@ class H5AutoencoderDataset(Dataset):
                  subset_weights=None,
                  subset_class_labels=None,
                  eval_dataset=False,
-                 split=None,
-                 sigma_data=0.5,
-                 use_watercover=False,
-                 require_watercover=False):
+                 split=None):
         """
         Args:
             h5_file (str): Path to the HDF5 file containing the dataset.
             crop_size (int): Size of the random crop to extract from each image.
-            pct_land_ranges (list): Ranges of acceptable pct_land values [min, max], for each subset. Elements can be None to include everything.
-            subset_resolutions (list): Resolutions to filter subsets by. Each subset will only include elevation data with the corresponding resolution. Elements be None to include all resolutions.
-            subset_weights (list): Weights for each subset, determining the relative probability of sampling from that subset. Default is None, which results in uniform sampling.
-            subset_class_labels (list): Class labels for each subset, determining the class of each subset. Defaults to None, which results in no class labels being returned.
-            eval_dataset (bool, optional): Whether the dataset should be transformed deterministically. Defaults to False.
-            split (str, optional): Split to use. Defaults to None (all splits).
-            sigma_data (float, optional): Data standard deviation. Defaults to 0.5.
-            use_watercover (bool, optional): Whether to use watercover data. Defaults to False.
-            require_watercover (bool, optional): Whether to ignore samples without watercover data. Defaults to False, in which case missing watercover is assumed to be all 0.
+            pct_land_ranges (list): Ranges of acceptable pct_land values [min, max], for each subset.
+            subset_resolutions (list): Resolutions to filter subsets by.
+            subset_weights (list): Weights for each subset. Default is None (uniform sampling).
+            subset_class_labels (list): Class labels for each subset. Defaults to None.
+            eval_dataset (bool): Whether to use deterministic transforms. Defaults to False.
+            split (str): Split to use. Defaults to None (all splits).
+            sigma_data (float): Data standard deviation. Defaults to 0.5.
         """
         if subset_weights is None:
             subset_weights = [1] * len(pct_land_ranges)
@@ -73,10 +71,12 @@ class H5AutoencoderDataset(Dataset):
         self.subset_weights = subset_weights
         self.subset_class_labels = subset_class_labels
         self.eval_dataset = eval_dataset
-        self.sigma_data = sigma_data
-        self.use_watercover = use_watercover
-        self.require_watercover = require_watercover
         
+        # Define which climate channels to use and number of landcover classes
+        self.climate_channels = [0, 3, 11, 14]
+        self.num_landcover_classes = 23
+        
+        # Initialize keys
         num_subsets = len(subset_weights)
         assert len(pct_land_ranges) == len(subset_resolutions) == num_subsets, \
             "Number of subsets must match between pct_land_ranges, dataset_resolutions, and subset_weights."
@@ -100,9 +100,6 @@ class H5AutoencoderDataset(Dataset):
                         if 'residual' not in subchunk_group:
                             continue
                             
-                        if self.require_watercover and 'watercover' not in subchunk_group:
-                            continue
-                            
                         dset = subchunk_group['residual']
                         pct_land_valid = pct_land_range[0] <= dset.attrs['pct_land'] <= pct_land_range[1]
                         split_valid = split is None or dset.attrs['split'] == split
@@ -115,7 +112,9 @@ class H5AutoencoderDataset(Dataset):
         return max(len(keys) for keys in self.keys)
 
     def __getitem__(self, index):
-        # Draw a random subset based on subset weights
+        LOWFREQ_MEAN = -2128
+        LOWFREQ_STD = 2353
+        
         subset_idx = random.choices(range(len(self.subset_weights)), weights=self.subset_weights, k=1)[0]
         index = random.randrange(len(self.keys[subset_idx]))
         class_label = self.subset_class_labels[subset_idx] if self.subset_class_labels is not None else None
@@ -123,40 +122,92 @@ class H5AutoencoderDataset(Dataset):
         chunk_id, res, subchunk_id = self.keys[subset_idx][index]
         with h5py.File(self.h5_file, 'r') as f:
             group_path = f"{res}/{chunk_id}/{subchunk_id}"
+            res_group = f[str(res)]
+            
+            # Get crop indices
             dset = f[f"{group_path}/residual"]
             data_shape = dset.shape
-            dset_mean = dset.attrs['residual_mean']
-            dset_std = dset.attrs['residual_std']
             
             if not self.eval_dataset:
-                i = random.randint(0, data_shape[-2] - self.crop_size)
-                j = random.randint(0, data_shape[-1] - self.crop_size)
-                h, w = self.crop_size, self.crop_size
+                # Ensure i and j are multiples of 8 by first dividing by 8, then multiplying back
+                max_i = (data_shape[-2] - self.crop_size) // 8
+                max_j = (data_shape[-1] - self.crop_size) // 8
+                i = random.randint(0, max_i) * 8
+                j = random.randint(0, max_j) * 8
             else:
-                i, j = (data_shape[-2] - self.crop_size) // 2, (data_shape[-1] - self.crop_size) // 2
-                h, w = self.crop_size, self.crop_size
-                
-            transform_idx = random.randrange(8) if not self.eval_dataset else 0
-            flip = (transform_idx // 4) == 1
-            rotate_k = transform_idx % 4
+                # Center crop, ensuring it's aligned to 8-pixel boundaries
+                i = ((data_shape[-2] - self.crop_size) // 16) * 8
+                j = ((data_shape[-1] - self.crop_size) // 16) * 8
+            h, w = self.crop_size, self.crop_size
             
-            # Load elevation data
-            elev_data = torch.from_numpy(dset[i:i+h, j:j+w])[None]
-            elev_data = (elev_data - dset_mean) / dset_std
+            # Calculate scaled indices for 1/8 resolution data
+            i_low = i // 8
+            j_low = j // 8
+            h_low = h // 8
+            w_low = w // 8
             
-            # Load watercover if requested
-            if self.use_watercover:
-                try:
-                    water_data = torch.from_numpy(f[f"{group_path}/watercover"][i:i+h, j:j+w])[None] / 100 * self.sigma_data
-                except KeyError:
-                    water_data = torch.zeros_like(elev_data)
-                data = torch.cat([elev_data, water_data], dim=0)
-            else:
-                data = elev_data
+            # Load residual data (always available, full res)
+            residual_data = torch.from_numpy(dset[i:i+h, j:j+w])[None]
+            residual_data = (residual_data - res_group.attrs['residual_mean']) / res_group.attrs['residual_std']
+            
+            # Load lowres data (always available, 1/8 res)
+            lowres_data = torch.from_numpy(f[f"{group_path}/lowfreq"][i_low:i_low+h_low, j_low:j_low+w_low])[None]
+            lowres_data = F.interpolate(lowres_data[None], size=(h, w), mode='nearest')[0]
+            lowres_data = (lowres_data - LOWFREQ_MEAN) / LOWFREQ_STD
+            
+            # Load and upsample climate data with backup
+            try:
+                climate_data = torch.from_numpy(f[f"{group_path}/climate"][:, i_low:i_low+h_low, j_low:j_low+w_low])
+                climate_data = climate_data[self.climate_channels]
+                climate_data = (climate_data - res_group.attrs['climate_mean'][self.climate_channels, None, None]) /\
+                    res_group.attrs['climate_std'][self.climate_channels, None, None]
+                climate_data = F.interpolate(climate_data[None], size=(h, w), mode='nearest')[0]
+                # Create climate mask and handle NaNs
+                climate_mask = ~torch.isnan(climate_data[0:1])
+                climate_data = torch.nan_to_num(climate_data, 0.0)
+            except KeyError:
+                climate_data = torch.zeros((4, h, w))
+                climate_mask = torch.zeros((1, h, w))
+            
+            # Load and one-hot encode landcover data with backup
+            landcover_classes = [0, 20, 30, 40, 50, 60, 70, 80, 90, 100, 111, 112, 113, 114, 115, 116, 121, 122, 123, 124, 125, 126, 200]
+            
+            try:
+                landcover_data = torch.from_numpy(f[f"{group_path}/landcover"][i:i+h, j:j+w]).long()
+            except KeyError:
+                landcover_data = torch.full((h, w), 200, dtype=torch.long)
                 
-        assert data.shape[-1] > 0, f"Crop is empty. i: {i}, j: {j}, h: {h}, w: {w}, image shape: {data_shape}"
+            # Create lookup table for class indices
+            max_class = landcover_classes[-1]
+            lookup = torch.full((max_class + 1,), len(landcover_classes) - 1, dtype=torch.long)
+            for idx, class_val in enumerate(landcover_classes):
+                lookup[class_val] = idx
+            landcover_indices = lookup[landcover_data]
+            
+            landcover_onehot = F.one_hot(landcover_indices, num_classes=len(landcover_classes))
+            landcover_onehot = landcover_onehot.permute(2, 0, 1)  # [C, H, W] format
+            
+            # Load watercover data with backup
+            try:
+                water_data = torch.from_numpy(f[f"{group_path}/watercover"][i:i+h, j:j+w])[None] / 100
+            except KeyError:
+                water_data = torch.zeros((1, h, w))
+            
+            # Concatenate all channels
+            data = torch.cat([
+                residual_data,      # 1 channel
+                lowres_data,        # 1 channel
+                climate_data,       # 4 channels
+                climate_mask,       # 1 channel
+                landcover_onehot,   # 23 channels
+                water_data,         # 1 channel
+            ], dim=0).float()
             
         # Apply transforms
+        transform_idx = random.randrange(8) if not self.eval_dataset else 0
+        flip = (transform_idx // 4) == 1
+        rotate_k = transform_idx % 4
+            
         if flip:
             data = torch.flip(data, dims=[-1])
         if rotate_k != 0:
@@ -167,7 +218,7 @@ class H5AutoencoderDataset(Dataset):
         else:
             return {'image': data}
     
-class H5SuperresTerrainDataset(Dataset):
+class H5DecoderTerrainDataset(Dataset):
     """Dataset for reading terrain data from an HDF5 file with an encoding."""
     def __init__(self, 
                  h5_file, 
@@ -325,6 +376,157 @@ class H5SuperresTerrainDataset(Dataset):
         else:
             return {'image': img, 'cond_img': cond_img}
 
+class H5UpsamplingTerrainDataset(Dataset):
+    """Dataset for reading terrain data from an HDF5 file for upsampling tasks.
+    This dataset uses downsampled versions of terrain as conditioning instead of latent encodings.
+    """
+    def __init__(self, 
+                 h5_file, 
+                 crop_size, 
+                 pct_land_ranges, 
+                 subset_resolutions, 
+                 downsample_factor=2,
+                 subset_weights=None,
+                 subset_class_labels=None,
+                 eval_dataset=False,
+                 sigma_data=0.5, 
+                 clip_edges=True,
+                 split=None,
+                 use_watercover=False,
+                 require_watercover=False,
+                 downsample_sizes=[8]):
+        """
+        Args:
+            h5_file (str): Path to the HDF5 file containing the dataset.
+            crop_size (int): Size of the random crop to extract from each image.
+            pct_land_ranges (list): Ranges of acceptable pct_land values [min, max], for each subset.
+            subset_resolutions (list): Resolutions to filter subsets by.
+            downsample_factor (int): Factor by which to downsample the terrain (2 or 4).
+            subset_weights (list): Weights for each subset for sampling probability.
+            subset_class_labels (list): Class labels for each subset.
+            eval_dataset (bool): Whether to use deterministic transforms.
+            sigma_data (float): Data standard deviation.
+            clip_edges (bool): Whether to clip edges when cropping.
+            split (str): Dataset split to use.
+            use_watercover (bool): Whether to use watercover data.
+            require_watercover (bool): Whether to require watercover data.
+            downsample_sizes (list): Sizes to downsample the terrain for conditioning (equal weights).
+        """
+        super().__init__()
+        if subset_weights is None:
+            subset_weights = [1] * len(pct_land_ranges)
+        self.h5_file = h5_file
+        self.crop_size = crop_size
+        self.pct_land_ranges = pct_land_ranges
+        self.subset_resolutions = subset_resolutions
+        self.subset_weights = subset_weights
+        self.subset_class_labels = subset_class_labels
+        self.sigma_data = sigma_data
+        self.clip_edges = clip_edges
+        self.eval_dataset = eval_dataset
+        self.use_watercover = use_watercover
+        self.require_watercover = require_watercover
+        self.downsample_sizes = downsample_sizes
+        
+        num_subsets = len(subset_weights)
+        assert len(pct_land_ranges) == len(subset_resolutions) == num_subsets, \
+            "Number of subsets must match between pct_land_ranges, dataset_resolutions, and subset_weights."
+        assert subset_class_labels is None or len(subset_class_labels) == num_subsets, \
+            "Number of subset class labels must match number of subsets."
+        
+        self.keys = [set() for _ in range(num_subsets)]
+        with h5py.File(self.h5_file, 'r') as f:
+            for i, (pct_land_range, res) in enumerate(zip(pct_land_ranges, subset_resolutions)):
+                if pct_land_range is None:
+                    pct_land_range = [0, 1]
+                    
+                if str(res) not in f:
+                    continue
+                    
+                res_group = f[str(res)]
+                for chunk_id in res_group:
+                    chunk_group = res_group[chunk_id]
+                    for subchunk_id in chunk_group:
+                        subchunk_group = chunk_group[subchunk_id]
+                        if 'residual' not in subchunk_group:
+                            continue
+                            
+                        dset = subchunk_group['residual']
+                        pct_land_valid = pct_land_range[0] <= dset.attrs['pct_land'] <= pct_land_range[1]
+                        split_valid = split is None or dset.attrs['split'] == split
+    
+                        if pct_land_valid and split_valid:
+                            self.keys[i].add((chunk_id, res, subchunk_id))
+        self.keys = [list(keys) for keys in self.keys]
+
+    def __len__(self):
+        return max(len(keys) for keys in self.keys)
+
+    def __getitem__(self, index):
+        # Draw a random subset based on subset weights
+        subset_idx = random.choices(range(len(self.subset_weights)), weights=self.subset_weights, k=1)[0]
+        index = random.randrange(len(self.keys[subset_idx]))
+        downsample_size = random.choice(self.downsample_sizes)
+        
+        chunk_id, res, subchunk_id = self.keys[subset_idx][index]
+        with h5py.File(self.h5_file, 'r', rdcc_nbytes=16*1024**2) as f:
+            group_path = f"{res}/{chunk_id}/{subchunk_id}"
+            residual_dset = f[f"{group_path}/residual"]
+            
+            if not self.eval_dataset:
+                if self.clip_edges:
+                    i = random.randint(1, residual_dset.shape[0] - self.crop_size - 1)
+                    j = random.randint(1, residual_dset.shape[1] - self.crop_size - 1)
+                else:
+                    i = random.randint(0, residual_dset.shape[0] - self.crop_size)
+                    j = random.randint(0, residual_dset.shape[1] - self.crop_size)
+            else:
+                i = (residual_dset.shape[0] - self.crop_size) // 2
+                j = (residual_dset.shape[1] - self.crop_size) // 2
+                
+            # Extract crop
+            data_residual = torch.from_numpy(residual_dset[i:i+self.crop_size, j:j+self.crop_size])[None]
+            
+            # Normalize residual
+            residual_std = f[str(res)].attrs['residual_std']
+            residual_mean = f[str(res)].attrs['residual_mean']
+            data_residual = (data_residual - residual_mean) / residual_std * self.sigma_data
+            
+            # Load watercover if requested
+            if self.use_watercover:
+                try:
+                    water_data = torch.from_numpy(f[f"{group_path}/watercover"][i:i+self.crop_size, j:j+self.crop_size])[None] / 100 * self.sigma_data
+                except KeyError:
+                    water_data = torch.zeros_like(data_residual)
+                img = torch.cat([data_residual, water_data], dim=0)
+            else:
+                img = data_residual
+            
+            # Apply random transforms
+            transform_idx = random.randrange(8) if not self.eval_dataset else 0
+            flip = (transform_idx // 4) == 1
+            rotate_k = transform_idx % 4
+            
+            if flip:
+                img = torch.flip(img, dims=[-1])
+            if rotate_k != 0:
+                img = torch.rot90(img, k=rotate_k, dims=[-2, -1])
+            
+            # Create downsampled version for conditioning
+            cond_img = torch.nn.functional.adaptive_avg_pool2d(
+                img[None],
+                output_size=(downsample_size, downsample_size)
+            )[0]
+            
+            # Upsample conditioning image back to original size using nearest neighbor interpolation
+            cond_img = torch.nn.functional.interpolate(
+                cond_img[None],
+                size=(self.crop_size, self.crop_size),
+                mode='nearest'
+            )[0]
+            
+            return {'image': img, 'cond_img': cond_img}
+
 class H5LatentsDataset(Dataset):
     """Dataset for training diffusion models to generate terrain latents."""
     def __init__(self, 
@@ -340,11 +542,7 @@ class H5LatentsDataset(Dataset):
                  sigma_data=0.5, 
                  clip_edges=True,
                  split=None,
-                 cond_p_mean=1,
-                 cond_p_std=2,
-                 use_landcover=True,
-                 use_climate=True,
-                 landcover_dropout_pct=0.1):
+                 include_climate=True):
         """
         Args:
             h5_file (str): Path to the HDF5 file containing the dataset.
@@ -359,9 +557,7 @@ class H5LatentsDataset(Dataset):
             sigma_data (float, optional): Data standard deviation. Defaults to 0.5.
             clip_edges (bool, optional): Whether to clip edges when cropping. Defaults to True.
             split (str, optional): Split to use. Defaults to None (all splits).
-            use_landcover (bool, optional): Whether to use landcover data. Defaults to True.
-            use_climate (bool, optional): Whether to use climate data. Defaults to True.
-            landcover_dropout_pct (float, optional): Percentage of landcover data to drop out. Defaults to 0.1.
+            include_climate (bool, optional): Whether to include climate data
         """
         self.h5_file = h5_file
         self.crop_size = crop_size
@@ -375,11 +571,8 @@ class H5LatentsDataset(Dataset):
         self.split = split
         self.eval_dataset = eval_dataset
         self.clip_edges = clip_edges
-        self.cond_p_mean = cond_p_mean
-        self.cond_p_std = cond_p_std
-        self.use_landcover = use_landcover
-        self.use_climate = use_climate
-        self.landcover_dropout_pct = landcover_dropout_pct
+        self.include_climate = include_climate
+        
         num_subsets = len(subset_weights)
         assert len(pct_land_ranges) == len(subset_resolutions) == num_subsets, \
             "Number of subsets must match between pct_land_ranges, dataset_resolutions, and subset_weights."
@@ -467,15 +660,17 @@ class H5LatentsDataset(Dataset):
         
         chunk_id, res, subchunk_id = self.keys[subset_idx][index]
         with h5py.File(self.h5_file, 'r') as f:
-            print(chunk_id, subchunk_id)
             group_path = f"{res}/{chunk_id}/{subchunk_id}"
+            res_group = f[str(res)]
             data_latent = f[f"{group_path}/latent"]
             data_lowfreq = f[f"{group_path}/lowfreq"]
-            data_landcover = f[f"{group_path}/landcover"] if self.use_landcover and 'landcover' in f[group_path] else None
-            data_climate = f[f"{group_path}/climate"] if self.use_climate and 'climate' in f[group_path] else None
             
             shape = data_latent.shape
             assert data_lowfreq.shape == shape[2:]
+            if self.clip_edges:
+                assert shape[2] >= self.crop_size + 2, f"Crop size is larger than image size + 2. Crop size: {self.crop_size}, Image size: {shape[2]}"
+            else:
+                assert shape[2] >= self.crop_size, f"Crop size is larger than image size. Crop size: {self.crop_size}, Image size: {shape[2]}"
         
             if not self.eval_dataset:
                 if self.clip_edges:
@@ -504,77 +699,25 @@ class H5LatentsDataset(Dataset):
             data_latent = torch.from_numpy(data_latent[transform_idx, :, i:i+h, j:j+w])
             data_lowfreq = torch.from_numpy(data_lowfreq[li:li+lh, lj:lj+lw])[None]
             
-            if self.use_landcover:
-                try:
-                    r = data_landcover.shape[-2] // shape[-2]
-                    assert shape[-2] * r == data_landcover.shape[-2], "r is not an integer"
-                    data_landcover = torch.from_numpy(data_landcover[li*r:(li+lh)*r:r, lj*r:(lj+lw)*r:r])[None]
-                    if random.random() < 0.9:
-                        landcover_aug = 'default'
-                    else:
-                        landcover_aug = 'water/land'
-                    del r
-                except AttributeError:
-                    data_landcover = torch.full((1, self.crop_size, self.crop_size), 200, dtype=torch.int32)
-                    landcover_aug = 'none'
-                
-                data_landcover = data_landcover.float()
-                data_landcover = torch.nn.functional.interpolate(data_landcover[None], (self.crop_size, self.crop_size), mode='nearest')[0]
-                data_landcover = data_landcover.int()
-                
-                # One-hot encode data_landcover
-                landcover_classes = [0, 20, 30, 40, 50, 60, 70, 80, 90, 100, 
-                                    111, 112, 113, 114, 115, 116, 
-                                    121, 122, 123, 124, 125, 126, 
-                                    200]
-                
-                # Create one-hot encoding
-                data_landcover_onehot = torch.zeros((len(landcover_classes), self.crop_size, self.crop_size), dtype=torch.float32)
-                for i, cls in enumerate(landcover_classes):
-                    data_landcover_onehot[i] = (data_landcover[0] == cls).float()
-                
-                if landcover_aug == 'default':
-                    self.augment_onehot(data_landcover_onehot)
-                elif landcover_aug == 'water/land':
-                    # Create mask for water (class 200)
-                    water_mask = (data_landcover == 200).float()
-                    
-                    # Set all non-water classes to 1 where there is no water
-                    data_landcover_onehot[:-1] = (~water_mask.bool()).float()
-                    data_landcover_onehot[-1] = (water_mask.bool()).float()
-                
-                # Landcover dropout
-                landcover_dropout_mask = torch.rand(data_landcover_onehot.shape[-2], data_landcover_onehot.shape[-1]) < self.landcover_dropout_pct
-                data_landcover_onehot[:, landcover_dropout_mask] = 1
-                    
-                # Perform pixelwise normalization of landcover encodings
-                data_landcover_onehot_normalized = data_landcover_onehot / torch.sqrt(data_landcover_onehot.mean(dim=0, keepdim=True) + 1e-8)
-                data_landcover_onehot = data_landcover_onehot_normalized.float()
+            lowfreq_mean = torch.mean(data_lowfreq)
             
-            climate_means = []
-            if self.use_climate:
-                data_mean_temp = data_climate[0, li:li+lh, lj:lj+lw]
-                data_temp_seasonality = data_climate[3, li:li+lh, lj:lj+lw]
-                data_annual_precip = data_climate[11, li:li+lh, lj:lj+lw]
-                data_precip_seasonality = data_climate[14, li:li+lh, lj:lj+lw]
-                
-                # Normalize climate data by subtracting mean and dividing by std
-                climate_mean = f[str(res)].attrs['climate_mean']
-                climate_std = f[str(res)].attrs['climate_std']
-                
-                data_mean_temp = torch.from_numpy(data_mean_temp - climate_mean[0]) / climate_std[0]
-                data_temp_seasonality = torch.from_numpy(data_temp_seasonality - climate_mean[3]) / climate_std[3]
-                data_annual_precip = torch.from_numpy(data_annual_precip - climate_mean[11]) / climate_std[11]
-                data_precip_seasonality = torch.from_numpy(data_precip_seasonality - climate_mean[14]) / climate_std[14]
-                
-                climate_means = [
-                    torch.nanmean(data_mean_temp),
-                    torch.nanmean(data_temp_seasonality),
-                    torch.nanmean(data_annual_precip),
-                    torch.nanmean(data_precip_seasonality)
-                ]
-                
-                climate_means = [torch.nan_to_num(mean, nan=0.0) for mean in climate_means]
+            # Retrieve climate data for channels 0, 3, 11, 14 (temp, temp seasonality, precip, precip seasonality)
+            if not self.include_climate and f"{group_path}/climate" in f:
+                climate_data = f[f"{group_path}/climate"][[0, 3, 11, 14]][:, li:li+lh, lj:lj+lw]
+                climate_data = (climate_data - res_group.attrs['climate_mean'][[0, 3, 11, 14], None, None]) / res_group.attrs['climate_std'][[0, 3, 11, 14], None, None] * self.sigma_data
+                climate_data = torch.from_numpy(climate_data).float()
+                nan_climate = (torch.isnan(climate_data).any(dim=0).float() * 0.2 - 0.1) * self.sigma_data
+                any_nan_climate = torch.isnan(climate_data).all(dim=(-2, -1)).any().item()
+                if any_nan_climate:
+                    climate_nanmean = torch.zeros(4)
+                else:
+                    climate_nanmean = torch.nanmean(climate_data, dim=(-2, -1))
+                climate_data = torch.nan_to_num(climate_data, nan=0)
+            else:
+                climate_data = torch.zeros(4, lh, lw)
+                nan_climate = torch.full((lh, lw), 0.1)
+                climate_nanmean = torch.zeros(4)
+                any_nan_climate = True
             
         data_lowfreq = data_lowfreq.float()
         data_lowfreq = (data_lowfreq - LOWFREQ_MEAN) / LOWFREQ_STD * self.sigma_data
@@ -592,30 +735,111 @@ class H5LatentsDataset(Dataset):
         sampled_latent = torch.randn_like(means) * (logvars * 0.5).exp() + means
         sampled_latent = (sampled_latent - self.latents_mean) / self.latents_std * self.sigma_data
         
-        img = torch.cat([sampled_latent, data_lowfreq], dim=0)
-        lowfreq_sigma = torch.exp(torch.randn([1, 1, 1], dtype=torch.float32) * self.cond_p_std + self.cond_p_mean)
-        lowfreq_t = torch.atan(lowfreq_sigma / self.sigma_data)
-        lowfreq_img = torch.cos(lowfreq_t) * data_lowfreq + torch.sin(lowfreq_t) * torch.randn_like(data_lowfreq) * self.sigma_data
-        lowfreq_img = lowfreq_img / self.sigma_data
-        
-        # Start with lowfreq data
-        cond_channels = [lowfreq_img]
-        
-        # Add landcover data if available
-        if self.use_landcover:
-            cond_channels.append(data_landcover_onehot)
-            
-        # Stack all conditional channels
-        cond_img = torch.cat(cond_channels, dim=0)
-        
-        cond_inputs = []
+        img = torch.cat([sampled_latent, data_lowfreq, climate_data, nan_climate[None]], dim=0)
+        cond_inputs = [lowfreq_mean.reshape([]).float()]
         if class_label is not None:
-            cond_inputs.append(torch.tensor(class_label))
-        cond_inputs.append(lowfreq_t.squeeze())
-        if self.use_climate:
-            cond_inputs += climate_means
+            cond_inputs += [torch.tensor(class_label)]
+        if self.include_climate:
+            cond_inputs += [
+                       climate_nanmean[0].float().reshape([]),
+                       climate_nanmean[1].float().reshape([]), 
+                       climate_nanmean[2].float().reshape([]),
+                       climate_nanmean[3].float().reshape([]),
+                       torch.tensor(1 if any_nan_climate else 0, dtype=torch.int64).reshape([])
+                       ]
             
-        return {'image': img, 'cond_img': cond_img, 'cond_inputs': cond_inputs}
+        return {'image': img.float(), 'cond_inputs': cond_inputs, 'path': group_path}
+
+class H5GANDataset(Dataset):
+    def __init__(self, 
+                 h5_file, 
+                 crop_size, 
+                 pct_land_ranges, 
+                 subset_resolutions, 
+                 subset_weights=None,
+                 subset_class_labels=None,
+                 eval_dataset=False,
+                 latents_mean=None, 
+                 latents_std=None, 
+                 sigma_data=0.5, 
+                 clip_edges=True,
+                 split=None,
+                 final_size=None,
+                 include_climate=False,
+                 memory=262144,
+                 memory_freq=4):
+        """
+        Args:
+            h5_file (str): Path to the HDF5 file containing the dataset.
+            crop_size (int): Size of the random crop to extract from each image.
+            pct_land_ranges (list): Ranges of acceptable pct_land values [min, max], for each subset. Elements can be None to include everything.
+            subset_resolutions (list): Resolutions to filter subsets by. Each subset will only include elevation data with the corresponding resolution. Elements be None to include all resolutions.
+            subset_weights (list): Weights for each subset, determining the relative probability of sampling from that subset. Default is None, which results in uniform sampling.
+            subset_class_labels (list): Class labels for each subset, determining the class of each subset. Defaults to None, which results in no class labels being returned.
+            eval_dataset (bool, optional): Whether the dataset should be transformed deterministically. Defaults to False.
+            latents_mean (list, optional): Mean values for normalizing latents. Defaults to None.
+            latents_std (list, optional): Standard deviation values for normalizing latents. Defaults to None.
+            sigma_data (float, optional): Data standard deviation. Defaults to 0.5.
+            clip_edges (bool, optional): Whether to clip edges when cropping. Defaults to True.
+            split (str, optional): Split to use. Defaults to None (all splits).
+            final_size (int, optional): Size to interpolate output images to. If None, no interpolation is performed.
+            include_climate (bool, optional): Whether to include climate data
+        """
+        self.base_dataset = H5LatentsDataset(h5_file, crop_size, pct_land_ranges, subset_resolutions, 
+                                             subset_weights, subset_class_labels, eval_dataset, 
+                                             latents_mean, latents_std, sigma_data, clip_edges, split, include_climate)
+        self.memory = deque()
+        self.memory_size = memory
+        self.memory_freq = memory_freq
+        self.final_size = final_size
+    
+    def __len__(self):
+        return len(self.base_dataset)
+    
+    def __getitem__(self, idx):
+        if idx % (self.memory_freq + 1) != 0:
+            memory_idx = (idx % (self.memory_freq + 1)) * (self.memory_size // self.memory_freq)
+            if len(self.memory) > memory_idx:
+                return self.memory[memory_idx]
+            
+        out = self.base_dataset[idx]
+        img = out['image'][4:5]
+        if self.final_size is not None:
+            img = torch.nn.functional.interpolate(
+                img[None], 
+                size=(self.final_size, self.final_size), 
+                mode='nearest'
+            )[0]
+            
+        self.memory.append({'image': img})
+        if len(self.memory) > self.memory_size:
+            self.memory.popleft()
+        
+        return {'image': img}
+
+class CIFAR10Dataset(Dataset):
+    """Dataset wrapper for CIFAR10 that returns images in the same format as H5LatentsDataset.
+    
+    This wrapper takes a CIFAR10 dataset and returns just the images formatted as a dict with
+    'image' and 'cond_inputs' keys to match the H5LatentsDataset format. Images are normalized
+    per-channel to have mean 0 and standard deviation 1 using CIFAR10's known statistics.
+    """
+    def __init__(self, root, train=True, download=True):
+        # CIFAR10 per-channel mean and std values
+        self.means = torch.tensor([0.4914, 0.4822, 0.4465])[:, None, None]
+        self.stds = torch.tensor([0.2470, 0.2435, 0.2616])[:, None, None]
+        self.dataset = CIFAR10(root=root, train=train, download=download, transform=T.ToTensor())
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        img, _ = self.dataset[idx]
+        # Normalize each channel
+        img = (img - self.means) / self.stds
+        # Convert to grayscale by averaging channels
+        img = img.mean(dim=0, keepdim=True)
+        return {'image': img}
 
 
 class LongDataset(Dataset):

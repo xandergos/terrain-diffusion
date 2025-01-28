@@ -4,7 +4,7 @@ from matplotlib import pyplot as plt
 import numpy as np
 from tqdm import tqdm
 
-def calculate_stats_welford(res_group, dataset_name):
+def calculate_stats_welford(res_group, dataset_name, min_stat_landcover_pct=0.0):
     """
     Calculate mean and standard deviation using Welford's algorithm.
     Handles both single-channel and multi-channel datasets.
@@ -12,7 +12,7 @@ def calculate_stats_welford(res_group, dataset_name):
     Args:
         res_group: HDF5 group containing the hierarchical data structure
         dataset_name: Name of the dataset to process (e.g., 'residual', 'climate')
-    
+        min_stat_landcover_pct: Minimum percentage of landcover to include in the statistics calculation
     Returns:
         tuple: (means, stds) - numpy arrays of means and standard deviations
     """
@@ -24,7 +24,8 @@ def calculate_stats_welford(res_group, dataset_name):
         for subchunk_id in res_group[chunk_id].keys():
             if dataset_name in res_group[chunk_id][subchunk_id]:
                 first_data = res_group[chunk_id][subchunk_id][dataset_name][:]
-                break
+        if first_data is not None:
+            break
     assert first_data is not None, f"No {dataset_name} data found in the dataset"
     
     if len(first_data.shape) == 3:
@@ -41,7 +42,7 @@ def calculate_stats_welford(res_group, dataset_name):
         chunk_group = res_group[chunk_id]
         for subchunk_id in chunk_group.keys():
             subchunk_group = chunk_group[subchunk_id]
-            if dataset_name in subchunk_group:
+            if dataset_name in subchunk_group and subchunk_group[dataset_name].attrs['pct_land'] >= min_stat_landcover_pct:
                 data = subchunk_group[dataset_name][:]
                 if len(data.shape) == 3:
                     channel_data = data.reshape(num_channels, -1)
