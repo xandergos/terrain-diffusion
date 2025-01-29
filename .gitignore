@@ -243,3 +243,6 @@ fabric.properties
 # VSCode
 .vscode/
 .history/
+
+# Experiment folders
+experiments/

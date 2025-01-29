@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from typing import Tuple
+from matplotlib import pyplot as plt
 import skimage
 import torch
 import torch.nn.functional as F
@@ -10,10 +11,11 @@ import os
 import numpy as np
 import rasterio
 import scipy.interpolate
+from terrain_diffusion.data.downloading.world_grid import create_equal_area_grid
 from terrain_diffusion.data.laplacian_encoder import laplacian_encode
 from rasterio.merge import merge
 from rasterio.warp import transform_bounds, calculate_default_transform, reproject, Resampling
-
+    
 def read_raster(file, include_bounds=False):
     with rasterio.open(file) as src:
         assert src.crs == 'EPSG:4326', "Raster file is not in WGS84. Use extract_mask_from_tiffs instead."
@@ -78,7 +80,6 @@ def extract_mask_from_tiffs(
                         *transformed_bounds
                     )
                 except Exception:
-                    print(bounds, transformed_bounds)
                     raise
                 
                 # Initialize the destination array
@@ -161,6 +162,7 @@ def extract_mask_from_tiffs(
     
 def process_single_file_base(
     chunk_id, 
+    bounds,
     highres_elevation_folder, 
     lowres_elevation_file, 
     highres_size, 
@@ -170,13 +172,15 @@ def process_single_file_base(
     landcover_folder=None,
     watercover_folder=None,
     koppen_geiger_file=None,
-    climate_folder=None
+    climate_folder=None,
+    edge_margin=0,
 ):
     """
     Process a single elevation file and return the preprocessed chunks.
     
     Args:
         chunk_id (int|str): The chunk id to process.
+        grid_cell (Tuple[float, float, float, float]): The grid cell to process.
         highres_elevation_folder (str): Path to the folder containing high-resolution elevation files.
         lowres_elevation_file (str): Path to the file containing low-resolution elevation data.
         highres_size (int): The size of the high-resolution images.
@@ -186,41 +190,63 @@ def process_single_file_base(
         watercover_folder (str): Path to the folder containing water cover data. (Optional)
         koppen_geiger_file (str): Path to the file containing Koppen-Geiger climate data. (Optional)
         climate_folder (str): Path to the folder containing WorldClim climate data. (Optional)
+        edge_margin (int): The number of pixels to remove from the edges of the lowres image, automatically scaled up for the highres image.
     
     Returns:
         list: List of dictionaries containing preprocessed chunks and metadata
     """
     file = chunk_id + '.tif'
-    highres_dem, bounds = read_raster(os.path.join(highres_elevation_folder, file), include_bounds=True)
-    highres_dem = highres_dem.astype(np.float32)
-    if not np.isnan(highres_dem).all():
-        highres_dem = skimage.transform.resize(highres_dem, (highres_size, highres_size), order=0, preserve_range=True)
+    
+    highres_margin = edge_margin * highres_size // lowres_size
+    
+    highres_path = os.path.join(highres_elevation_folder, file)
+    if os.path.exists(highres_path):
+        highres_dem, new_bounds = read_raster(highres_path, include_bounds=True)
+        bounds = new_bounds
+        highres_dem = np.where(highres_dem == 0.0, np.nan, highres_dem)
+        highres_dem = highres_dem.astype(np.float32)
+        if not np.isnan(highres_dem).all():
+            highres_dem = skimage.transform.resize(highres_dem, (highres_size, highres_size), order=0, preserve_range=True)
+        else:
+            highres_dem = np.nan * np.ones((highres_size, highres_size), dtype=np.float32)
     else:
         highres_dem = np.nan * np.ones((highres_size, highres_size), dtype=np.float32)
+        assert np.isnan(highres_dem).all()
+    if highres_margin > 0:
+        highres_dem = highres_dem[highres_margin:-highres_margin, highres_margin:-highres_margin]
     
     base_lowres_dem = extract_mask_from_tiffs(lowres_elevation_file, bounds).astype(np.float32)
     base_lowres_dem[base_lowres_dem > -1] = -1
     base_lowres_dem = skimage.transform.resize(base_lowres_dem, (lowres_size, lowres_size), order=1, preserve_range=True)
     base_lowres_dem = skimage.filters.gaussian(base_lowres_dem, sigma=lowres_sigma)
+    assert (~np.isnan(base_lowres_dem)).all()
     
     scaled_base_lowres_dem = skimage.transform.resize(base_lowres_dem, (highres_size, highres_size), order=1, preserve_range=True)
+    if highres_margin > 0:
+        scaled_base_lowres_dem = scaled_base_lowres_dem[highres_margin:-highres_margin, highres_margin:-highres_margin]
     
     # Replace NaN values over 10 pixels from non-NaN pixels with 0
     if np.isnan(highres_dem).all():
-        highres_dem = np.zeros_like(highres_dem)
+        highres_dem = scaled_base_lowres_dem
     elif np.isnan(highres_dem).any():
         # Create a mask of non-NaN pixels
         nan_mask = np.isnan(highres_dem)
         distance = scipy.ndimage.distance_transform_edt(nan_mask)
         alpha = np.minimum(1, distance[nan_mask]/32)
         highres_dem[nan_mask] = scaled_base_lowres_dem[nan_mask] * alpha
-
+    assert (~np.isnan(highres_dem)).all()
+        
+    os.makedirs('debug', exist_ok=True)
+    plt.imsave(os.path.join('debug', f'highres_dem_{chunk_id}.png'), highres_dem, cmap='gray')
+    
     if landcover_folder is not None:
         try:
             landcover = read_raster(os.path.join(landcover_folder, file)).astype(np.int16)
+            assert not np.isnan(landcover).all()
             landcover = skimage.transform.resize(landcover, (highres_size, highres_size), order=0, preserve_range=True)
+            if highres_margin > 0:
+                landcover = landcover[..., highres_margin:-highres_margin, highres_margin:-highres_margin]
         except Exception:
-            print(f"Error reading landcover file {file}")
             landcover = None
     else:
         landcover = None
@@ -228,16 +254,21 @@ def process_single_file_base(
     if watercover_folder is not None:
         try:
             watercover = read_raster(os.path.join(watercover_folder, file)).astype(np.float32)
+            assert not np.isnan(watercover).all()
             watercover = skimage.transform.resize(watercover, (highres_size, highres_size), order=0, preserve_range=True)
+            if highres_margin > 0:
+                watercover = watercover[..., highres_margin:-highres_margin, highres_margin:-highres_margin]
         except Exception:
-            print(f"Error reading watercover file {file}")
             watercover = None
     else:
         watercover = None
         
     if koppen_geiger_file is not None:
         koppen_geiger = extract_mask_from_tiffs(koppen_geiger_file, bounds).astype(np.int8)
+        assert not np.isnan(koppen_geiger).all()
         koppen_geiger = skimage.transform.resize(koppen_geiger, (lowres_size, lowres_size), order=0, preserve_range=True)
+        if highres_margin > 0:
+            koppen_geiger = koppen_geiger[..., highres_margin:-highres_margin, highres_margin:-highres_margin]
     else:
         koppen_geiger = None
         
@@ -249,7 +280,10 @@ def process_single_file_base(
         for i in range(1, 20):
             fname = f'wc2.1_30s_bio_{i}.tif'
             climate_data = extract_mask_from_tiffs(os.path.join(climate_folder, fname), bounds).astype(np.float32)
-            climate_data = skimage.transform.resize(climate_data, (lowres_size, lowres_size), order=0, preserve_range=True)
+            if np.isnan(climate_data).all():
+                climate_data = np.nan * np.ones((lowres_size, lowres_size), dtype=np.float32)
+            else:
+                climate_data = skimage.transform.resize(climate_data, (lowres_size, lowres_size), order=0, preserve_range=True)
             climate_layers.append(climate_data)
         
         # Stack all layers along new axis
@@ -259,11 +293,10 @@ def process_single_file_base(
         
     residual, lowres_dem = laplacian_encode(highres_dem, lowres_size, lowres_sigma)
         
-    highres_chunk_size = highres_size // num_chunks
-    lowres_chunk_size = lowres_size // num_chunks
+    highres_chunk_size = (highres_size - highres_margin * 2) // num_chunks
+    lowres_chunk_size = (lowres_size - edge_margin * 2) // num_chunks
     chunks_data = []
     
-    num_chunks = (highres_size + highres_chunk_size - 1) // highres_chunk_size
     for chunk_h in range(num_chunks):
         for chunk_w in range(num_chunks):
             highres_start_h = chunk_h * highres_chunk_size
@@ -298,6 +331,7 @@ class ElevationDataset(torch.utils.data.Dataset):
     def __init__(self, 
                  highres_elevation_folder, 
                  lowres_elevation_file, 
+                 resolution,
                  highres_size, 
                  lowres_size,
                  lowres_sigma,
@@ -306,8 +340,11 @@ class ElevationDataset(torch.utils.data.Dataset):
                  watercover_folder=None,
                  koppen_geiger_folder=None,
                  climate_folder=None,
-                 skip_chunk_ids=None):
-        self.chunk_ids = list(set(map(lambda x: x.split('.')[0], os.listdir(highres_elevation_folder))))
+                 skip_chunk_ids=None,
+                 edge_margin=0):
+        self.grid_cells = create_equal_area_grid((highres_size*resolution, highres_size*resolution))
+        self.chunk_ids = [str(i) for i in range(len(self.grid_cells))]
+        
         self.highres_elevation_folder = highres_elevation_folder
         self.lowres_elevation_file = lowres_elevation_file
         self.highres_size = highres_size
@@ -321,13 +358,15 @@ class ElevationDataset(torch.utils.data.Dataset):
         if skip_chunk_ids is not None:
             skip_chunk_ids = set(str(x) for x in skip_chunk_ids)
             self.chunk_ids = [f for f in self.chunk_ids if str(f) not in skip_chunk_ids]
-    
+        self.edge_margin = edge_margin
+        
     def __len__(self):
         return len(self.chunk_ids)
     
     def __getitem__(self, idx):
         cid = self.chunk_ids[idx]
         return process_single_file_base(cid, 
+                                        self.grid_cells[int(cid)],
                                         self.highres_elevation_folder, 
                                         self.lowres_elevation_file, 
                                         self.highres_size, 
@@ -337,4 +376,5 @@ class ElevationDataset(torch.utils.data.Dataset):
                                         self.landcover_folder, 
                                         self.watercover_folder,
                                         self.koppen_geiger_folder,
-                                        self.climate_folder)
+                                        self.climate_folder,
+                                        self.edge_margin)
