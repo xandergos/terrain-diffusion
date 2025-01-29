@@ -134,7 +134,7 @@ def process_encoded_dataset(dataset, resolution, encoder_model_path, use_fp16, c
                 
                 if 'latent' in subchunk_group:
                     del subchunk_group['latent']
-                dset = subchunk_group.create_dataset('latent', data=transformed_latent, compression='lzf', chunks=(1, 8, 32, 32))
+                dset = subchunk_group.create_dataset('latent', data=transformed_latent, compression='lzf', chunks=(1, transformed_latent.shape[1], 32, 32))
                 dset.attrs.update(subchunk_group['residual'].attrs)
                 dset.attrs['data_type'] = 'latent'
         
