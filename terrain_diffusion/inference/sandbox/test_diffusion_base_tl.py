@@ -33,12 +33,12 @@ def get_model(checkpoint_path, sigma_rel=None, ema_step=None):
     return model
 
 autoencoder = EDMAutoencoder.from_pretrained('checkpoints/models/autoencoder').to(device)
-model = get_model('checkpoints/diffusion_base-128x3-simple/latest_checkpoint', sigma_rel=0.05).to(device)
+model = get_model('checkpoints/diffusion_base-256x3-simple/latest_checkpoint', sigma_rel=0.05).to(device)
 
 # Enable parallel processing on CPU
 torch.set_num_threads(16)
 
-dataset = H5LatentsSimpleDataset('dataset.h5', 64, [[0.1, 1.0]], [90], [1], eval_dataset=False,
+dataset = H5LatentsSimpleDataset('dataset.h5', 64, [[0.3, 0.5]], [90], [1], eval_dataset=False,
                                    latents_mean=[0, 0, 0, 0],
                                    latents_std=[1, 1, 1, 1],
                                    sigma_data=0.5,
@@ -62,6 +62,9 @@ for batch in dataloader:
     samples = torch.randn(images.shape, device=device) * scheduler.sigmas[0]
     sigma_data = scheduler.config.sigma_data
     
+    # Create a list to store pred_x0 at each timestep
+    pred_x0_history = []
+    
     i = 0
     for t, sigma in tqdm(zip(scheduler.timesteps, scheduler.sigmas)):
         sigma, t = sigma.to(device), t.to(device)
@@ -74,81 +77,84 @@ for batch in dataloader:
             x = torch.cat([scaled_input, cond_img], dim=1)
         model_output = model(x, noise_labels=cnoise, conditional_inputs=conditional_inputs)
         
-        # Plot the lowfreq channel of model output
-        #if i == 0:  # Only plot for first timestep
-        #    plt.figure(figsize=(10,10))
-        #    plt.imshow(model_output[:, 4].detach().cpu().numpy()[0], cmap='viridis')
-        #    plt.colorbar()
-        #    plt.title("Model Output - Lowfreq Channel")
-        #    plt.show()
+        # Calculate pred_x0 using the formula: sin(cnoise) * samples + cos(cnoise) * model_output
+        pred_x0 = torch.cos(cnoise.view(-1, 1, 1, 1)) * samples + torch.sin(cnoise.view(-1, 1, 1, 1)) * model_output * 0.5
+        
+        # Store pred_x0 for visualization
+        pred_x0_history.append(pred_x0.detach().cpu().clone())
         
         samples = scheduler.step(model_output, t, samples).prev_sample
         i += 1
+        
+    pred_x0_history = torch.stack(pred_x0_history, dim=0)
     
-    print(torch.std(samples).item())
-    samples = samples * 2
-    latent = samples[:, :4]
-    lowfreq = samples[:, 4:5]
-    decoded = autoencoder.decode(latent)
-    residual, watercover = decoded[:, :1], decoded[:, 1:2]
+    pred_x0_history = pred_x0_history * 2
+    latent = pred_x0_history[:, :, :4]
+    lowfreq = pred_x0_history[:, :, 4:5]
+    residuals = []
+    watercovers = []
+    for i in range(pred_x0_history.shape[0]):
+        decoded = autoencoder.decode(latent[i].cuda()).cpu()
+        residual, watercover = decoded[:, :1], decoded[:, 1:2]
+        residuals.append(residual)
+        watercovers.append(watercover)
+    residual = torch.stack(residuals, dim=0)
+    watercover = torch.stack(watercovers, dim=0)
     watercover = torch.sigmoid(watercover)
     residual = dataset.denormalize_residual(residual, 90)
     lowfreq = dataset.denormalize_lowfreq(lowfreq, 90)
-    #residual, lowfreq = laplacian_denoise(residual, lowfreq, 5.0)
-    decoded_terrain = laplacian_decode(residual, lowfreq)
-    #decoded_terrain = lowfreq
-    #decoded_terrain = torch.sign(decoded_terrain) * decoded_terrain**2
+    decoded_terrain = laplacian_decode(residual.view(-1, 1, 512, 512), lowfreq.view(-1, 1, 64, 64)).view(residual.shape)
     
-    plot_images = torch.cat([decoded_terrain, watercover], dim=1)
-    
-    # Plot all channels interactively using a slider to select the channel.
+    # Plot the decoded terrain with a slider for the time dimension
     import matplotlib.pyplot as plt
     from matplotlib.widgets import Slider
     
-    # Assume that plot_images has shape: (batch_size, num_channels, height, width)
-    # Convert plot_images from tensor to a numpy array.
-    # If necessary, squeeze batch dimensions only if batch_size==1. Here, we assume batch_size == 9.
-    plot_images_np = plot_images.cpu().numpy()  # shape: (9, num_channels, H, W)
+    # Get dimensions
+    num_timesteps, batch_size, channels, height, width = decoded_terrain.shape
     
-    # Create an initial grid of subplots for the 9 images and reserve space for the slider.
-    fig, axs = plt.subplots(3, 3, figsize=(9, 9))
-    # Adjust the layout to make room for the slider.
-    plt.subplots_adjust(bottom=0.25)
-    fig.suptitle('Decoded Diffusion Samples - Channel Slider')
+    # Create a figure with subplots for each batch
+    fig, axs = plt.subplots(3, 3, figsize=(12, 10))
+    plt.subplots_adjust(bottom=0.25)  # Make room for the slider
+    fig.suptitle('Decoded Terrain Evolution Over Time')
     
-    # Create a list to store the image objects for later updates.
+    # Flatten the axes array for easier indexing
+    axs = axs.flatten()
+    
+    # Create a list to store image objects for updates
     im_list = []
-    # We start with channel 0.
-    channel_index = 0
-    batch_size, num_channels, H, W = plot_images_np.shape
     
-    # Plot each image in the grid using the selected channel.
+    # Initial timestep to display
+    time_index = 0
+    
+    # Plot each batch at the initial timestep
     for i in range(min(batch_size, 9)):
-        ax = axs[i // 3, i % 3]
-        # For each image, pick the current channel.
-        img = plot_images_np[i, channel_index]
-        # Compute the min and max to update the color limits.
+        ax = axs[i]
+        img = decoded_terrain[time_index, i, 0].cpu().numpy()
         clim = (img.min(), img.max())
-        im = ax.imshow(img, cmap='viridis', vmin=clim[0], vmax=clim[1])
+        im = ax.imshow(img, cmap='terrain', vmin=clim[0], vmax=clim[1])
+        ax.set_title(f'Batch {i+1}')
         ax.axis('off')
         im_list.append(im)
     
-    # Create a slider axis below the subplots.
-    axslider = plt.axes([0.2, 0.1, 0.6, 0.03])  # [left, bottom, width, height] in figure coordinates.
-    # Slider ranges from 0 to num_channels-1 with an integer step.
-    slider = Slider(axslider, 'Channel', 0, num_channels - 1, valinit=0, valstep=1)
+    # Add a colorbar
+    cbar_ax = fig.add_axes([0.92, 0.25, 0.02, 0.6])
+    fig.colorbar(im_list[0], cax=cbar_ax)
     
+    # Create a slider for time dimension
+    ax_slider = plt.axes([0.2, 0.1, 0.6, 0.03])
+    slider = Slider(ax_slider, 'Timestep', 0, num_timesteps - 1, valinit=0, valstep=1)
+    
+    # Update function for the slider
     def update(val):
-        # Get the current channel from the slider and update each image.
-        ch = int(slider.val)
+        time_idx = int(slider.val)
         for i in range(min(batch_size, 9)):
-            img = plot_images_np[i, ch]
+            img = decoded_terrain[time_idx, i, 0].cpu().numpy()
             clim = (img.min(), img.max())
             im_list[i].set_data(img)
-            # Update the color limits so the contrast adjusts per channel.
             im_list[i].set_clim(clim[0], clim[1])
         fig.canvas.draw_idle()
     
+    # Register the update function with the slider
     slider.on_changed(update)
     
     plt.show()

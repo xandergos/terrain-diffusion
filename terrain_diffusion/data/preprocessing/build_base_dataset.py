@@ -128,13 +128,14 @@ def process_base_dataset(
                     ('residual', chunk['residual']),
                     ('lowfreq', chunk['lowfreq']),
                     ('landcover', chunk['landcover']),
+                    ('landcover_mini', chunk['landcover_mini']),
                     ('watercover', chunk['watercover']),
                     ('koppen_geiger', chunk['koppen_geiger']),
                     ('climate', chunk['climate'])
                 ]:
                     if data_type in ['residual', 'landcover', 'watercover']:
                         chunk_shape = (128, 128)
-                    elif data_type in ['lowfreq', 'koppen_geiger']:
+                    elif data_type in ['lowfreq', 'koppen_geiger', 'landcover_mini']:
                         chunk_shape = (32, 32)
                     elif data_type == 'climate':
                         chunk_shape = (1, 32, 32)

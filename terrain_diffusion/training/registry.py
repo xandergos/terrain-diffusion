@@ -27,9 +27,8 @@ def build_registry():
     registry.dataset.register("h5_upsample_terrain", func=H5UpsamplingTerrainDataset)
     registry.dataset.register("h5_autoencoder", func=H5AutoencoderDataset)
     registry.dataset.register("h5_latents", func=H5LatentsDataset)
-    registry.dataset.register("h5_gan", func=H5GANDataset)
-    registry.dataset.register("etopo", func=ETOPODataset)
-    registry.dataset.register("cifar10", func=CIFAR10Dataset)
+    registry.dataset.register("h5_latents_simple", func=H5LatentsSimpleDataset)
+    registry.dataset.register("file_gan", func=FileGANDataset)
     
     registry.utils = catalogue.create("confection", "utils", entry_points=False)
     registry.utils.register("create_list", func=lambda *args: list(args))

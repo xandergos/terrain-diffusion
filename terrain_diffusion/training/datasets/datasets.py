@@ -16,6 +16,8 @@ import h5py
 from torchvision.datasets import CIFAR10
 from collections import deque
 import torch.nn.functional as F
+import rasterio
+import glob
 
 class AreaResize(torch.nn.Module):
     """
@@ -141,51 +143,51 @@ class H5AutoencoderDataset(Dataset):
             h, w = self.crop_size, self.crop_size
             
             # Calculate scaled indices for 1/8 resolution data
-            i_low = i // 8
-            j_low = j // 8
-            h_low = h // 8
-            w_low = w // 8
+            # i_low = i // 8
+            # j_low = j // 8
+            # h_low = h // 8
+            # w_low = w // 8
             
             # Load residual data (always available, full res)
             residual_data = torch.from_numpy(dset[i:i+h, j:j+w])[None]
             residual_data = (residual_data - res_group.attrs['residual_mean']) / res_group.attrs['residual_std']
             
             # Load lowres data (always available, 1/8 res)
-            lowres_data = torch.from_numpy(f[f"{group_path}/lowfreq"][i_low:i_low+h_low, j_low:j_low+w_low])[None]
-            lowres_data = F.interpolate(lowres_data[None], size=(h, w), mode='nearest')[0]
-            lowres_data = (lowres_data - LOWFREQ_MEAN) / LOWFREQ_STD
-            
-            # Load and upsample climate data with backup
-            try:
-                climate_data = torch.from_numpy(f[f"{group_path}/climate"][:, i_low:i_low+h_low, j_low:j_low+w_low])
-                climate_data = climate_data[self.climate_channels]
-                climate_data = (climate_data - res_group.attrs['climate_mean'][self.climate_channels, None, None]) /\
-                    res_group.attrs['climate_std'][self.climate_channels, None, None]
-                climate_data = F.interpolate(climate_data[None], size=(h, w), mode='nearest')[0]
-                # Create climate mask and handle NaNs
-                climate_mask = ~torch.isnan(climate_data[0:1])
-                climate_data = torch.nan_to_num(climate_data, 0.0)
-            except KeyError:
-                climate_data = torch.zeros((4, h, w))
-                climate_mask = torch.zeros((1, h, w))
-            
-            # Load and one-hot encode landcover data with backup
-            landcover_classes = [0, 20, 30, 40, 50, 60, 70, 80, 90, 100, 111, 112, 113, 114, 115, 116, 121, 122, 123, 124, 125, 126, 200]
-            
-            try:
-                landcover_data = torch.from_numpy(f[f"{group_path}/landcover"][i:i+h, j:j+w]).long()
-            except KeyError:
-                landcover_data = torch.full((h, w), 200, dtype=torch.long)
-                
-            # Create lookup table for class indices
-            max_class = landcover_classes[-1]
-            lookup = torch.full((max_class + 1,), len(landcover_classes) - 1, dtype=torch.long)
-            for idx, class_val in enumerate(landcover_classes):
-                lookup[class_val] = idx
-            landcover_indices = lookup[landcover_data]
-            
-            landcover_onehot = F.one_hot(landcover_indices, num_classes=len(landcover_classes))
-            landcover_onehot = landcover_onehot.permute(2, 0, 1)  # [C, H, W] format
+            #lowres_data = torch.from_numpy(f[f"{group_path}/lowfreq"][i_low:i_low+h_low, j_low:j_low+w_low])[None]
+            #lowres_data = F.interpolate(lowres_data[None], size=(h, w), mode='nearest')[0]
+            #lowres_data = (lowres_data - LOWFREQ_MEAN) / LOWFREQ_STD
+            #
+            ## Load and upsample climate data with backup
+            #try:
+            #    climate_data = torch.from_numpy(f[f"{group_path}/climate"][:, i_low:i_low+h_low, j_low:j_low+w_low])
+            #    climate_data = climate_data[self.climate_channels]
+            #    climate_data = (climate_data - res_group.attrs['climate_mean'][self.climate_channels, None, None]) /\
+            #        res_group.attrs['climate_std'][self.climate_channels, None, None]
+            #    climate_data = F.interpolate(climate_data[None], size=(h, w), mode='nearest')[0]
+            #    # Create climate mask and handle NaNs
+            #    climate_mask = ~torch.isnan(climate_data[0:1])
+            #    climate_data = torch.nan_to_num(climate_data, 0.0)
+            #except KeyError:
+            #    climate_data = torch.zeros((4, h, w))
+            #    climate_mask = torch.zeros((1, h, w))
+            #
+            ## Load and one-hot encode landcover data with backup
+            #landcover_classes = [0, 20, 30, 40, 50, 60, 70, 80, 90, 100, 111, 112, 113, 114, 115, 116, 121, 122, 123, 124, 125, 126, 200]
+            #
+            #try:
+            #    landcover_data = torch.from_numpy(f[f"{group_path}/landcover"][i:i+h, j:j+w]).long()
+            #except KeyError:
+            #    landcover_data = torch.full((h, w), 200, dtype=torch.long)
+            #    
+            ## Create lookup table for class indices
+            #max_class = landcover_classes[-1]
+            #lookup = torch.full((max_class + 1,), len(landcover_classes) - 1, dtype=torch.long)
+            #for idx, class_val in enumerate(landcover_classes):
+            #    lookup[class_val] = idx
+            #landcover_indices = lookup[landcover_data]
+            #
+            #landcover_onehot = F.one_hot(landcover_indices, num_classes=len(landcover_classes))
+            #landcover_onehot = landcover_onehot.permute(2, 0, 1)  # [C, H, W] format
             
             # Load watercover data with backup
             try:
@@ -196,10 +198,10 @@ class H5AutoencoderDataset(Dataset):
             # Concatenate all channels
             data = torch.cat([
                 residual_data,      # 1 channel
-                lowres_data,        # 1 channel
-                climate_data,       # 4 channels
-                climate_mask,       # 1 channel
-                landcover_onehot,   # 23 channels
+                #lowres_data,        # 1 channel
+                #climate_data,       # 4 channels
+                #climate_mask,       # 1 channel
+                #landcover_onehot,   # 23 channels
                 water_data,         # 1 channel
             ], dim=0).float()
             
@@ -218,6 +220,16 @@ class H5AutoencoderDataset(Dataset):
         else:
             return {'image': data}
     
+    def denormalize_residual(self, residual, resolution):
+        with h5py.File(self.h5_file, 'r') as f:
+            res_group = f[str(resolution)]
+            return residual * res_group.attrs['residual_std'] + res_group.attrs['residual_mean']
+    
+    def denormalize_lowfreq(self, lowfreq, resolution):
+        LOWFREQ_MEAN = -31.4
+        LOWFREQ_STD = 38.6
+        return lowfreq * LOWFREQ_STD + LOWFREQ_MEAN
+
 class H5DecoderTerrainDataset(Dataset):
     """Dataset for reading terrain data from an HDF5 file with an encoding."""
     def __init__(self, 
@@ -295,114 +307,119 @@ class H5DecoderTerrainDataset(Dataset):
         return max(len(keys) for keys in self.keys)
 
     def __getitem__(self, index):
-        LOWFREQ_MEAN = -2128
-        LOWFREQ_STD = 2353
+        LOWFREQ_MEAN = -31.4
+        LOWFREQ_STD = 38.6
         
+        # Draw a random subset based on subset weights
         subset_idx = random.choices(range(len(self.subset_weights)), weights=self.subset_weights, k=1)[0]
-        index = random.randrange(len(self.keys[subset_idx]))
         class_label = self.subset_class_labels[subset_idx] if self.subset_class_labels is not None else None
         
+        index = random.randrange(len(self.keys[subset_idx]))
         chunk_id, res, subchunk_id = self.keys[subset_idx][index]
+        
         with h5py.File(self.h5_file, 'r') as f:
             group_path = f"{res}/{chunk_id}/{subchunk_id}"
             res_group = f[str(res)]
+            data_latent = f[f"{group_path}/latent"]
             
-            # Get crop indices
-            dset = f[f"{group_path}/residual"]
-            data_shape = dset.shape
+            latent_shape = data_latent.shape
+            residual_shape = f[f"{group_path}/residual"].shape
             
-            if not self.eval_dataset:
-                # Ensure i and j are multiples of 8 by first dividing by 8, then multiplying back
-                max_i = (data_shape[-2] - self.crop_size) // 8
-                max_j = (data_shape[-1] - self.crop_size) // 8
-                edge_margin = 1 if self.clip_edges else 0
-                i = random.randint(0 + edge_margin, max_i - edge_margin) * 8
-                j = random.randint(0 + edge_margin, max_j - edge_margin) * 8
+            if self.clip_edges:
+                assert residual_shape[1] >= self.crop_size + 2, f"Crop size is larger than image size + 2. Crop size: {self.crop_size}, Image size: {residual_shape[2]}"
             else:
-                # Center crop, ensuring it's aligned to 8-pixel boundaries
-                i = ((data_shape[-2] - self.crop_size) // 16) * 8
-                j = ((data_shape[-1] - self.crop_size) // 16) * 8
-            h, w = self.crop_size, self.crop_size
-            
-            # Calculate scaled indices for 1/8 resolution data
-            i_low = i // 8
-            j_low = j // 8
-            h_low = h // 8
-            w_low = w // 8
-            
-            # Load residual data (always available, full res)
-            residual_data = torch.from_numpy(dset[i:i+h, j:j+w])[None]
-            residual_data = (residual_data - res_group.attrs['residual_mean']) / res_group.attrs['residual_std']
-            
-            # Load lowres data (always available, 1/8 res)
-            lowres_data = torch.from_numpy(f[f"{group_path}/lowfreq"][i_low:i_low+h_low, j_low:j_low+w_low])[None]
-            lowres_data = F.interpolate(lowres_data[None], size=(h, w), mode='nearest')[0]
-            lowres_data = (lowres_data - LOWFREQ_MEAN) / LOWFREQ_STD
-            
-            # Load and upsample climate data with backup
-            try:
-                climate_data = torch.from_numpy(f[f"{group_path}/climate"][:, i_low:i_low+h_low, j_low:j_low+w_low])
-                climate_data = climate_data[self.climate_channels]
-                climate_data = (climate_data - res_group.attrs['climate_mean'][self.climate_channels, None, None]) /\
-                    res_group.attrs['climate_std'][self.climate_channels, None, None]
-                climate_data = F.interpolate(climate_data[None], size=(h, w), mode='nearest')[0]
-                # Create climate mask and handle NaNs
-                climate_mask = ~torch.isnan(climate_data[0:1])
-                climate_data = torch.nan_to_num(climate_data, 0.0)
-            except KeyError:
-                climate_data = torch.zeros((4, h, w))
-                climate_mask = torch.zeros((1, h, w))
-            
-            # Load and one-hot encode landcover data with backup
-            landcover_classes = [0, 20, 30, 40, 50, 60, 70, 80, 90, 100, 111, 112, 113, 114, 115, 116, 121, 122, 123, 124, 125, 126, 200]
-            
-            try:
-                landcover_data = torch.from_numpy(f[f"{group_path}/landcover"][i:i+h, j:j+w]).long()
-            except KeyError:
-                landcover_data = torch.full((h, w), 200, dtype=torch.long)
+                assert residual_shape[1] >= self.crop_size, f"Crop size is larger than image size. Crop size: {self.crop_size}, Image size: {residual_shape[2]}"
+        
+            if not self.eval_dataset:
+                if self.clip_edges:
+                    i = random.randint(1, latent_shape[2] - self.crop_size // 8 - 1)
+                    j = random.randint(1, latent_shape[3] - self.crop_size // 8 - 1)
+                else:
+                    i = random.randint(0, latent_shape[2] - self.crop_size // 8)
+                    j = random.randint(0, latent_shape[3] - self.crop_size // 8)
+            else:
+                i = (latent_shape[2] - self.crop_size // 8) // 2
+                j = (latent_shape[3] - self.crop_size // 8) // 2
                 
-            # Create lookup table for class indices
+            h = w = self.crop_size // 8
+            li, lj, lh, lw = i*8, j*8, h*8, w*8
+                
+            transform_idx = random.randrange(8) if not self.eval_dataset else 0
+            flip = (transform_idx // 4) == 1
+            rotate_k = transform_idx % 4
+            
+            # Adjust lowfreq crop for flips and rotations. Note that we are inverting the transformation so we do it in reverse.
+            for _ in range(rotate_k):
+                li, lj = lj, residual_shape[1] - li - lh
+            if flip:
+                lj = residual_shape[1] - lj - lw
+            
+            # Load latent data
+            data_latent = torch.from_numpy(data_latent[transform_idx, :, i:i+h, j:j+w])
+            assert data_latent.shape[-1] > 0, f"Latent crop is empty. i: {i}, j: {j}, h: {h}, w: {w}"
+            latent_channels = data_latent.shape[0]
+            means, logvars = data_latent[:latent_channels//2], data_latent[latent_channels//2:]
+            sampled_latent = torch.randn_like(means) * (logvars * 0.5).exp() + means
+            
+            # Load residual data
+            data_residual = torch.from_numpy(f[f"{group_path}/residual"][li:li+lh, lj:lj+lw])[None]
+            data_residual = (data_residual - res_group.attrs['residual_mean']) / res_group.attrs['residual_std'] * self.sigma_data
+            if flip:
+                data_residual = torch.flip(data_residual, dims=[-1])
+            if rotate_k != 0:
+                data_residual = torch.rot90(data_residual, k=rotate_k, dims=[-2, -1])
+            
+            # Load watercover data
+            try:
+                data_watercover = torch.from_numpy(f[f"{group_path}/watercover"][li:li+lh, lj:lj+lw])[None] / 100
+                data_watercover = data_watercover * self.sigma_data
+                if flip:
+                    data_watercover = torch.flip(data_watercover, dims=[-1])
+                if rotate_k != 0:
+                    data_watercover = torch.rot90(data_watercover, k=rotate_k, dims=[-2, -1])
+            except KeyError:
+                data_watercover = torch.zeros((1, lh, lw))
+            
+            # Load landcover data
+            landcover_classes = [0, 20, 30, 40, 50, 60, 70, 80, 90, 100, 111, 112, 113, 114, 115, 116, 121, 122, 123, 124, 125, 126, 200]
+            if f"{group_path}/landcover" in f:
+                landcover_data = f[f"{group_path}/landcover"]
+                landcover_data = torch.from_numpy(landcover_data[li:li+lh, lj:lj+lw]).long()
+            else:
+                landcover_data = torch.full((lh, lw), 200, dtype=torch.long)
             max_class = landcover_classes[-1]
             lookup = torch.full((max_class + 1,), len(landcover_classes) - 1, dtype=torch.long)
             for idx, class_val in enumerate(landcover_classes):
                 lookup[class_val] = idx
             landcover_indices = lookup[landcover_data]
-            
-            landcover_onehot = F.one_hot(landcover_indices, num_classes=len(landcover_classes))
+            landcover_onehot = F.one_hot(landcover_indices, num_classes=len(landcover_classes)).float()
             landcover_onehot = landcover_onehot.permute(2, 0, 1)  # [C, H, W] format
-            landcover_onehot = landcover_onehot * np.sqrt(len(landcover_classes))
+            landcover_onehot = landcover_onehot / torch.sqrt(torch.mean(landcover_onehot, dim=0, keepdim=True)) * self.sigma_data
+            if flip:
+                landcover_onehot = torch.flip(landcover_onehot, dims=[-1])
+            if rotate_k != 0:
+                landcover_onehot = torch.rot90(landcover_onehot, k=rotate_k, dims=[-2, -1])
             
-            # Load watercover data with backup
-            try:
-                water_data = torch.from_numpy(f[f"{group_path}/watercover"][i:i+h, j:j+w])[None] / 100
-            except KeyError:
-                water_data = torch.zeros((1, h, w))
-            
-            # Concatenate all channels
-            data = torch.cat([
-                residual_data,      # 1 channel
-                lowres_data,        # 1 channel
-                climate_data,       # 4 channels
-                climate_mask,       # 1 channel
-                landcover_onehot,   # 23 channels
-                water_data,         # 1 channel
-            ], dim=0).float()
-            
-        # Apply transforms
-        transform_idx = random.randrange(8) if not self.eval_dataset else 0
-        flip = (transform_idx // 4) == 1
-        rotate_k = transform_idx % 4
-            
-        if flip:
-            data = torch.flip(data, dims=[-1])
-        if rotate_k != 0:
-            data = torch.rot90(data, k=rotate_k, dims=[-2, -1])
-            
-        data = data * self.sigma_data
+                
+        image = torch.cat([
+            data_residual,
+            data_watercover,
+            landcover_onehot
+        ], dim=0)
+        
+        cond_image = torch.cat([
+            F.interpolate(sampled_latent[None], size=(self.crop_size, self.crop_size), mode='nearest')[0],
+            F.interpolate(landcover_onehot[None, :, ::8, ::8], size=(self.crop_size, self.crop_size), mode='nearest')[0] / self.sigma_data
+        ], dim=0)
+        
+        # Only include sampled_latent in img tensor instead of concatenating with other data
         if class_label is not None:
-            return {'image': data, 'cond_inputs': [torch.tensor(class_label)]}
+            cond_inputs = [torch.tensor(class_label)]
         else:
-            return {'image': data}
+            cond_inputs = []
+            
+        return {'image': image.float(), 'cond_img': cond_image, 'cond_inputs': cond_inputs, 'path': group_path}
+        
 
 class H5UpsamplingTerrainDataset(Dataset):
     """Dataset for reading terrain data from an HDF5 file for upsampling tasks.
@@ -570,7 +587,7 @@ class H5LatentsDataset(Dataset):
                  sigma_data=0.5, 
                  clip_edges=True,
                  split=None,
-                 include_climate=True):
+                 beauty_dist=None):
         """
         Args:
             h5_file (str): Path to the HDF5 file containing the dataset.
@@ -585,7 +602,8 @@ class H5LatentsDataset(Dataset):
             sigma_data (float, optional): Data standard deviation. Defaults to 0.5.
             clip_edges (bool, optional): Whether to clip edges when cropping. Defaults to True.
             split (str, optional): Split to use. Defaults to None (all splits).
-            include_climate (bool, optional): Whether to include climate data
+            beauty_dist (list, optional): Weights for sampling beauty scores 1-5. 
+                                        Must sum to 1. Defaults to uniform distribution.
         """
         self.h5_file = h5_file
         self.crop_size = crop_size
@@ -599,7 +617,7 @@ class H5LatentsDataset(Dataset):
         self.split = split
         self.eval_dataset = eval_dataset
         self.clip_edges = clip_edges
-        self.include_climate = include_climate
+        self.beauty_dist = beauty_dist or None
         
         num_subsets = len(subset_weights)
         assert len(pct_land_ranges) == len(subset_resolutions) == num_subsets, \
@@ -607,7 +625,10 @@ class H5LatentsDataset(Dataset):
         assert subset_class_labels is None or len(subset_class_labels) == num_subsets, \
             "Number of subset class labels must match number of subsets."
         
-        self.keys = [set() for _ in range(num_subsets)]
+        if beauty_dist is not None:
+            self.keys = [[set() for _ in range(5)] for _ in range(num_subsets)]
+        else:
+            self.keys = [set() for _ in range(num_subsets)]
         with h5py.File(self.h5_file, 'r') as f:
             for i, (pct_land_range, res) in enumerate(zip(pct_land_ranges, subset_resolutions)):
                 if pct_land_range is None:
@@ -629,11 +650,21 @@ class H5LatentsDataset(Dataset):
                         split_valid = split is None or dset.attrs['split'] == split
     
                         if pct_land_valid and split_valid:
-                            self.keys[i].add((chunk_id, res, subchunk_id))
-        self.keys = [list(keys) for keys in self.keys]
+                            if beauty_dist is not None:
+                                beauty_score = float(subchunk_group.attrs['beauty_score'])
+                                beauty_score = max(1, min(5, round(beauty_score))) - 1
+                                self.keys[i][beauty_score].add((chunk_id, res, subchunk_id))
+                            else:
+                                self.keys[i].add((chunk_id, res, subchunk_id))
+        if beauty_dist is not None:
+            self.keys = [[list(subkeys) for subkeys in keys] for keys in self.keys]
+            print("Using beauty distribution. Have sizes:", [[len(subkeys) for subkeys in keys] for keys in self.keys])
+        else:
+            self.keys = [list(keys) for keys in self.keys]
+            print("Not using beauty distribution.")
 
     def __len__(self):
-        return max(len(keys) for keys in self.keys)
+        return 100000
 
     def augment_onehot(self, onehot):
         """Augments onehot in place by randomly adding classes to pixels."""
@@ -678,23 +709,32 @@ class H5LatentsDataset(Dataset):
                     onehot[idx][group_mask] = 1
                         
     def __getitem__(self, idx):
-        LOWFREQ_MEAN = -2128
-        LOWFREQ_STD = 2353
+        LOWFREQ_MEAN = -31.4
+        LOWFREQ_STD = 38.6
         
         # Draw a random subset based on subset weights
         subset_idx = random.choices(range(len(self.subset_weights)), weights=self.subset_weights, k=1)[0]
-        index = random.randrange(len(self.keys[subset_idx]))
         class_label = self.subset_class_labels[subset_idx] if self.subset_class_labels is not None else None
         
-        chunk_id, res, subchunk_id = self.keys[subset_idx][index]
+        if self.beauty_dist is not None:
+            beauty_score = random.choices(range(5), weights=self.beauty_dist[subset_idx], k=1)[0]
+            index = random.randrange(len(self.keys[subset_idx][beauty_score]))
+            chunk_id, res, subchunk_id = self.keys[subset_idx][beauty_score][index]
+        else:
+            index = random.randrange(len(self.keys[subset_idx]))
+            chunk_id, res, subchunk_id = self.keys[subset_idx][index]
+        
         with h5py.File(self.h5_file, 'r') as f:
             group_path = f"{res}/{chunk_id}/{subchunk_id}"
             res_group = f[str(res)]
             data_latent = f[f"{group_path}/latent"]
             data_lowfreq = f[f"{group_path}/lowfreq"]
+            data_climate = f[f"{group_path}/climate"]
             
             shape = data_latent.shape
             assert data_lowfreq.shape == shape[2:]
+            assert data_climate.shape[1:] == shape[2:]
+            
             if self.clip_edges:
                 assert shape[2] >= self.crop_size + 2, f"Crop size is larger than image size + 2. Crop size: {self.crop_size}, Image size: {shape[2]}"
             else:
@@ -723,14 +763,48 @@ class H5LatentsDataset(Dataset):
                 li, lj = lj, shape[2] - li - lh
             if flip:
                 lj = shape[2] - lj - lw
-                
+            
+            # Load latent data
             data_latent = torch.from_numpy(data_latent[transform_idx, :, i:i+h, j:j+w])
+            assert data_latent.shape[-1] > 0, f"Latent crop is empty. i: {i}, j: {j}, h: {h}, w: {w}"
+            latent_channels = data_latent.shape[0]
+            means, logvars = data_latent[:latent_channels//2], data_latent[latent_channels//2:]
+            sampled_latent = torch.randn_like(means) * (logvars * 0.5).exp() + means
+            sampled_latent = (sampled_latent - self.latents_mean) / self.latents_std * self.sigma_data
+            
+            # Load lowfreq data
             data_lowfreq = torch.from_numpy(data_lowfreq[li:li+lh, lj:lj+lw])[None]
+            if flip:
+                data_lowfreq = torch.flip(data_lowfreq, dims=[-1])
+            if rotate_k != 0:
+                data_lowfreq = torch.rot90(data_lowfreq, k=rotate_k, dims=[-2, -1])
+            data_lowfreq = data_lowfreq.float()
+            data_lowfreq = (data_lowfreq - LOWFREQ_MEAN) / LOWFREQ_STD * self.sigma_data
+            lowfreq_mean = torch.mean(data_lowfreq) / self.sigma_data
             
-            lowfreq_mean = torch.mean(data_lowfreq)
+            # Load landcover data
+            landcover_classes = [0, 20, 30, 40, 50, 60, 70, 80, 90, 100, 111, 112, 113, 114, 115, 116, 121, 122, 123, 124, 125, 126, 200]
+            if f"{group_path}/landcover_mini" in f:
+                landcover_data = f[f"{group_path}/landcover_mini"]
+                landcover_data = torch.from_numpy(landcover_data[li:li+lh, lj:lj+lw]).long()
+            else:
+                landcover_data = torch.full((h, w), 200, dtype=torch.long)
+            max_class = landcover_classes[-1]
+            lookup = torch.full((max_class + 1,), len(landcover_classes) - 1, dtype=torch.long)
+            for idx, class_val in enumerate(landcover_classes):
+                lookup[class_val] = idx
+            landcover_indices = lookup[landcover_data]
+            landcover_onehot = F.one_hot(landcover_indices, num_classes=len(landcover_classes)).float()
+            landcover_onehot = landcover_onehot.permute(2, 0, 1)  # [C, H, W] format
+            landcover_onehot = landcover_onehot / torch.sqrt(torch.mean(landcover_onehot, dim=0, keepdim=True)) * self.sigma_data
+            if flip:
+                landcover_onehot = torch.flip(landcover_onehot, dims=[-1])
+            if rotate_k != 0:
+                landcover_onehot = torch.rot90(landcover_onehot, k=rotate_k, dims=[-2, -1])
             
-            # Retrieve climate data for channels 0, 3, 11, 14 (temp, temp seasonality, precip, precip seasonality)
-            if not self.include_climate and f"{group_path}/climate" in f:
+            # Load climate data
+            # (0=temp, 3=temp seasonality, 11=precip, 14=precip seasonality)
+            if f"{group_path}/climate" in f:
                 climate_data = f[f"{group_path}/climate"][[0, 3, 11, 14]][:, li:li+lh, lj:lj+lw]
                 climate_data = (climate_data - res_group.attrs['climate_mean'][[0, 3, 11, 14], None, None]) / res_group.attrs['climate_std'][[0, 3, 11, 14], None, None] * self.sigma_data
                 climate_data = torch.from_numpy(climate_data).float()
@@ -739,41 +813,416 @@ class H5LatentsDataset(Dataset):
                     climate_nanmean = torch.zeros(4)
                 else:
                     climate_nanmean = torch.nanmean(climate_data, dim=(-2, -1))
+                climate_data_mask = torch.stack([torch.isnan(climate_data).any(dim=0), ~torch.isnan(climate_data).any(dim=0)], dim=0).float() * np.sqrt(2) * self.sigma_data
+                climate_data = torch.nan_to_num(climate_data, nan=0.0)
             else:
                 climate_data = torch.zeros(4, lh, lw)
+                climate_data_mask = torch.zeros(2, lh, lw)
+                climate_data_mask[0] = np.sqrt(2) * self.sigma_data
                 climate_nanmean = torch.zeros(4)
                 any_nan_climate = True
-            
-        data_lowfreq = data_lowfreq.float()
-        data_lowfreq = (data_lowfreq - LOWFREQ_MEAN) / LOWFREQ_STD * self.sigma_data
-            
-        assert data_latent.shape[-1] > 0, f"Latent crop is empty. i: {i}, j: {j}, h: {h}, w: {w}"
-            
-        # Apply transforms to lowfreq to match latent
-        if flip:
-            data_lowfreq = torch.flip(data_lowfreq, dims=[-1])
-        if rotate_k != 0:
-            data_lowfreq = torch.rot90(data_lowfreq, k=rotate_k, dims=[-2, -1])
-            
-        latent_channels = data_latent.shape[0]
-        means, logvars = data_latent[:latent_channels//2], data_latent[latent_channels//2:]
-        sampled_latent = torch.randn_like(means) * (logvars * 0.5).exp() + means
-        sampled_latent = (sampled_latent - self.latents_mean) / self.latents_std * self.sigma_data
+                
+        image = torch.cat([
+            sampled_latent,
+            data_lowfreq,
+            climate_data,
+            climate_data_mask
+        ], dim=0)
         
         # Only include sampled_latent in img tensor instead of concatenating with other data
+        cond_inputs = [lowfreq_mean.reshape([]).float(),
+                       climate_nanmean[0].float().reshape([]),
+                       climate_nanmean[1].float().reshape([]),
+                       climate_nanmean[2].float().reshape([]),
+                       climate_nanmean[3].float().reshape([]),
+                       torch.tensor(1 if any_nan_climate else 0, dtype=torch.int64).reshape([])]
+        if class_label is not None:
+            cond_inputs += [torch.tensor(class_label)]
+            
+        return {'image': image.float(), 'cond_inputs': cond_inputs, 'path': group_path}
+
+    def denormalize_residual(self, residual, resolution):
+        with h5py.File(self.h5_file, 'r') as f:
+            res_group = f[str(resolution)]
+            return residual * res_group.attrs['residual_std'] + res_group.attrs['residual_mean']
+    
+    def denormalize_lowfreq(self, lowfreq, resolution):
+        LOWFREQ_MEAN = -31.4
+        LOWFREQ_STD = 38.6
+        return lowfreq * LOWFREQ_STD + LOWFREQ_MEAN
+
+class H5LatentsSimpleDataset(Dataset):
+    """Simplified dataset for training diffusion models to generate terrain latents without climate/landcover data."""
+    def __init__(self, 
+                 h5_file, 
+                 crop_size, 
+                 pct_land_ranges, 
+                 subset_resolutions, 
+                 subset_weights=None,
+                 subset_class_labels=None,
+                 eval_dataset=False,
+                 latents_mean=None, 
+                 latents_std=None, 
+                 sigma_data=0.5, 
+                 clip_edges=True,
+                 split=None,
+                 beauty_dist=None):
+        """
+        Args:
+            h5_file (str): Path to the HDF5 file containing the dataset.
+            crop_size (int): Size of the random crop to extract from each image.
+            pct_land_ranges (list): Ranges of acceptable pct_land values [min, max], for each subset.
+            subset_resolutions (list): Resolutions to filter subsets by.
+            subset_weights (list): Weights for each subset. Default is None (uniform sampling).
+            subset_class_labels (list): Class labels for each subset. Defaults to None.
+            eval_dataset (bool): Whether dataset should be transformed deterministically. Defaults to False.
+            latents_mean (list): Mean values for normalizing latents. Defaults to None.
+            latents_std (list): Standard deviation values for normalizing latents. Defaults to None.
+            sigma_data (float): Data standard deviation. Defaults to 0.5.
+            clip_edges (bool): Whether to clip edges when cropping. Defaults to True.
+            split (str): Split to use. Defaults to None (all splits).
+            beauty_dist (list): Weights for sampling beauty scores 1-5. Must sum to 1. Defaults to uniform distribution.
+        """
+        self.h5_file = h5_file
+        self.crop_size = crop_size
+        self.pct_land_ranges = pct_land_ranges or [[0, 1]]
+        self.subset_resolutions = subset_resolutions or [480]
+        self.subset_weights = subset_weights or [1.0]
+        self.subset_class_labels = subset_class_labels
+        self.latents_mean = torch.tensor(latents_mean).view(-1, 1, 1) if isinstance(latents_mean, list) else torch.clone(latents_mean).view(-1, 1, 1)
+        self.latents_std = torch.tensor(latents_std).view(-1, 1, 1) if isinstance(latents_std, list) else torch.clone(latents_std).view(-1, 1, 1)
+        self.sigma_data = sigma_data
+        self.split = split
+        self.eval_dataset = eval_dataset
+        self.clip_edges = clip_edges
+        self.beauty_dist = beauty_dist or None
+        
+        num_subsets = len(subset_weights)
+        assert len(pct_land_ranges) == len(subset_resolutions) == num_subsets, \
+            "Number of subsets must match between pct_land_ranges, dataset_resolutions, and subset_weights."
+        assert subset_class_labels is None or len(subset_class_labels) == num_subsets, \
+            "Number of subset class labels must match number of subsets."
+        
+        # Initialize keys based on whether beauty distribution is used
+        if beauty_dist is not None:
+            self.keys = [[set() for _ in range(5)] for _ in range(num_subsets)]
+        else:
+            self.keys = [set() for _ in range(num_subsets)]
+            
+        with h5py.File(self.h5_file, 'r') as f:
+            for i, (pct_land_range, res) in enumerate(zip(pct_land_ranges, subset_resolutions)):
+                if pct_land_range is None:
+                    pct_land_range = [0, 1]
+                    
+                if str(res) not in f:
+                    continue
+                    
+                res_group = f[str(res)]
+                for chunk_id in res_group:
+                    chunk_group = res_group[chunk_id]
+                    for subchunk_id in chunk_group:
+                        subchunk_group = chunk_group[subchunk_id]
+                        if 'latent' not in subchunk_group:
+                            continue
+                            
+                        dset = subchunk_group['latent']
+                        pct_land_valid = pct_land_range[0] <= dset.attrs['pct_land'] <= pct_land_range[1]
+                        split_valid = split is None or dset.attrs['split'] == split
+    
+                        if pct_land_valid and split_valid:
+                            if beauty_dist is not None:
+                                beauty_score = float(subchunk_group.attrs['beauty_score'])
+                                beauty_score = max(1, min(5, round(beauty_score))) - 1
+                                self.keys[i][beauty_score].add((chunk_id, res, subchunk_id))
+                            else:
+                                self.keys[i].add((chunk_id, res, subchunk_id))
+                                
+        if beauty_dist is not None:
+            self.keys = [[list(subkeys) for subkeys in keys] for keys in self.keys]
+            print("Using beauty distribution. Have sizes:", [[len(subkeys) for subkeys in keys] for keys in self.keys])
+        else:
+            self.keys = [list(keys) for keys in self.keys]
+            print("Not using beauty distribution.")
+
+    def __len__(self):
+        return 100000
+
+    def __getitem__(self, idx):
+        LOWFREQ_MEAN = -31.4
+        LOWFREQ_STD = 38.6
+        
+        # Draw a random subset based on subset weights
+        subset_idx = random.choices(range(len(self.subset_weights)), weights=self.subset_weights, k=1)[0]
+        class_label = self.subset_class_labels[subset_idx] if self.subset_class_labels is not None else None
+        
+        if self.beauty_dist is not None:
+            beauty_score = random.choices(range(5), weights=self.beauty_dist[subset_idx], k=1)[0]
+            index = random.randrange(len(self.keys[subset_idx][beauty_score]))
+            chunk_id, res, subchunk_id = self.keys[subset_idx][beauty_score][index]
+        else:
+            index = random.randrange(len(self.keys[subset_idx]))
+            chunk_id, res, subchunk_id = self.keys[subset_idx][index]
+        
+        with h5py.File(self.h5_file, 'r') as f:
+            group_path = f"{res}/{chunk_id}/{subchunk_id}"
+            data_latent = f[f"{group_path}/latent"]
+            data_lowfreq = f[f"{group_path}/lowfreq"]
+            
+            shape = data_latent.shape
+            assert data_lowfreq.shape == shape[2:]
+            
+            if self.clip_edges:
+                assert shape[2] >= self.crop_size + 2
+                i = random.randint(1, shape[2] - self.crop_size - 1) if not self.eval_dataset else (shape[2] - self.crop_size) // 2
+                j = random.randint(1, shape[3] - self.crop_size - 1) if not self.eval_dataset else (shape[3] - self.crop_size) // 2
+            else:
+                assert shape[2] >= self.crop_size
+                i = random.randint(0, shape[2] - self.crop_size) if not self.eval_dataset else (shape[2] - self.crop_size) // 2
+                j = random.randint(0, shape[3] - self.crop_size) if not self.eval_dataset else (shape[3] - self.crop_size) // 2
+                
+            h = w = self.crop_size
+            
+            # Handle transformations
+            transform_idx = random.randrange(8) if not self.eval_dataset else 0
+            flip = (transform_idx // 4) == 1
+            rotate_k = transform_idx % 4
+                
+            # Load and process latent data
+            data_latent = torch.from_numpy(data_latent[transform_idx, :, i:i+h, j:j+w])
+            latent_channels = data_latent.shape[0]
+            means, logvars = data_latent[:latent_channels//2], data_latent[latent_channels//2:]
+            sampled_latent = torch.randn_like(means) * (logvars * 0.5).exp() + means
+            sampled_latent = (sampled_latent - self.latents_mean) / self.latents_std * self.sigma_data
+            
+            # Load and process lowfreq data
+            li, lj, lh, lw = i, j, h, w
+            for _ in range(rotate_k):
+                li, lj = lj, shape[2] - li - lh
+            if flip:
+                lj = shape[2] - lj - lw
+                
+            data_lowfreq = torch.from_numpy(data_lowfreq[li:li+lh, lj:lj+lw])[None]
+            if flip:
+                data_lowfreq = torch.flip(data_lowfreq, dims=[-1])
+            if rotate_k != 0:
+                data_lowfreq = torch.rot90(data_lowfreq, k=rotate_k, dims=[-2, -1])
+            data_lowfreq = data_lowfreq.float()
+            water_mask = (data_lowfreq < 0).float() * 2 - 1
+            data_lowfreq = (data_lowfreq - LOWFREQ_MEAN) / LOWFREQ_STD * self.sigma_data
+            lowfreq_mean = torch.mean(data_lowfreq) / self.sigma_data
+            
+        image = torch.cat([sampled_latent, data_lowfreq], dim=0)
+        #cond_img = torch.cat([data_lowfreq, water_mask], dim=0) / self.sigma_data
+        
         cond_inputs = [lowfreq_mean.reshape([]).float()]
         if class_label is not None:
             cond_inputs += [torch.tensor(class_label)]
-        if self.include_climate:
-            cond_inputs += [
-                       climate_nanmean[0].float().reshape([]),
-                       climate_nanmean[1].float().reshape([]), 
-                       climate_nanmean[2].float().reshape([]),
-                       climate_nanmean[3].float().reshape([]),
-                       torch.tensor(1 if any_nan_climate else 0, dtype=torch.int64).reshape([])
-                       ]
             
-        return {'image': sampled_latent.float(), 'cond_inputs': cond_inputs, 'path': group_path}
+        return {'image': image.float(), 'cond_inputs': cond_inputs, 'path': group_path}
+
+    def denormalize_residual(self, residual, resolution):
+        with h5py.File(self.h5_file, 'r') as f:
+            res_group = f[str(resolution)]
+            return residual * res_group.attrs['residual_std'] + res_group.attrs['residual_mean']
+        
+    def denormalize_lowfreq(self, lowfreq, resolution):
+        LOWFREQ_MEAN = -31.4
+        LOWFREQ_STD = 38.6
+        return lowfreq * LOWFREQ_STD + LOWFREQ_MEAN
+
+class H5DirectDataset(Dataset):
+    """Dataset for training diffusion models directly on terrain residuals without using latent encodings.
+    This dataset downsamples the residual data to match the latent resolution."""
+    def __init__(self, 
+                 h5_file, 
+                 crop_size, 
+                 pct_land_ranges, 
+                 subset_resolutions, 
+                 subset_weights=None,
+                 subset_class_labels=None,
+                 eval_dataset=False,
+                 sigma_data=0.5, 
+                 clip_edges=True,
+                 split=None,
+                 beauty_dist=None):
+        """
+        Args:
+            h5_file (str): Path to the HDF5 file containing the dataset.
+            crop_size (int): Size of the random crop to extract from each image.
+            pct_land_ranges (list): Ranges of acceptable pct_land values [min, max], for each subset.
+            subset_resolutions (list): Resolutions to filter subsets by.
+            subset_weights (list): Weights for each subset. Default is None (uniform sampling).
+            subset_class_labels (list): Class labels for each subset. Defaults to None.
+            eval_dataset (bool): Whether dataset should be transformed deterministically. Defaults to False.
+            sigma_data (float): Data standard deviation. Defaults to 0.5.
+            clip_edges (bool): Whether to clip edges when cropping. Defaults to True.
+            split (str): Split to use. Defaults to None (all splits).
+            beauty_dist (list): Weights for sampling beauty scores 1-5. Must sum to 1. Defaults to uniform distribution.
+        """
+        self.h5_file = h5_file
+        self.crop_size = crop_size  # This is the size after downsampling (same as latent size)
+        self.pct_land_ranges = pct_land_ranges or [[0, 1]]
+        self.subset_resolutions = subset_resolutions or [480]
+        self.subset_weights = subset_weights or [1.0]
+        self.subset_class_labels = subset_class_labels
+        self.sigma_data = sigma_data
+        self.split = split
+        self.eval_dataset = eval_dataset
+        self.clip_edges = clip_edges
+        self.beauty_dist = beauty_dist or None
+        
+        num_subsets = len(subset_weights)
+        assert len(pct_land_ranges) == len(subset_resolutions) == num_subsets, \
+            "Number of subsets must match between pct_land_ranges, dataset_resolutions, and subset_weights."
+        assert subset_class_labels is None or len(subset_class_labels) == num_subsets, \
+            "Number of subset class labels must match number of subsets."
+        
+        # Initialize keys based on whether beauty distribution is used
+        if beauty_dist is not None:
+            self.keys = [[set() for _ in range(5)] for _ in range(num_subsets)]
+        else:
+            self.keys = [set() for _ in range(num_subsets)]
+            
+        with h5py.File(self.h5_file, 'r') as f:
+            for i, (pct_land_range, res) in enumerate(zip(pct_land_ranges, subset_resolutions)):
+                if pct_land_range is None:
+                    pct_land_range = [0, 1]
+                    
+                if str(res) not in f:
+                    continue
+                    
+                res_group = f[str(res)]
+                for chunk_id in res_group:
+                    chunk_group = res_group[chunk_id]
+                    for subchunk_id in chunk_group:
+                        subchunk_group = chunk_group[subchunk_id]
+                        if 'residual' not in subchunk_group:
+                            continue
+                            
+                        dset = subchunk_group['residual']
+                        pct_land_valid = pct_land_range[0] <= dset.attrs['pct_land'] <= pct_land_range[1]
+                        split_valid = split is None or dset.attrs['split'] == split
+    
+                        if pct_land_valid and split_valid:
+                            if beauty_dist is not None and 'beauty_score' in subchunk_group.attrs:
+                                beauty_score = float(subchunk_group.attrs['beauty_score'])
+                                beauty_score = max(1, min(5, round(beauty_score))) - 1
+                                self.keys[i][beauty_score].add((chunk_id, res, subchunk_id))
+                            else:
+                                self.keys[i].add((chunk_id, res, subchunk_id))
+                                
+        if beauty_dist is not None:
+            self.keys = [[list(subkeys) for subkeys in keys] for keys in self.keys]
+            print("Using beauty distribution. Have sizes:", [[len(subkeys) for subkeys in keys] for keys in self.keys])
+        else:
+            self.keys = [list(keys) for keys in self.keys]
+            print("Not using beauty distribution.")
+
+    def __len__(self):
+        return 100000
+
+    def __getitem__(self, idx):
+        LOWFREQ_MEAN = -31.4
+        LOWFREQ_STD = 38.6
+        
+        # Draw a random subset based on subset weights
+        subset_idx = random.choices(range(len(self.subset_weights)), weights=self.subset_weights, k=1)[0]
+        class_label = self.subset_class_labels[subset_idx] if self.subset_class_labels is not None else None
+        
+        if self.beauty_dist is not None:
+            beauty_score = random.choices(range(5), weights=self.beauty_dist[subset_idx], k=1)[0]
+            index = random.randrange(len(self.keys[subset_idx][beauty_score]))
+            chunk_id, res, subchunk_id = self.keys[subset_idx][beauty_score][index]
+        else:
+            index = random.randrange(len(self.keys[subset_idx]))
+            chunk_id, res, subchunk_id = self.keys[subset_idx][index]
+        
+        with h5py.File(self.h5_file, 'r') as f:
+            group_path = f"{res}/{chunk_id}/{subchunk_id}"
+            res_group = f[str(res)]
+            data_residual = f[f"{group_path}/residual"]
+            data_lowfreq = f[f"{group_path}/lowfreq"]
+            
+            residual_shape = data_residual.shape
+            lowfreq_shape = data_lowfreq.shape
+            
+            # Calculate the full-resolution crop size (8x larger)
+            full_crop_size = self.crop_size * 8
+            
+            if self.clip_edges:
+                assert lowfreq_shape[0] >= self.crop_size + 2  # Add margin for safety
+                i_low = random.randint(1, lowfreq_shape[0] - self.crop_size - 1) if not self.eval_dataset else (lowfreq_shape[0] - self.crop_size) // 2
+                j_low = random.randint(1, lowfreq_shape[1] - self.crop_size - 1) if not self.eval_dataset else (lowfreq_shape[1] - self.crop_size) // 2
+            else:
+                assert lowfreq_shape[0] >= self.crop_size
+                i_low = random.randint(0, lowfreq_shape[0] - self.crop_size) if not self.eval_dataset else (lowfreq_shape[0] - self.crop_size) // 2
+                j_low = random.randint(0, lowfreq_shape[1] - self.crop_size) if not self.eval_dataset else (lowfreq_shape[1] - self.crop_size) // 2
+            
+            # Convert to residual space (full resolution)
+            i = i_low * 8
+            j = j_low * 8
+                
+            # Handle transformations
+            transform_idx = random.randrange(8) if not self.eval_dataset else 0
+            flip = (transform_idx // 4) == 1
+            rotate_k = transform_idx % 4
+            
+            # Load and process residual data at full resolution
+            data_residual = torch.from_numpy(data_residual[i:i+full_crop_size, j:j+full_crop_size])[None]
+            
+            # Apply transformations to residual
+            if flip:
+                data_residual = torch.flip(data_residual, dims=[-1])
+            if rotate_k != 0:
+                data_residual = torch.rot90(data_residual, k=rotate_k, dims=[-2, -1])
+            
+            # Downsample residual to match latent resolution (1/8)
+            data_residual = F.avg_pool2d(data_residual, kernel_size=8, stride=8)
+            
+            # Normalize residual
+            data_residual = (data_residual - res_group.attrs['residual_mean']) / res_group.attrs['residual_std'] * self.sigma_data
+            
+            # Calculate corresponding indices for lowfreq (which is already at 1/8 resolution)
+            i_low = i // 8
+            j_low = j // 8
+            h_low = self.crop_size  # Already at target size
+            w_low = self.crop_size  # Already at target size
+            
+            # Load and process lowfreq data (already at 1/8 resolution)
+            data_lowfreq = torch.from_numpy(data_lowfreq[i_low:i_low+h_low, j_low:j_low+w_low])[None]
+            
+            # Apply transformations to lowfreq
+            if flip:
+                data_lowfreq = torch.flip(data_lowfreq, dims=[-1])
+            if rotate_k != 0:
+                data_lowfreq = torch.rot90(data_lowfreq, k=rotate_k, dims=[-2, -1])
+            
+            # Create water mask based on lowfreq (water is typically negative elevation)
+            water_mask = (data_lowfreq < 0).float() * 2 - 1
+            
+            # Normalize lowfreq
+            data_lowfreq = (data_lowfreq - LOWFREQ_MEAN) / LOWFREQ_STD * self.sigma_data
+            lowfreq_mean = torch.mean(data_lowfreq) / self.sigma_data
+            
+        # Combine data for output
+        image = torch.cat([data_residual, data_lowfreq], dim=0)
+        
+        # Prepare conditional inputs
+        cond_inputs = [lowfreq_mean.reshape([]).float()]
+        if class_label is not None:
+            cond_inputs += [torch.tensor(class_label)]
+            
+        return {'image': image.float(), 'cond_inputs': cond_inputs, 'path': group_path}
+
+    def denormalize_residual(self, residual, resolution):
+        with h5py.File(self.h5_file, 'r') as f:
+            res_group = f[str(resolution)]
+            return residual * res_group.attrs['residual_std'] + res_group.attrs['residual_mean']
+        
+    def denormalize_lowfreq(self, lowfreq, resolution):
+        LOWFREQ_MEAN = -31.4
+        LOWFREQ_STD = 38.6
+        return lowfreq * LOWFREQ_STD + LOWFREQ_MEAN
 
 class H5GANDataset(Dataset):
     def __init__(self, 
@@ -948,8 +1397,8 @@ class GANDataset(Dataset):
         return max(len(keys) for keys in self.keys)
 
     def __getitem__(self, idx):
-        LOWFREQ_MEAN = -2128
-        LOWFREQ_STD = 2353
+        LOWFREQ_MEAN = -31.4
+        LOWFREQ_STD = 38.6
         
         # Draw a random subset based on subset weights
         subset_idx = random.choices(range(len(self.subset_weights)), weights=self.subset_weights, k=1)[0]
@@ -1020,50 +1469,108 @@ class GANDataset(Dataset):
                 
             return {'image': data_lowfreq, 'additional_vars': climate_means}
 
-class ETOPODataset(Dataset):
-    def __init__(self, folder, size, mean, std, crop_size=None, eval_dataset=False, blur_sigma=None):
-        self.folder = folder
-        self.size = size
-        self.mean = mean
-        self.std = std
-        self.crop_size = crop_size
-        self.eval_dataset = eval_dataset
-        self.blur_sigma = blur_sigma
-
-        files = os.listdir(folder)
-        self.files = [os.path.join(folder, file) for file in files if file.endswith('.tif') or file.endswith('.tiff')]
-
-    def __len__(self):
-        return len(self.files)
-
-    @lru_cache(maxsize=300)
-    def read_image(self, file):
-        img = Image.open(file)
-        img = img.resize((self.size, self.size), resample=Image.Resampling.NEAREST)
-        img = np.array(img)
-        img = (img - self.mean) / self.std
-        img = img.astype(np.float32)
-        img = torch.from_numpy(img)[None]
-        if self.blur_sigma is not None:
-            img = TF.gaussian_blur(img, kernel_size=(1+2*self.blur_sigma, 1+2*self.blur_sigma), sigma=(self.blur_sigma, self.blur_sigma))
-        
-        return img
+class FileGANDataset(Dataset):
+    """
+    A PyTorch dataset class that returns random crops from climate/elevation rasters.
     
-    def __getitem__(self, index):
-        img = self.read_image(self.files[index])
+    Args:
+        dataset_names (list): List of dataset names in desired stacking order
+        crop_size (tuple): Size of the crop (height, width)
+        resize_size (tuple): Size to resize the crop to
+        data_dir (str): Directory containing the TIF files
         
-        if self.crop_size is not None:
-            i = random.randint(0, img.shape[1] - self.crop_size)
-            j = random.randint(0, img.shape[2] - self.crop_size)
-            img = img[:, i:i+self.crop_size, j:j+self.crop_size]
-            
-        transform_idx = random.randrange(8) if not self.eval_dataset else 0
-        flip = (transform_idx // 4) == 1
-        rotate_k = transform_idx % 4
-        if flip:
-            img = torch.flip(img, dims=[-1])
-        if rotate_k != 0:
-            img = torch.rot90(img, k=rotate_k, dims=[-2, -1])
-            
-        return {'image': img}
+    Attributes:
+        data (numpy.ndarray): Array of shape (n_datasets, height, width) containing stacked data
+        available_datasets (list): List of available dataset names
+    """
+    def __init__(self, dataset_names, crop_size=(32, 32), resize_size=(32, 32)):
+        self.crop_size = crop_size
+        self.resize_size = resize_size
         
+        # Load and process all TIF files
+        data_dict = {}
+        
+        data_arrays = []
+        for tif_file in dataset_names:
+            with rasterio.open(tif_file) as src:
+                # Get the data bounds
+                bounds = src.bounds
+                
+                # Calculate row indices for -60 to 60 degrees latitude
+                height = src.height
+                lat_res = (bounds.top - bounds.bottom) / height
+                start_row = int((bounds.top - 60) / lat_res)
+                end_row = int((bounds.top + 60) / lat_res)
+                
+                # Read the data within latitude bounds
+                data = src.read(1)[start_row:end_row, :]
+                if data.dtype == np.int16:
+                    data = data.astype(np.float32)
+                    data[data == -32768] = np.nan
+                else:
+                    data[np.abs(data) > 1e6] = np.nan
+                    
+                # Normalize the data
+                u, s = np.nanmean(data), np.nanstd(data)
+                print(tif_file, u, s)
+                data[np.isnan(data)] = u
+                data = (data - u) / s
+                
+                # Get filename without extension and path for dictionary key
+                data_arrays.append(data)
+            
+        # Get data arrays in requested order and stack them
+        self.data = np.stack(data_arrays, axis=0)  # Shape: (n_datasets, height, width)
+        
+        # Store valid dimensions for random cropping
+        self.height, self.width = self.data.shape[1:]
+        
+    def __len__(self):
+        """Return a fixed length (can be adjusted based on needs)"""
+        return 10000  # Arbitrary number of samples per epoch
+        
+    def __getitem__(self, idx):
+        """
+        Get a random crop from the stacked datasets.
+        
+        Args:
+            idx (int): Index (not used since we're returning random crops)
+            
+        Returns:
+            torch.Tensor: Tensor of shape (n_datasets, crop_height, crop_width)
+        """
+        # Calculate valid ranges for the top-left corner of the crop
+        max_h = self.height - self.crop_size[0]
+        max_w = self.width - self.crop_size[1]
+        
+        # Generate random crop coordinates
+        h_start = np.random.randint(0, max_h + 1)
+        w_start = np.random.randint(0, max_w + 1)
+        
+        # Extract the crop
+        crop = self.data[:, 
+                        h_start:h_start + self.crop_size[0],
+                        w_start:w_start + self.crop_size[1]]
+        
+        crop = torch.from_numpy(crop).float()
+        # Randomly flip horizontally and vertically
+        if np.random.random() < 0.5:
+            crop = torch.flip(crop, dims=[-1])
+            
+        # Randomly rotate by multiples of 90 degrees
+        k = np.random.randint(4)  # Number of 90 degree rotations
+        if k > 0:
+            crop = torch.rot90(crop, k=k, dims=(-2, -1))
+        
+        
+        if self.resize_size is not None:
+            crop = torch.nn.functional.interpolate(
+                crop.unsqueeze(0),
+                size=self.resize_size,
+                mode='area',
+                antialias=False
+            ).squeeze(0)
+            return {'image': crop}
+        
+        return {'image': torch.from_numpy(crop).float()}
+

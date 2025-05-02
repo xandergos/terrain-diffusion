@@ -149,6 +149,7 @@ class MPConvResample(nn.Module):
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.skip_weight = skip_weight
+        self.stride = kernel[0]
         if self.resample_mode == 'down':
             self.weight = nn.Parameter(torch.ones(out_channels, in_channels, *kernel))
         elif self.resample_mode == 'up' or self.resample_mode == 'up_bilinear':
@@ -170,11 +171,11 @@ class MPConvResample(nn.Module):
         w = w * (gain / np.sqrt(w[0].numel()))
         w = w.to(x.dtype)
 
-        upsampled = resample(x, mode=self.resample_mode, factor=2)
+        upsampled = resample(x, mode=self.resample_mode, factor=self.stride)
         if self.resample_mode == 'down':
-            y = torch.nn.functional.conv2d(x, w, stride=2, padding=w.shape[-1]//2-1)
+            y = torch.nn.functional.conv2d(x, w, stride=self.stride, padding=0)
         else:
-            y = torch.nn.functional.conv_transpose2d(x, w, stride=2, padding=w.shape[-1]//2-1)
+            y = torch.nn.functional.conv_transpose2d(x, w, stride=self.stride, padding=0)
         return mp_sum([y, upsampled], w=self.skip_weight)
 
     def norm_weights(self):
@@ -341,6 +342,13 @@ class UNetBlock(nn.Module):
             self.resample = partial(resample, mode=resample_mode)
 
     def attn(self, x):
+        y = self.attn_qkv(x)
+        y = y.reshape(y.shape[0], self.num_heads, -1, 3, y.shape[2] * y.shape[3])
+        q, k, v = normalize(y, dim=2).unbind(3) # pixel norm & split
+        w = torch.einsum('nhcq,nhck->nhqk', q, k / np.sqrt(q.shape[2])).softmax(dim=3)
+        y = torch.einsum('nhqk,nhck->nhcq', w, v)
+        return self.attn_proj(y.reshape(*x.shape))
+            
         y = self.attn_qkv(x)
         y = y.reshape(y.shape[0], self.num_heads, -1, 3, y.shape[2] * y.shape[3])
         q, k, v = normalize(y, dim=2).unbind(3)
@@ -582,7 +590,8 @@ class EDMAutoencoder(ModelMixin, ConfigMixin):
         block_kwargs=None,
         conditional_inputs=[],
         latent_channels=None,
-        n_logvar=1
+        n_logvar=1,
+        direct_skips=[]
     ):
         """
         EDMAutoencoder class that uses EDMUnet2D for encoding and UNetBlocks for decoding.
@@ -600,6 +609,8 @@ class EDMAutoencoder(ModelMixin, ConfigMixin):
             block_kwargs (dict, optional): Additional keyword arguments for UNetBlock. Default is None.
             conditional_inputs (list, optional): A list of tuples describing additional inputs to the model.
             latent_channels (int, optional): The number of channels in the latent space. Required.
+            direct_skips (list, optional): A list of channels where direct skips are used. Default is []. These channels will be encoded directly into the latent space.
+                This is useful when you want exact precision in the latent space.
         """
         super().__init__()
         
@@ -635,7 +646,7 @@ class EDMAutoencoder(ModelMixin, ConfigMixin):
         # Decoder (UNetBlocks)
         block_channels = [model_channels * m for m in model_channel_mults]
         self.decoder = nn.ModuleList()
-        self.decoder_conv = MPConv(latent_channels + 1, model_channels * model_channel_mults[-1], kernel=[1, 1])
+        self.decoder_conv = MPConv(latent_channels + len(direct_skips) + 1, model_channels * model_channel_mults[-1], kernel=[1, 1])
         cout = model_channels * model_channel_mults[-1]  # +1 because we add a ones channel to simulate a bias
         for level, (channels, nb) in reversed(list(enumerate(zip(block_channels, layers_per_block)))):
             res = image_size // 2**level
@@ -657,7 +668,19 @@ class EDMAutoencoder(ModelMixin, ConfigMixin):
         encodings = self.encoder(x, noise_labels=None, conditional_inputs=conditional_inputs)
         means = encodings[:, :encodings.shape[1] // 2]
         logvars = encodings[:, encodings.shape[1] // 2:]
-        return means, logvars
+        
+        final_means = [means]
+        for channel in self.config.direct_skips:
+            x_c = x[:, channel:channel+1]
+            pooled = torch.nn.functional.adaptive_avg_pool2d(x_c, means.shape[-2:])
+            final_means.append(pooled)
+        final_means = torch.cat(final_means, dim=1)
+        
+        final_logvars = torch.cat([logvars, 
+                                   torch.full([logvars.shape[0], len(self.config.direct_skips), logvars.shape[2], logvars.shape[3]], 
+                                              device=logvars.device, fill_value=-20)], dim=1)
+        
+        return final_means, final_logvars
     
     def postencode(self, means, logvars, use_mode=False):
         if use_mode:
@@ -667,14 +690,32 @@ class EDMAutoencoder(ModelMixin, ConfigMixin):
         return means + eps * std
     
     def decode(self, z, include_logvar=False):
+        # Extract direct skip channels from end of latent
+        direct_channels = z[:, self.config.latent_channels:]
+        
+        # Process through decoder
         z = torch.cat([z, torch.ones_like(z[:, :1])], dim=1)  # Add ones channel to simulate bias
         z = self.decoder_conv(z)
         for block in self.decoder:
             z = block(z, None)
+            
+        # Get decoder output
+        decoder_out = self.out_conv(z, gain=self.out_gain)
+        
+        # Create output tensor and insert direct channels at specified indices
+        if len(self.config.direct_skips) > 0:
+            direct_output = torch.zeros_like(decoder_out)
+            direct_output_mask = torch.zeros_like(decoder_out)
+            for i, channel_idx in enumerate(self.config.direct_skips):
+                direct_output[:, channel_idx:channel_idx+1] = torch.nn.functional.interpolate(direct_channels[:, i:i+1], size=direct_output.shape[-2:], mode='nearest')
+                direct_output_mask[:, channel_idx:channel_idx+1] = 1
+                
+            decoder_out = direct_output_mask * direct_output + (1 - direct_output_mask) * decoder_out
+            
         if include_logvar:
             logvar = self.logvar.reshape(-1, 1, 1, 1)
-            return self.out_conv(z, gain=self.out_gain), logvar
-        return self.out_conv(z, gain=self.out_gain)
+            return decoder_out, logvar
+        return decoder_out
 
     def count_parameters(self):
         """

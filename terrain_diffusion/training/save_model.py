@@ -5,6 +5,7 @@ from confection import Config
 import torch
 from tqdm import tqdm
 from terrain_diffusion.training.unet import EDMAutoencoder, EDMUnet2D
+from terrain_diffusion.training.gan.generator import MPGenerator
 from safetensors.torch import load_model
 from ema_pytorch import PostHocEMA
 from diffusers.configuration_utils import ConfigMixin
@@ -30,6 +31,8 @@ def save_model(checkpoint_path, ema_step, sigma_rel):
         model = EDMUnet2D.from_config(EDMUnet2D.load_config(config_path))
     elif config['_class_name'] == 'EDMAutoencoder':
         model = EDMAutoencoder.from_config(EDMAutoencoder.load_config(config_path))
+    elif config['_class_name'] == 'MPGenerator':
+        model = MPGenerator.from_config(MPGenerator.load_config(config_path))
     else:
         raise ValueError(f'Unknown model class: {config["_class_name"]}')
 

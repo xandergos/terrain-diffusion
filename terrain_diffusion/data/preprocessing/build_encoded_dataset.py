@@ -20,7 +20,8 @@ import torch.nn.functional as F
 @click.option('--use-fp16', is_flag=True, help='Use FP16 for encoding', default=False)
 @click.option('--compile-model', is_flag=True, help='Compile the model', default=False)
 @click.option('--overwrite', is_flag=True, help='Overwrite existing datasets', default=False)
-def process_encoded_dataset(dataset, resolution, encoder_model_path, use_fp16, compile_model, overwrite):
+@click.option('--min-pct-land', type=float, help='Minimum percentage of land in the chunk (0-1)', default=0.0)
+def process_encoded_dataset(dataset, resolution, encoder_model_path, use_fp16, compile_model, overwrite, min_pct_land):
     """
     Add latent encodings to an existing HDF5 dataset containing high/low frequency components.
     
@@ -30,8 +31,9 @@ def process_encoded_dataset(dataset, resolution, encoder_model_path, use_fp16, c
     """
     device = 'cuda'
     model = EDMAutoencoder.from_pretrained(encoder_model_path)
-    model = model.encoder
     model.to(device)
+    
+    printed_latent_shape = False
 
     if compile_model:
         model = torch.compile(model)
@@ -62,6 +64,9 @@ def process_encoded_dataset(dataset, resolution, encoder_model_path, use_fp16, c
                 if 'residual' not in subchunk_group:
                     print(f"No residual data found at resolution {resolution} for chunk {chunk_id}, subchunk {subchunk_id}")
                     continue
+                
+                if subchunk_group['residual'].attrs['pct_land'] < min_pct_land:
+                    continue
 
                 # Process residual data (full resolution)
                 residual = torch.from_numpy(subchunk_group['residual'][:])[None]
@@ -69,35 +74,35 @@ def process_encoded_dataset(dataset, resolution, encoder_model_path, use_fp16, c
                 full_shape = residual.shape[-2:]
 
                 # Get lowres data (1/8 resolution) and upsample
-                lowres = torch.from_numpy(subchunk_group['lowfreq'][:])[None]
-                lowres = F.interpolate(lowres[None], size=full_shape, mode='nearest')[0]
-                lowres = (lowres - LOWFREQ_MEAN) / LOWFREQ_STD
-
-                # Process climate data (1/8 resolution) and upsample
-                if 'climate' in subchunk_group:
-                    climate_data = torch.from_numpy(subchunk_group['climate'][:][climate_channels])
-                    climate_data = (climate_data - res_group.attrs['climate_mean'][climate_channels, None, None]) / \
-                                 res_group.attrs['climate_std'][climate_channels, None, None]
-                    climate_data = F.interpolate(climate_data[None], size=full_shape, mode='nearest')[0]
-                    climate_mask = ~torch.isnan(climate_data[0:1])
-                    climate_data = torch.nan_to_num(climate_data, 0.0)
-                else:
-                    climate_data = torch.zeros((4, *full_shape))
-                    climate_mask = torch.zeros((1, *full_shape))
-
-                # Process landcover data
-                if 'landcover' in subchunk_group:
-                    landcover_data = torch.from_numpy(subchunk_group['landcover'][:]).long()
-                    max_class = landcover_classes[-1]
-                    lookup = torch.full((max_class + 1,), len(landcover_classes) - 1, dtype=torch.long)
-                    for idx, class_val in enumerate(landcover_classes):
-                        lookup[class_val] = idx
-                    landcover_indices = lookup[landcover_data]
-                    landcover_onehot = F.one_hot(landcover_indices, num_classes=len(landcover_classes))
-                    landcover_onehot = landcover_onehot.permute(2, 0, 1)  # [C, H, W] format
-                else:
-                    landcover_onehot = torch.zeros((len(landcover_classes), *full_shape))
-                    landcover_onehot[-1] = 1  # Set unknown class (200) to 1
+                #lowres = torch.from_numpy(subchunk_group['lowfreq'][:])[None]
+                #lowres = F.interpolate(lowres[None], size=full_shape, mode='nearest')[0]
+                #lowres = (lowres - LOWFREQ_MEAN) / LOWFREQ_STD
+#
+                ## Process climate data (1/8 resolution) and upsample
+                #if 'climate' in subchunk_group:
+                #    climate_data = torch.from_numpy(subchunk_group['climate'][:][climate_channels])
+                #    climate_data = (climate_data - res_group.attrs['climate_mean'][climate_channels, None, None]) / \
+                #                 res_group.attrs['climate_std'][climate_channels, None, None]
+                #    climate_data = F.interpolate(climate_data[None], size=full_shape, mode='nearest')[0]
+                #    climate_mask = ~torch.isnan(climate_data[0:1])
+                #    climate_data = torch.nan_to_num(climate_data, 0.0)
+                #else:
+                #    climate_data = torch.zeros((4, *full_shape))
+                #    climate_mask = torch.zeros((1, *full_shape))
+#
+                ## Process landcover data
+                #if 'landcover' in subchunk_group:
+                #    landcover_data = torch.from_numpy(subchunk_group['landcover'][:]).long()
+                #    max_class = landcover_classes[-1]
+                #    lookup = torch.full((max_class + 1,), len(landcover_classes) - 1, dtype=torch.long)
+                #    for idx, class_val in enumerate(landcover_classes):
+                #        lookup[class_val] = idx
+                #    landcover_indices = lookup[landcover_data]
+                #    landcover_onehot = F.one_hot(landcover_indices, num_classes=len(landcover_classes))
+                #    landcover_onehot = landcover_onehot.permute(2, 0, 1)  # [C, H, W] format
+                #else:
+                #    landcover_onehot = torch.zeros((len(landcover_classes), *full_shape))
+                #    landcover_onehot[-1] = 1  # Set unknown class (200) to 1
 
                 # Process watercover data
                 if 'watercover' in subchunk_group:
@@ -108,10 +113,10 @@ def process_encoded_dataset(dataset, resolution, encoder_model_path, use_fp16, c
                 # Concatenate all channels
                 input_data = torch.cat([
                     residual,         # 1 channel
-                    lowres,          # 1 channel
-                    climate_data,    # 4 channels
-                    climate_mask,    # 1 channel
-                    landcover_onehot,# 23 channels
+                    #lowres,          # 1 channel
+                    #climate_data,    # 4 channels
+                    #climate_mask,    # 1 channel
+                    #landcover_onehot,# 23 channels
                     water_data,      # 1 channel
                 ], dim=0).float()
                 
@@ -127,10 +132,14 @@ def process_encoded_dataset(dataset, resolution, encoder_model_path, use_fp16, c
                         with torch.no_grad():
                             model_input = input_transformed[None].to(device=device)
                             with torch.autocast(device_type=device, dtype=torch.float16 if use_fp16 else torch.float32):
-                                latent_residual = model(model_input, noise_labels=None, conditional_inputs=[]).cpu()[0]
+                                latent_residual_means, latent_residual_logvars = model.preencode(model_input, conditional_inputs=[])
+                                latent_residual = torch.cat([latent_residual_means, latent_residual_logvars], dim=1)[0].cpu()
+                        if not printed_latent_shape:
+                            print(f"Latent shape: {latent_residual.shape}")
+                            printed_latent_shape = True
                         transformed_latent.append(latent_residual.numpy())
                 
-                transformed_latent = np.stack(transformed_latent)
+                transformed_latent = np.stack(transformed_latent).astype(np.float16)
                 
                 if 'latent' in subchunk_group:
                     del subchunk_group['latent']

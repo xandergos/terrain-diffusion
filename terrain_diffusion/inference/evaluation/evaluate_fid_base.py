@@ -23,11 +23,12 @@ from tqdm import tqdm
 from confection import Config, registry
 from ema_pytorch import PostHocEMA
 from torch.utils.data import DataLoader
-import wandb
 from torchmetrics.image.fid import FrechetInceptionDistance
+from terrain_diffusion.data.laplacian_encoder import laplacian_decode, laplacian_denoise
 from terrain_diffusion.inference.evaluation.utils import get_dataloader
 from terrain_diffusion.training.datasets.datasets import LongDataset
 from terrain_diffusion.training.registry import build_registry
+from terrain_diffusion.training.unet import EDMAutoencoder
 from terrain_diffusion.training.utils import recursive_to
 from PIL import Image
 
@@ -90,6 +91,7 @@ def create_models(main_resolved, guide_resolved=None, main_sigma_rel=0.05, guide
 
 def evaluate_models_fid(model_m, 
                         model_g, 
+                        model_ae,
                         scheduler, 
                         dataloader, 
                         num_samples=2048,
@@ -151,7 +153,10 @@ def evaluate_models_fid(model_m,
                 cnoise = scheduler.trigflow_precondition_noise(sigma.view(-1).expand(samples.shape[0]))
                 
                 # Get model predictions
-                x = torch.cat([scaled_input, cond_img], dim=1)
+                if cond_img:
+                    x = torch.cat([scaled_input, cond_img], dim=1)
+                else:
+                    x = scaled_input
                 with torch.autocast(device_type="cuda", dtype=dtype):
                     if not model_g or guidance_scale == 1.0:
                         model_output = model_m(x, noise_labels=cnoise, conditional_inputs=cond_inputs)
@@ -163,7 +168,23 @@ def evaluate_models_fid(model_m,
                 samples = scheduler.step(model_output, t, samples).prev_sample
             
             # Process and update FID metrics
-            real_samples = batch['image']
+            def decode(samples):
+                samples = samples * 2
+                latent = samples[:, :4]
+                lowfreq = samples[:, 4:5]
+                decoded = model_ae.decode(latent)
+                residual, watercover = decoded[:, :1], decoded[:, 1:2]
+                watercover = torch.sigmoid(watercover)
+                residual = dataloader.dataset.base_dataset.denormalize_residual(residual, 90)
+                lowfreq = dataloader.dataset.base_dataset.denormalize_lowfreq(lowfreq, 90)
+                residual, lowfreq = laplacian_denoise(residual, lowfreq, 5.0)
+                decoded_terrain = laplacian_decode(residual, lowfreq)
+                return decoded_terrain
+            
+            # Process and update FID metrics
+            real_samples = decode(batch['image'])
+            samples = decode(samples)
+            
             real_min = torch.amin(real_samples, dim=(1, 2, 3), keepdim=True)
             real_max = torch.amax(real_samples, dim=(1, 2, 3), keepdim=True)
             
@@ -229,6 +250,7 @@ def evaluate_sr_fid_cli(main_config,
                         guide_sigma_rel, 
                         guide_ema_step, 
                         guidance_scale, 
+                        ae_path,
                         num_samples, 
                         batch_size, 
                         scheduler_steps, 
@@ -257,9 +279,12 @@ def evaluate_sr_fid_cli(main_config,
         
     scheduler = main_resolved['scheduler']
     
+    ae = EDMAutoencoder.from_pretrained('checkpoints/models/autoencoder').to(device)
+    
     evaluate_models_fid(
         model_m, 
         model_g, 
+        ae,
         scheduler, 
         dataloader, 
         num_samples, 

@@ -4,6 +4,7 @@ import torch
 import numpy as np
 from tqdm import tqdm
 from terrain_diffusion.data.laplacian_encoder import laplacian_decode
+import matplotlib.pyplot as plt
 
 def analyze_terrain_frequency(heightmap_tensor, bins):
     """
@@ -59,6 +60,10 @@ def calculate_beauty_score(lowfreq, residual):
     """
     # Decode the terrain
     decoded = laplacian_decode(residual, lowfreq)
+    decoded = np.sign(decoded) * decoded**2
+    if torch.mean((decoded <= 0).float()).item() > 0.99:
+        return 1.0
+    decoded = torch.where(decoded < 0, torch.zeros_like(decoded), decoded)
     
     # Calculate features
     freq_mags, powers = analyze_terrain_frequency(decoded, bins=4)
@@ -83,28 +88,64 @@ def calculate_beauty_score(lowfreq, residual):
 
 @click.command()
 @click.argument('dataset-file')
-def assign_beauty_scores(dataset_file):
+@click.option('--visualize', default=0, help='Number of terrains to visualize')
+def assign_beauty_scores(dataset_file, visualize):
     """
     Assign beauty scores to all terrains in the dataset using a linear regression model.
     
     Args:
         dataset_file (str): Path to the HDF5 file containing the dataset.
+        visualize (int): Number of terrains to visualize (0 for no visualization)
     """
-    with h5py.File(dataset_file, 'a') as f:
+    # First collect all valid paths
+    all_paths = []
+    with h5py.File(dataset_file, 'r') as f:
         for res in f.keys():
             res_group = f[res]
-            for cid in tqdm(res_group.keys(), desc=f"Processing res={res} terrains"):
+            for cid in res_group.keys():
                 cid_group = res_group[cid]
                 for sub_cid in cid_group.keys():
                     obj = cid_group[sub_cid]
                     if isinstance(obj, h5py.Group) and 'lowfreq' in obj and 'residual' in obj:
-                        lowfreq = torch.from_numpy(obj['lowfreq'][:]).float()
-                        residual = torch.from_numpy(obj['residual'][:]).float()
-                        
-                        score = calculate_beauty_score(lowfreq, residual)
-                        obj.attrs['beauty_score'] = score
+                        all_paths.append(f"{res}/{cid}/{sub_cid}")
+    
+    # Randomly shuffle the paths
+    np.random.shuffle(all_paths)
+    
+    # Store scores to apply later
+    pending_scores = []
+    visualized = 0
+
+    # Process terrains in random order
+    with h5py.File(dataset_file, 'r') as f:
+        for path in tqdm(all_paths, desc="Processing terrains"):
+            obj = f[path]
+            lowfreq = torch.from_numpy(obj['lowfreq'][:]).float()
+            residual = torch.from_numpy(obj['residual'][:]).float()
+            
+            score = calculate_beauty_score(lowfreq, residual)
+            pending_scores.append((path, score))
+
+            # Visualize if requested and haven't reached limit
+            if visualize > 0 and visualized < visualize:
+                decoded = laplacian_decode(residual, lowfreq)
+                if torch.mean((decoded < 0).float()).item() > 0.99:
+                    continue
+                print(path)
+                plt.figure(figsize=(8, 8))
+                plt.imshow(decoded.numpy(), cmap='terrain')
+                plt.colorbar()
+                plt.title(f'Beauty Score: {score:.2f}')
+                plt.show()
+                visualized += 1
+
+    # Now apply all scores at once
+    with h5py.File(dataset_file, 'a') as f:
+        for path, score in tqdm(pending_scores, desc="Applying beauty scores"):
+            obj = f[path]
+            obj.attrs['beauty_score'] = score
         
-        print("Finished assigning beauty scores to all terrains in the dataset.")
+        print(f"Finished assigning {len(pending_scores)} beauty scores to all terrains in the dataset.")
 
 if __name__ == '__main__':
     assign_beauty_scores()

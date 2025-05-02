@@ -1,29 +1,36 @@
+import numpy as np
 import torch
 import torch.nn as nn
 from terrain_diffusion.training.unet import MPConv, UNetBlock, mp_leaky_relu, mp_silu, normalize, resample, mp_sum
 
 class MPDiscriminator(nn.Module):
     """
-    A simplified magnitude-preserving discriminator that can handle arbitrary sized images.
-    Uses a series of strided convolutions to progressively downsample the input,
-    followed by a global average pooling and final classification layer.
+    A magnitude-preserving discriminator that can handle arbitrary sized images 
+    and additional floating point conditioning variables.
 
     Args:
-        in_channels (int): Number of input channels
+        in_channels (int): Number of input image channels
+        additional_vars (int): Number of additional floating point variables (default: 0)
         model_channels (int): Base number of channels (default: 64)
         channel_mults (list): List of channel multipliers for each level (default: [1, 2, 4, 8])
+        layers_per_block (int): Number of layers per resolution block (default: 1)
     """
     def __init__(
         self,
         in_channels,
+        additional_vars=0,
+        additional_vars_hidden=32,
         model_channels=64,
         channel_mults=[1, 2, 4, 8],
-        layers_per_block=1
+        layers_per_block=1,
+        noise_level=0.1
     ):
         super().__init__()
         
         # Initial conv to get to model_channels
         self.in_conv = MPConv(in_channels + 1, model_channels, kernel=[3, 3])  # +1 for bias channel
+        
+        self.noise_level = noise_level
         
         # Main network body
         self.blocks = nn.ModuleList()
@@ -52,11 +59,26 @@ class MPDiscriminator(nn.Module):
             
             cur_channels = out_channels
         
-        # Final layers
-        self.final_conv = MPConv(cur_channels, 1, kernel=[])  # 1x1 conv for final output
-        self.gain = nn.Parameter(torch.zeros([]))
+        # Global average pooling
+        self.global_pool = nn.AdaptiveAvgPool2d(1)
+        
+        # Additional variables linear classification head
+        self.additional_vars_head = nn.Sequential(
+            MPConv(additional_vars, additional_vars_hidden, kernel=[]),
+            nn.LeakyReLU(0.2),
+            MPConv(additional_vars_hidden, additional_vars_hidden, kernel=[]),
+            nn.LeakyReLU(0.2),
+            MPConv(additional_vars_hidden, additional_vars_hidden, kernel=[])
+        ) if additional_vars > 0 else None
+        
+        # Final classification layer
+        final_input_size = cur_channels + (16 if additional_vars > 0 else 0)
+        self.final_conv = MPConv(final_input_size, 1, kernel=[])  # 1x1 conv for final output
+        self.gain = nn.Parameter(torch.ones([]))
 
-    def forward(self, x):
+    def forward(self, x, additional_vars=None):
+        x = (x + torch.randn_like(x) * self.noise_level) / np.sqrt(1 + self.noise_level**2)
+        
         # Add bias channel
         x = torch.cat([x, torch.ones_like(x[:, :1])], dim=1)
         
@@ -64,11 +86,16 @@ class MPDiscriminator(nn.Module):
         x = self.in_conv(x)
         
         # Process blocks
-        for i, block in enumerate(self.blocks):
+        for block in self.blocks:
             x = block(x, emb=None)
         
         # Global average pooling
-        x = x.mean([2, 3])
+        x = self.global_pool(x).squeeze(-1).squeeze(-1)
+        
+        # Process additional variables if provided
+        if self.additional_vars_head is not None and additional_vars is not None:
+            additional_features = self.additional_vars_head(additional_vars)
+            x = torch.cat([x, additional_features], dim=1)
         
         # Final classification
         return self.final_conv(x, gain=self.gain)
@@ -80,6 +107,8 @@ class MPDiscriminator(nn.Module):
                 module.norm_weights()
 
 if __name__ == '__main__':
+    # Example usage with image and additional variables
     x = torch.randn(1, 1, 32, 32)
-    d = MPDiscriminator(1, 32, [1, 2, 4, 8])
-    print(d(x).shape)
+    additional_vars = torch.randn(1, 5)  # 5 additional variables
+    d = MPDiscriminator(1, additional_vars=5, model_channels=32, channel_mults=[1, 2, 4, 8])
+    print(d(x, additional_vars).shape)

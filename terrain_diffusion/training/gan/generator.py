@@ -4,7 +4,7 @@ import torch.nn as nn
 from diffusers.models.modeling_utils import ModelMixin
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 
-from terrain_diffusion.training.unet import MPConv, UNetBlock, mp_silu, mp_concat, normalize, resample, mp_sum
+from terrain_diffusion.training.unet import MPConv, UNetBlock, mp_silu, mp_concat, normalize, resample, mp_sum, MPConvResample
 
 class MPGenerator(ModelMixin, ConfigMixin):
     """
@@ -21,6 +21,8 @@ class MPGenerator(ModelMixin, ConfigMixin):
         layers_per_block=2,
         block_kwargs=None,
         stem_width=7,
+        stem_channels=None,
+        no_padding=True
     ):
         """
         Args:
@@ -36,13 +38,22 @@ class MPGenerator(ModelMixin, ConfigMixin):
         block_kwargs = block_kwargs or {}
         model_channel_mults = model_channel_mults or [8, 4, 2, 1]
         
-        # Initial projection of latent
-        self.initial_conv = MPConv(latent_channels, model_channels * model_channel_mults[0], 
-                                 kernel=[stem_width, stem_width], no_padding=True)
+        init_channels = stem_channels or model_channels * model_channel_mults[0]
+        
+        # Initial stem convolution for spatial context
+        self.stem_conv = MPConv(latent_channels, init_channels, 
+                              kernel=[stem_width, stem_width], no_padding=no_padding)
+        self.initial_skip_conv = MPConv(latent_channels, init_channels, kernel=[1, 1])
+        
+        # Upsampling after stem
+        self.initial_up = MPConvResample('up', kernel=[4, 4], 
+                                       in_channels=init_channels,
+                                       out_channels=init_channels,
+                                       skip_weight=0.0)
         
         # Build decoder blocks
         self.blocks = nn.ModuleList()
-        cout = model_channels * model_channel_mults[0]
+        cout = stem_channels or model_channels * model_channel_mults[0]
         
         # For each resolution level
         for level, mult in enumerate(model_channel_mults):
@@ -50,26 +61,68 @@ class MPGenerator(ModelMixin, ConfigMixin):
             
             # Replace GeneratorBlock with UNetBlock
             for i in range(layers_per_block - 1):
-                self.blocks.append(UNetBlock(cout if i == 0 else channels, channels, 
-                                            emb_channels=0,
-                                            mode='dec',
-                                            resample_mode='keep',
-                                            no_padding=True,
-                                            **block_kwargs))
+                self.blocks.append(UNetBlock(cout if i == 0 else channels, 
+                                             channels, 
+                                             emb_channels=0,
+                                             mode='dec',
+                                             resample_mode='keep',
+                                             no_padding=no_padding,
+                                             #activation='leaky_relu',
+                                             #resample_type='conv',
+                                             #resample_filter=2,
+                                             #resample_skip_weight=0.7,
+                                             **block_kwargs))
                 
-            self.blocks.append(UNetBlock(cout if layers_per_block == 1 else channels, channels, 
+            self.blocks.append(UNetBlock(cout if layers_per_block == 1 else channels, 
+                                         channels, 
                                          emb_channels=0,
                                          mode='dec',
-                                         resample_mode='up' if level != len(model_channel_mults) - 1 else 'keep',
-                                         no_padding=True,
+                                         resample_mode='up_bilinear' if level != len(model_channel_mults) - 1 else 'keep',
+                                         no_padding=no_padding,
+                                         #activation='leaky_relu',
+                                         #resample_type='conv',
+                                         #resample_filter=2,
+                                         #resample_skip_weight=0.7,
                                          **block_kwargs))
             
             cout = channels
         
         # Final output convolution
-        self.out_conv = MPConv(cout, out_channels, kernel=[1, 1], no_padding=True)
+        self.out_conv = MPConv(cout, out_channels + 1, kernel=[1, 1], no_padding=no_padding)
         self.out_gain = nn.Parameter(torch.ones([]))
 
+    def raw_forward(self, z):
+        """
+        Forward pass of the generator.
+        
+        Args:
+            z (torch.Tensor): Input latent tensor of shape [batch_size, latent_channels, latent_size, latent_size]
+        
+        Returns:
+            torch.Tensor: Generated image of shape [batch_size, out_channels, out_size, out_size]
+        """
+        # Apply stem conv
+        stem = self.stem_conv(z)
+        
+        # Handle skip connection
+        init_skip = self.initial_skip_conv(z)
+        if init_skip.shape != stem.shape:
+            diff_h = init_skip.shape[2] - stem.shape[2]
+            diff_w = init_skip.shape[3] - stem.shape[3]
+            start_h = diff_h // 2
+            start_w = diff_w // 2
+            init_skip = init_skip[:, :, start_h:start_h + stem.shape[2], start_w:start_w + stem.shape[3]]
+        x = mp_sum([stem, init_skip], w=0.5)
+        
+        # Then upsample
+        x = self.initial_up(x)
+        
+        for block in self.blocks:
+            x = block(x, emb=None)
+                
+        x = self.out_conv(x, gain=self.out_gain)
+        return x
+    
     def forward(self, z):
         """
         Forward pass of the generator.
@@ -80,12 +133,8 @@ class MPGenerator(ModelMixin, ConfigMixin):
         Returns:
             torch.Tensor: Generated image of shape [batch_size, out_channels, out_size, out_size]
         """
-        x = self.initial_conv(z)
-        
-        for block in self.blocks:
-            x = block(x, emb=None)
-            
-        return self.out_conv(x, gain=self.out_gain)
+        x = self.raw_forward(z)
+        return torch.cat([x[:, :1], x[:, 1:-1] * torch.sigmoid(x[:, -1:])], dim=1)
 
     def norm_weights(self):
         """Normalize all the weights in the model."""
@@ -94,9 +143,10 @@ class MPGenerator(ModelMixin, ConfigMixin):
                 module.norm_weights()
 
 if __name__ == "__main__":
-    latent = torch.randn(1, 64, 22, 22)
-    model = MPGenerator(latent_channels=64, out_channels=1,
-                         model_channels=8,
-                         model_channel_mults=[8, 4, 2, 1],
-                         layers_per_block=2)
+    latent = torch.randn(1, 256, 20, 20)
+    model = MPGenerator(latent_channels=256, out_channels=5,
+                         model_channels=16,
+                         model_channel_mults=[64, 32, 16, 8, 4, 2, 1],
+                         layers_per_block=2, no_padding=True,
+                         stem_width=7)
     print(model(latent).shape)

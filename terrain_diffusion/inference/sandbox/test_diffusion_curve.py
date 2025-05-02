@@ -1,10 +1,11 @@
+import os
 import torch
 from tqdm import tqdm
 from terrain_diffusion.inference.scheduler.dpmsolver import EDMDPMSolverMultistepScheduler
 from terrain_diffusion.training.unet import EDMUnet2D
 from safetensors.torch import load_model
 from ema_pytorch import PostHocEMA
-from terrain_diffusion.training.datasets.datasets import H5SuperresTerrainDataset
+from terrain_diffusion.training.datasets.datasets import H5DecoderTerrainDataset
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 import numpy as np
@@ -14,43 +15,37 @@ scheduler = EDMDPMSolverMultistepScheduler(0.002, 10.0, 0.5)
 
 device = 'cuda'
 
-def get_model(channels, layers, tag, sigma_rel=None, ema_step=None, fs=1.0, checkpoint='latest_checkpoint'):
-    model = EDMUnet2D(
-        image_size=512,
-        in_channels=5,
-        out_channels=1,
-        model_channels=channels,
-        model_channel_mults=[1, 2, 3, 4],
-        layers_per_block=layers,
-        attn_resolutions=[],
-        midblock_attention=False,
-        concat_balance=0.5,
-        conditional_inputs=[("embedding", 4, 0.2)],
-        fourier_scale=fs
-    )
+def get_model(checkpoint_path, sigma_rel=None, ema_step=None):
+    config_path = os.path.join(checkpoint_path, 'model_config')
+    model = EDMUnet2D.from_config(EDMUnet2D.load_config(config_path))
 
     if sigma_rel is not None:
         # sigma_rels are placeholders since we dont use them
-        ema = PostHocEMA(model, sigma_rels=[0.05, 0.1], checkpoint_folder=f'checkpoints/diffusion_x8-{tag}/phema').to(device)
+        ema = PostHocEMA(model, sigma_rels=[0.05, 0.1], checkpoint_folder=os.path.join(checkpoint_path, '..', 'phema')).to(device)
         #ema.load_state_dict(torch.load(f'checkpoints/diffusion_x8-{tag}/{checkpoint}/phema.pt', map_location='cpu'))
         ema.synthesize_ema_model(sigma_rel=sigma_rel, step=ema_step).copy_params_from_ema_to_model()
     else:
-        load_model(model, f'checkpoints/diffusion_x8-{tag}/{checkpoint}/model.safetensors')
+        load_model(model, os.path.join(checkpoint_path, 'model.safetensors'))
 
     return model
 
 models = [
    # get_model(32, 2, '32x2', 0.05, fs='pos').to(device),
-    get_model(64, 3, '64x3', 0.05, fs='pos').to(device)
+    get_model('checkpoints/diffusion_decoder-128x3/latest_checkpoint', sigma_rel=0.05).to(device)
 ]
 
 # Enable parallel processing on CPU
 torch.set_num_threads(16)
 
-dataset = H5SuperresTerrainDataset('dataset.h5', 128, [[0, 1], [0, 1], [0, 1]], [90, 180, 360], eval_dataset=False,
-                                   subset_weights=[4, 2, 1],
-                                   subset_class_labels=[0, 1, 2],
-                                   sigma_data=0.5)
+dataset = H5DecoderTerrainDataset(
+    h5_file="dataset.h5",
+    crop_size=128,
+    pct_land_ranges=[[0, 0.01], [0.01, 1]],
+    subset_resolutions=[90, 90],
+    subset_weights=[0.01, 0.99],
+    sigma_data=0.5,
+    split="train"
+)
 
 dataloader = DataLoader(dataset, batch_size=16)
 
@@ -66,12 +61,12 @@ batch = next(iter(dataloader))
 images = batch['image'].to(device)
 cond_img = batch.get('cond_img').to(device)
 
-image_std_ratio = torch.std(images, dim=(1, 2, 3), keepdim=True) / sigma_data
+#image_std_ratio = torch.std(images, dim=(1, 2, 3), keepdim=True) / sigma_data
 step = 0
 for sigma in tqdm(sigmas):
     sigma = sigma.to(device)
     sigma = sigma.expand(images.shape[0]).view(-1, 1, 1, 1)
-    sigma = sigma * image_std_ratio
+    #sigma = sigma * image_std_ratio
     
     t = torch.atan(sigma / sigma_data)
     cnoise = t.flatten()
@@ -85,7 +80,7 @@ for sigma in tqdm(sigmas):
     x = torch.cat([scaled_input, cond_img], dim=1)
     
     for i, model in enumerate(models):
-        model_output = model(x, noise_labels=cnoise, conditional_inputs=[torch.zeros(x.shape[0], device=device, dtype=torch.int64)])
+        model_output = model(x, noise_labels=cnoise, conditional_inputs=[])
         pred_v_t = -sigma_data * model_output
         
         # Calculate MSE for each sample
@@ -98,23 +93,23 @@ for sigma in tqdm(sigmas):
         
     step += 1
 
-image_std_ratio = image_std_ratio.to('cpu')
+#image_std_ratio = image_std_ratio.to('cpu')
 # Plot MSE vs sigma for each sample
 fig, ax = plt.subplots(figsize=(15, 8))
-norm = colors.Normalize(vmin=image_std_ratio.min().item(), 
-                       vmax=image_std_ratio.max().item())
+#norm = colors.Normalize(vmin=image_std_ratio.min().item(), 
+#                       vmax=image_std_ratio.max().item())
 cmap = plt.cm.viridis
 
 for i in range(len(models)):
     model_mse_values = []
     for j in range(images.shape[0]):
-        color = cmap(norm(image_std_ratio[j].item()))
+        #color = cmap(norm(image_std_ratio[j].item()))
         snr = sigmas# / max(0.05, image_std_ratio[j].item())
         if j == 0:  # Only add label for first sample to avoid cluttered legend
-            ax.loglog(snr, mse_values[i][j], alpha=0.5, color=color, 
+            ax.loglog(snr, mse_values[i][j], alpha=0.5, 
                      label=f'Model {i+1} (Individual Samples)')
         else:
-            ax.loglog(snr, mse_values[i][j], alpha=0.5, color=color)
+            ax.loglog(snr, mse_values[i][j], alpha=0.5)
         
         model_mse_values.append(mse_values[i][j])
     
@@ -124,8 +119,8 @@ for i in range(len(models)):
               linestyle='--', label=f'Model {i+1} (Mean)')
 
 # Add colorbar
-sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
-plt.colorbar(sm, ax=ax, label='Image STD Ratio')
+#sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+#plt.colorbar(sm, ax=ax, label='Image STD Ratio')
 
 ax.grid(True)
 ax.set_xlabel('Sigma')

@@ -15,39 +15,19 @@ training:
   epochs: 150
   epoch_steps: 1024
   seed: 74
-  kl_weight: 0.1
+  kl_weight: 0.05
   warmup_steps: 1024
   tasks:
     - name: residual
       channels: 1
       losses: ["va_mae", "percep"]
       weights: [0.5, 0.5]
-      task_weight: 0.5
-    - name: lowres
-      channels: 1
-      losses: ["mse"]
-      weights: [1]
-      task_weight: 0.1
-    - name: climate
-      channels: 4
-      losses: ["mse"]
-      weights: [1]
-      task_weight: 0.1
-    - name: climate_mask
-      channels: 1
-      losses: ["bce"]
-      weights: [1]
-      task_weight: 0.1
-    - name: landcover
-      channels: 23
-      losses: ["categorical"]
-      weights: [1]
-      task_weight: 0.1
+      task_weight: 1.0
     - name: watercover
       channels: 1
       losses: ["bce"]
       weights: [1]
-      task_weight: 0.1
+      task_weight: 1.0
 evaluation:
   validate_epochs: 5
   val_ema_idx: 0
@@ -74,8 +54,8 @@ wandb:
 model:
   "@model": "autoencoder"
   image_size: 512
-  in_channels: 31
-  out_channels: 31
+  in_channels: 2
+  out_channels: 2
   model_channels: 64
   model_channel_mults: [1, 2, 4, 4]
   layers_per_block: 2
@@ -85,9 +65,9 @@ model:
   attn_resolutions: []
   midblock_attention: false
   concat_balance: 0.5
-  latent_channels: 6
+  latent_channels: 4
   conditional_inputs: []
-  n_logvar: 6
+  direct_skips: []
 
 lr_sched:
   "@lr_sched": "sqrt"
@@ -114,6 +94,7 @@ val_dataset:
   split: "val"
 
 dataloader_kwargs:
-  num_workers: 4
+  num_workers: 15
   pin_memory: true
-  prefetch_factor: 4
+  prefetch_factor: 2
+  persistent_workers: true
