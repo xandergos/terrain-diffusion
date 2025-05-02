@@ -219,6 +219,10 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
                             task_loss = task_loss + variance_adjusted_loss(pred, target) * loss_weight
                         elif loss_type == 'mse':
                             task_loss = task_loss + torch.nn.functional.mse_loss(pred, target) * loss_weight
+                        elif loss_type == 'mae':
+                            task_loss = task_loss + torch.nn.functional.l1_loss(pred, target) * loss_weight
+                        elif loss_type == 'huber':
+                            task_loss = task_loss + torch.nn.functional.smooth_l1_loss(pred, target, beta=task['beta']) * loss_weight
                         elif loss_type == 'percep':
                             task_loss = task_loss + percep_loss_fn(pred, target) * loss_weight
                         elif loss_type == 'bce':
@@ -227,12 +231,14 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
                             task_loss = task_loss + torch.nn.functional.cross_entropy(pred, target) * loss_weight
                         else:
                             raise ValueError(f"Unknown loss type: {loss_type}")
-                        validation_stats[f"{task['name']}_{loss_type}"].append(task_loss.item())
+                        validation_stats[f"{task['name']}_{loss_type}"].append(task_loss.item() / loss_weight)
                     cidx += channels
                     task_loss = task_loss * task['task_weight']
                     loss = loss + task_loss
                 
-                kl_loss = -0.5 * torch.mean(1 + z_logvars - z_means**2 - z_logvars.exp())
+                ndz_logvars = z_logvars[:, :model.config.latent_channels]
+                ndz_means = z_means[:, :model.config.latent_channels]
+                kl_loss = -0.5 * torch.mean(1 + ndz_logvars - ndz_means**2 - ndz_logvars.exp())
                 
                 # Combine losses with weights
                 loss = loss + kl_loss * config['training']['kl_weight']
@@ -296,6 +302,10 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
                             task_loss = task_loss + variance_adjusted_loss(pred, target) * loss_weight
                         elif loss_type == 'mse':
                             task_loss = task_loss + torch.nn.functional.mse_loss(pred, target) * loss_weight
+                        elif loss_type == 'mae':
+                            task_loss = task_loss + torch.nn.functional.l1_loss(pred, target) * loss_weight
+                        elif loss_type == 'huber':
+                            task_loss = task_loss + torch.nn.functional.smooth_l1_loss(pred, target, beta=task['beta']) * loss_weight
                         elif loss_type == 'percep':
                             task_loss = task_loss + percep_loss_fn(pred, target) * loss_weight
                         elif loss_type == 'bce':
@@ -304,12 +314,14 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
                             task_loss = task_loss + torch.nn.functional.cross_entropy(pred, target) * loss_weight
                         else:
                             raise ValueError(f"Unknown loss type: {loss_type}")
-                        stats_hist[f"{task['name']}_{loss_type}"].append(task_loss.item())
+                        stats_hist[f"{task['name']}_{loss_type}"].append(task_loss.item() / loss_weight)
                     cidx += channels
                     task_loss = task_loss * task['task_weight']
                     loss = loss + task_loss
                 
-                kl_loss = -0.5 * torch.mean(1 + z_logvars - z_means**2 - z_logvars.exp())
+                ndz_logvars = z_logvars[:, :model.config.latent_channels]
+                ndz_means = z_means[:, :model.config.latent_channels]
+                kl_loss = -0.5 * torch.mean(1 + ndz_logvars - ndz_means**2 - ndz_logvars.exp())
                 
                 # Combine losses with weights
                 loss = loss + kl_loss * config['training']['kl_weight']
@@ -331,8 +343,8 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
 
             stats_hist['loss'].append(loss.item())
             stats_hist['kl_loss'].append(kl_loss.item())
-            stats_hist['grad_norm'].append(grad_norm)
-            postfix = {k: f"{np.mean(v):.3f}" for k, v in stats_hist.items()}
+            postfix = {k: f"{np.nanmean(v):.3f}" for k, v in stats_hist.items()}
+            postfix['grad_norm'] = f"{grad_norm:.3f}"
             postfix.update({'lr': lr})
             progress_bar.set_postfix(postfix)
             progress_bar.update(1)
@@ -363,7 +375,7 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
                 "epoch": state.epoch,
                 "seen": state.seen
             }
-            wandb_logs.update({k: v for k, v in stats_hist.items()})
+            wandb_logs.update({k: np.nanmean(v) for k, v in stats_hist.items()})
             if val_losses:
                 val_losses = {f"val_{k}": v for k, v in val_losses.items()}
                 wandb_logs.update(val_losses)

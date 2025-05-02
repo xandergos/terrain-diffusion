@@ -4,13 +4,14 @@ import click
 import optuna
 import torch
 from confection import Config, registry
-from terrain_diffusion.inference.evaluation.evaluate_fid import evaluate_models_fid, create_models
+from terrain_diffusion.inference.evaluation.evaluate_fid_base import evaluate_models_fid, create_models
 from terrain_diffusion.inference.evaluation.utils import get_dataloader
 from terrain_diffusion.training.registry import build_registry
+from terrain_diffusion.training.unet import EDMAutoencoder
 
 gpu_lock = multiprocessing.Lock()
 
-def objective(config, trial):
+def objective(config, trial, main_resolved, guide_resolved, model_ae):
     """
     Optuna objective function for optimizing FID score.
     
@@ -27,22 +28,11 @@ def objective(config, trial):
     guide_ema_step = trial.suggest_int("guide_ema_step", 2048, config['max_ema_step'], step=512)
     
     # Fixed configurations
-    ae_path = config['ae_path']
-    main_config = config['main_config']
-    guide_config = config['guide_config']
     batch_size = config['batch_size']
     device = config['device']
     dtype = config['dtype']
     num_samples = config['num_samples']
     scheduler_steps = config['scheduler_steps']
-    
-    # Build and resolve configs
-    build_registry()
-    main_cfg = Config().from_disk(main_config)
-    guide_cfg = Config().from_disk(guide_config)
-    
-    main_resolved = registry.resolve(main_cfg, validate=False)
-    guide_resolved = registry.resolve(guide_cfg, validate=False)
     
     # Setup models and dataloader
     dataloader = get_dataloader(main_resolved, batch_size)
@@ -64,6 +54,7 @@ def objective(config, trial):
     fid_score = evaluate_models_fid(
         model_m=model_m,
         model_g=model_g,
+        model_ae=model_ae,
         scheduler=scheduler,
         dataloader=dataloader,
         num_samples=num_samples,
@@ -106,6 +97,14 @@ def sweep_fid(config_path):
                 load_if_exists=True
             )
             print(f"Loaded existing study from {study_file}")
+            # Print best trial information if trials exist
+            if len(study.trials) > 0:
+                best_trial = study.best_trial
+                print("\nBest trial so far:")
+                print(f"  FID Score: {best_trial.value:.4f}")
+                print("  Parameters:")
+                for key, value in best_trial.params.items():
+                    print(f"    {key}: {value}")
         except Exception as e:
             print(f"Creating new study in {study_file}")
             study = optuna.create_study(
@@ -122,7 +121,22 @@ def sweep_fid(config_path):
         )
         
     n_trials = config['sweep']['n_trials']
-    study.optimize(lambda trial: objective(config['models'], trial), n_trials=n_trials)
+    
+    print("Loading autoencoder")
+    device = config['models']['device']
+    ae_path = config['models']['ae_path']
+    model_ae = EDMAutoencoder.from_pretrained(ae_path).to(device)
+    model_ae = model_ae.to(device)
+    print("Autoencoder loaded")
+    
+    build_registry()
+    main_cfg = Config().from_disk(config['models']['main_config'])
+    guide_cfg = Config().from_disk(config['models']['guide_config'])
+    
+    main_resolved = registry.resolve(main_cfg, validate=False)
+    guide_resolved = registry.resolve(guide_cfg, validate=False)
+    
+    study.optimize(lambda trial: objective(config['models'], trial, main_resolved, guide_resolved, model_ae), n_trials=n_trials)
 
 if __name__ == "__main__":
     sweep_fid()

@@ -1,8 +1,9 @@
 import torch
 from tqdm import tqdm
-from diffusion.datasets.datasets import H5AutoencoderDataset, H5SuperresTerrainDataset
-from diffusion.scheduler.dpmsolver import EDMDPMSolverMultistepScheduler
-from diffusion.unet import DiffusionAutoencoder, EDMAutoencoder
+from terrain_diffusion.data.laplacian_encoder import laplacian_decode, laplacian_denoise
+from terrain_diffusion.training.datasets.datasets import H5AutoencoderDataset
+from terrain_diffusion.inference.scheduler.dpmsolver import EDMDPMSolverMultistepScheduler
+from terrain_diffusion.training.unet import EDMAutoencoder
 from ema_pytorch import PostHocEMA
 from safetensors.torch import load_model
 import matplotlib.pyplot as plt
@@ -17,24 +18,12 @@ from torch.utils.data import DataLoader
 
 device = 'cuda'
 
-dataset = H5SuperresTerrainDataset('dataset_full_encoded.h5', 512, [0.6, 1], '480m', eval_dataset=True,
-                                   latents_mean=[0, 0.07, 0.12, 0.07],
-                                   latents_std=[1.4127, 0.8170, 0.8386, 0.8414])
+dataset = H5AutoencoderDataset('dataset.h5', 512, [[0, 0.01], [0.01, 1]], [90, 90], subset_weights=[0.01, 1], split='train')
 
-model_cfg = EDMAutoencoder.load_config('checkpoints/autoencoder_x8-plain_ft/configs/model_config_latest')
-model = EDMAutoencoder.from_config(model_cfg)
-load_model(model, 'checkpoints/autoencoder_x8-plain_ft/latest_checkpoint/model.safetensors')
-
-# model.encoder.save_pretrained('checkpoints/models/encoder_512')
-
-ema = PostHocEMA(model, sigma_rels=[0.05, 0.1], update_every=20, checkpoint_every_num_steps=12800, allow_different_devices=True,
-                 checkpoint_folder='checkpoints/autoencoder_x8-plain/phema')
-ema.load_state_dict(torch.load('checkpoints/autoencoder_x8-plain_ft/latest_checkpoint/phema.pt'))
-ema.synthesize_ema_model(sigma_rel=0.15).copy_params_from_ema_to_model()
-
+model = EDMAutoencoder.from_pretrained('/mnt/ntfs2/shared/terrain-diffusion/checkpoints/models/autoencoder').to(device)
 model = model.to(device)
 
-mode = 'stats'
+mode = 'plot'
 
 mses = []
 latents = []
@@ -55,44 +44,58 @@ for i in range(repeats):
         if conditional_inputs is not None:
             conditional_inputs = conditional_inputs.to(device)
         
-        scaled_clean_images = images / 0.5
         with torch.no_grad():
             if cond_img is not None:
-                x = torch.cat([scaled_clean_images, cond_img[None]], dim=1)
+                x = torch.cat([images, cond_img[None]], dim=1)
             else:
-                x = scaled_clean_images
+                x = images
             enc_mean, enc_logvar = model.preencode(x, conditional_inputs)
-            z = model.postencode(enc_mean, enc_logvar, use_mode=True)
+            z = model.postencode(enc_mean, enc_logvar, use_mode=False)
+            print(enc_mean.shape)
             decoded_x = model.decode(z)
+            
+        enc_residual, enc_lowfreq = decoded_x[:, :1], decoded_x[:, 1:2]
+        enc_residual = dataset.denormalize_residual(enc_residual, 90)
+        enc_lowfreq = dataset.denormalize_lowfreq(enc_lowfreq, 90)
+        enc_residual, enc_lowfreq = laplacian_denoise(enc_residual, enc_lowfreq, 5.0)
+        decoded_terrain = laplacian_decode(enc_residual, enc_lowfreq)
+        #decoded_terrain = decoded_x[:, 3:4]
+        
+        true_residual, true_lowfreq = images[:, :1], images[:, 1:2]
+        true_residual = dataset.denormalize_residual(true_residual, 90)
+        true_lowfreq = dataset.denormalize_lowfreq(true_lowfreq, 90)
+        true_residual, true_lowfreq = laplacian_denoise(true_residual, true_lowfreq, 5.0)
+        true_terrain = laplacian_decode(true_residual, true_lowfreq)
+        #true_terrain = images[:, 3:4]
         
         if mode == 'plot':
             fig, (ax1, ax2, ax3, ax4) = plt.subplots(1, 4, figsize=(10, 5))
             
-            vmin = scaled_clean_images[0].min().item()
-            vmax = scaled_clean_images[0].max().item()
+            vmin = true_terrain[0].min().item()
+            vmax = true_terrain[0].max().item()
             
-            ax1.imshow(scaled_clean_images[0].permute(1, 2, 0).cpu().numpy(), vmin=vmin, vmax=vmax)
+            ax1.imshow(true_terrain[0].permute(1, 2, 0).cpu().numpy())
             ax1.set_title('Original')
             ax1.axis('off')
             
-            ax2.imshow(decoded_x[0].permute(1, 2, 0).cpu().numpy(), vmin=vmin, vmax=vmax)
+            ax2.imshow(decoded_terrain[0].permute(1, 2, 0).cpu().numpy())
             ax2.set_title('Decoded')
             ax2.axis('off')
             
             # Plot the difference
             # Apply mean pooling to the clean image
-            pooled = torch.nn.functional.avg_pool2d(scaled_clean_images, kernel_size=8, stride=8)
+            pooled = torch.nn.functional.avg_pool2d(true_terrain, kernel_size=8, stride=8)
             # Upsample back to original size
-            pooled = torch.nn.functional.interpolate(pooled, size=scaled_clean_images.shape[-2:], mode='nearest')
+            pooled = torch.nn.functional.interpolate(pooled, size=true_terrain.shape[-2:], mode='nearest')
             ax3.imshow(pooled[0].permute(1, 2, 0).cpu().numpy())
             ax3.set_title('Mean Pooled Original')
             ax3.axis('off')
             
             # Calculate MSE between clean and pooled
-            mse_pooled = F.mse_loss(scaled_clean_images, pooled).item()
+            mse_pooled = F.mse_loss(true_terrain, pooled).item()
             
             # Calculate MSE between clean and decoded
-            mse_decoded = F.mse_loss(scaled_clean_images, decoded_x).item()
+            mse_decoded = F.mse_loss(true_terrain, decoded_terrain).item()
             
             print(f"MSE between original and mean pooled: {mse_pooled:.4f}")
             print(f"MSE between original and decoded: {mse_decoded:.4f}")
@@ -110,7 +113,7 @@ for i in range(repeats):
             plt.show()
         elif mode == 'evaluate':
             # Calculate MSE between original and decoded images
-            mse = 4 * F.mse_loss(scaled_clean_images, decoded_x).item()
+            mse = F.mse_loss(true_terrain, decoded_terrain).item()
             mses.append(mse)
             print(f"Average MSE: {torch.tensor(mses).mean().item():.4f}")
         elif mode == 'stats':

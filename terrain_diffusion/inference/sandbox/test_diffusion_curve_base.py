@@ -5,7 +5,7 @@ from terrain_diffusion.inference.scheduler.dpmsolver import EDMDPMSolverMultiste
 from terrain_diffusion.training.unet import EDMUnet2D
 from safetensors.torch import load_model
 from ema_pytorch import PostHocEMA
-from terrain_diffusion.training.datasets.datasets import H5LatentsDataset
+from terrain_diffusion.training.datasets.datasets import *
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 import numpy as np
@@ -13,7 +13,7 @@ from matplotlib import colors
 
 from terrain_diffusion.training.utils import recursive_to
 
-scheduler = EDMDPMSolverMultistepScheduler(0.002, 10.0, 0.5)
+scheduler = EDMDPMSolverMultistepScheduler(0.0001, 300.0, 0.5)
 
 device = 'cuda'
 
@@ -32,30 +32,35 @@ def get_model(checkpoint_path, sigma_rel=None, ema_step=None):
     return model
 
 models = [
-    get_model('checkpoints/diffusion_base-128x3/latest_checkpoint', sigma_rel=0.05).to(device)
+    get_model('checkpoints/diffusion_base-128x3-simple/latest_checkpoint', sigma_rel=0.05).to(device)
 ]
 
 # Enable parallel processing on CPU
 torch.set_num_threads(16)
 
-dataset = H5LatentsDataset('dataset.h5', 64, [[0, 1], [0, 1], [0, 1]], [90, 180, 360], [0, 0, 1], [0, 1, 2], eval_dataset=False,
+dataset = H5LatentsSimpleDataset('dataset.h5', 64, [[0.3, 0.5]], [90], [1], eval_dataset=False,
                                    latents_mean=[0, 0, 0, 0],
-                                   latents_std=[1, 1, 1, 1])
+                                   latents_std=[1, 1, 1, 1],
+                                   sigma_data=0.5,
+                                   split="train",
+                                   beauty_dist=[[1, 1, 1, 1, 1]])
 
-dataloader = DataLoader(dataset, batch_size=64)
+dataloader = DataLoader(dataset, batch_size=32)
 
 torch.set_grad_enabled(False)
 
+# Global parameters
 sigma_data = 0.5
+loss_groups = [4]
 
 # Generate log-spaced sigma values from 0.002 to 80
-sigmas = torch.logspace(np.log10(0.002), np.log10(80), 30)
+sigmas = torch.logspace(np.log10(0.0001), np.log10(300), 30)
 mse_values = {i: {j: [] for j in range(dataloader.batch_size)} for i in range(len(models))}
 
 batch = next(iter(dataloader))
 images = batch['image'].to(device)
-cond_img = batch.get('cond_img').to(device)
-cond_inputs = recursive_to(batch.get('cond_inputs'), device)
+cond_img = recursive_to(batch.get('cond_img'), device)
+cond_inputs = recursive_to(batch.get('cond_inputs'), device) or []
 
 image_std_ratio = torch.std(images, dim=(1, 2, 3), keepdim=True) / sigma_data
 step = 0
@@ -72,19 +77,31 @@ for sigma in tqdm(sigmas):
     
     # Get model predictions
     scaled_input = x_t / sigma_data
-    x = torch.cat([scaled_input, cond_img], dim=1)
+    x = scaled_input
+    if cond_img is not None:
+        x = torch.cat([scaled_input, cond_img], dim=1)
     
     for i, model in enumerate(models):
         model_output = model(x, noise_labels=cnoise, conditional_inputs=cond_inputs)
         pred_v_t = -sigma_data * model_output
         
-        # Calculate MSE for each sample
+        # Calculate loss for each sample using loss groups
         v_t = torch.cos(t) * noise - torch.sin(t) * images
-        mse = (1 / sigma_data ** 2) * ((pred_v_t - v_t) ** 2).mean(dim=(1,2,3))
         
-        # Store MSE for each sample
+        # Calculate loss similar to training
+        loss_values = []
+        c = 0
+        for group_channels in loss_groups:
+            # Calculate loss per group without logvar term since we're evaluating
+            group_loss = ((pred_v_t[:, c:c+group_channels] - v_t[:, c:c+group_channels]) ** 2).mean(dim=(1,2,3)) * 4
+            loss_values.append(group_loss)
+            c += group_channels
+        
+        loss = torch.stack(loss_values, dim=1).mean(dim=1)  # Average across groups
+        
+        # Store loss for each sample
         for j in range(images.shape[0]):
-            mse_values[i][j].append(mse[j].item())
+            mse_values[i][j].append(loss[j].item())
         
     step += 1
 
@@ -102,8 +119,8 @@ plt.figure(figsize=(10, 6))
 for model_idx, mean_mse in mean_mse_values.items():
     plt.plot(sigmas.cpu().numpy(), mean_mse, label=f'Model {model_idx}')
 
-plt.xscale('log')  # Use log scale for sigma values
-plt.yscale('log')  # Use log scale for MSE values
+plt.xscale('log', base=np.e)  # Use natural log scale for sigma values
+plt.yscale('log')  # Use natural log scale for MSE values
 plt.xlabel('Sigma')
 plt.ylabel('Mean MSE')
 plt.title('Mean MSE vs Sigma')

@@ -75,7 +75,7 @@ def dpm_solver_first_order_update(
     Performs first-order DPM-Solver update step.
     
     Args:
-        model_output: Output from the model
+        model_output: Output from the model (pred x0)
         sample: Current sample
         sigma_t: Target noise level
         sigma_s: Source noise level 
@@ -123,7 +123,7 @@ def multistep_dpm_solver_second_order_update(
     Performs second-order DPM-Solver update step.
     
     Args:
-        model_output_list: List of last two model outputs [current, previous]
+        model_output_list: List of last two model outputs [current, previous] (pred x0)
         sample: Current sample
         sigma_t: Target noise level
         sigma_s0: Current noise level

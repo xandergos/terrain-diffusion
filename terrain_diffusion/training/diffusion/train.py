@@ -152,6 +152,18 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
         torch.serialization.add_safe_globals([np.core.multiarray.scalar])
         accelerator.load_state(ckpt_path)
         
+    def calc_loss(pred_v_t, v_t, logvar, sigma_data):
+        loss_groups = []
+        loss = 1 / (logvar.exp() * sigma_data ** 2) * ((pred_v_t - v_t) ** 2) + logvar
+        if 'loss_groups' not in config['training']:
+            return loss.mean()
+        c = 0
+        for group_channels in config['training']['loss_groups']:
+            loss_groups.append(loss[:, c:c+group_channels].mean())
+            c += group_channels
+        loss = torch.stack(loss_groups).mean()
+        return loss
+        
     def validate(steps, dataloader, pbar_title):
         validation_stats = {'loss': []}
         generator = torch.Generator(device=accelerator.device).manual_seed(config['training']['seed'])
@@ -168,7 +180,8 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
             
             sigma_data = scheduler.config.sigma_data
             if config['evaluation'].get('scale_sigma', False):
-                sigma = sigma * torch.maximum(torch.std(images, dim=[1, 2, 3], keepdim=True) / sigma_data, 
+                calc_channels = config['evaluation']['scaling_channels']
+                sigma = sigma * torch.maximum(torch.std(images[:, calc_channels], dim=[1, 2, 3], keepdim=True) / sigma_data, 
                                               torch.tensor(config['evaluation'].get('sigma_scale_eps', 0.05), device=images.device))
             
             t = torch.atan(sigma / sigma_data)
@@ -188,8 +201,7 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
                 
             v_t = torch.cos(t) * noise - torch.sin(t) * images
 
-            loss = 1 / (logvar.exp() * sigma_data ** 2) * ((pred_v_t - v_t) ** 2) + logvar
-            loss = loss.mean()
+            loss = calc_loss(pred_v_t, v_t, logvar, sigma_data)
             validation_stats['loss'].append(loss.item())
             
             pbar.update(images.shape[0])
@@ -231,7 +243,8 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
                     
                     sigma_data = scheduler.config.sigma_data
                     if config['training'].get('scale_sigma', False):
-                        sigma = sigma * torch.maximum(torch.std(images, dim=[1, 2, 3], keepdim=True) / sigma_data, 
+                        calc_channels = config['training']['scaling_channels']
+                        sigma = sigma * torch.maximum(torch.std(images[:, calc_channels], dim=[1, 2, 3], keepdim=True) / sigma_data, 
                                                       torch.tensor(config['training'].get('sigma_scale_eps', 0.05), device=images.device))
                 
                     t = torch.atan(sigma / sigma_data)
@@ -253,8 +266,7 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
                     
                     v_t = torch.cos(t) * noise - torch.sin(t) * images
 
-                    loss = 1 / (logvar.exp() * sigma_data ** 2) * ((pred_v_t - v_t) ** 2) + logvar
-                    loss = loss.mean()
+                    loss = calc_loss(pred_v_t, v_t, logvar, sigma_data)
 
                 state.seen += images.shape[0]
                 state.step += 1

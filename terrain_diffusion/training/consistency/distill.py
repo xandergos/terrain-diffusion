@@ -49,17 +49,33 @@ def distill(config_path, ckpt_path, debug_run, resume_id):
     build_registry()
     
     config = Config().from_disk(config_path) if config_path else None
+    
+    if os.path.exists(f"{config['logging']['save_dir']}/latest_checkpoint") and not ckpt_path:
+        print("The save_dir directory already exists. Would you like to resume training from the latest checkpoint? (y/n)")
+        if input().lower() == "y":
+            ckpt_path = f"{config['logging']['save_dir']}/latest_checkpoint"
+        elif input().lower() == "n":
+            print("Beginning new training run...")
+            return
+        else:
+            print("Unexpected input. Exiting...")
+            return
+        
     resolved = registry.resolve(config, validate=False)
 
     # Load anything that needs to be used for training.
     model_m_pretrained = EDMUnet2D.from_pretrained(resolved['model']['main_path'])
-    model_g_pretrained = EDMUnet2D.from_pretrained(resolved['model']['guide_path'])
+    # Make guide model optional
+    model_g_pretrained = None
+    if 'guide_path' in resolved['model'] and resolved['model']['guide_path']:
+        model_g_pretrained = EDMUnet2D.from_pretrained(resolved['model']['guide_path'])
     model = EDMUnet2D.from_pretrained(resolved['model']['main_path'])
     
     # Reset logvar weights
     model.logvar_linear.weight.data.copy_(torch.randn_like(model.logvar_linear.weight.data))
     model_m_pretrained.eval()
-    model_g_pretrained.eval()
+    if model_g_pretrained is not None:
+        model_g_pretrained.eval()
     model.eval()
     
     lr_scheduler = resolved['lr_sched']
@@ -83,7 +99,12 @@ def distill(config_path, ckpt_path, debug_run, resume_id):
         log_with=None
     )
     ema = ema.to(accelerator.device)
-    model, model_m_pretrained, model_g_pretrained, dataloader, optimizer = accelerator.prepare(model, model_m_pretrained, model_g_pretrained, dataloader, optimizer)
+    if model_g_pretrained is not None:
+        model, model_m_pretrained, model_g_pretrained, dataloader, optimizer = accelerator.prepare(
+            model, model_m_pretrained, model_g_pretrained, dataloader, optimizer)
+    else:
+        model, model_m_pretrained, dataloader, optimizer = accelerator.prepare(
+            model, model_m_pretrained, dataloader, optimizer)
     accelerator.register_for_checkpointing(state)
     accelerator.register_for_checkpointing(ema)
     
@@ -190,24 +211,49 @@ def distill(config_path, ckpt_path, debug_run, resume_id):
                     )
                     F_theta_grad = F_theta_grad.detach()
                     F_theta_minus = F_theta.detach()
+                    
+                    max_f_theta_grad_norm = torch.max(torch.sqrt(torch.mean(F_theta_grad**2, dim=(1,2,3))))
                 
                 # Warmup ratio
-                r = min(1.0, state.step / config['training'].get('warmup_steps', 10000) / accelerator.gradient_accumulation_steps)
+                r = min(1.0, (state.step + 1) / config['training'].get('warmup_steps', 10000) / accelerator.gradient_accumulation_steps)
                 # Calculate gradient g using JVP rearrangement
-                g = -torch.cos(t)**2 * (sigma_data * F_theta_minus - dxt_dt)
+                # Replace one cos with sin potentially?  (and v_x and v_t then too)
+                g = -torch.cos(t) * torch.cos(t) * (sigma_data * F_theta_minus - dxt_dt)
                 second_term = -r * torch.cos(t) * torch.sin(t) * x_t - r * sigma_data * F_theta_grad
                 g = g + second_term
                 
                 # Tangent normalization
-                g_norm = torch.sqrt(torch.mean(g**2, dim=(1,2,3), keepdim=True))
+                if 'loss_groups' not in config['training']:
+                    g_norm = torch.sqrt(torch.mean(g**2, dim=(1,2,3), keepdim=True))
+                else:
+                    g_norm_groups = []
+                    c = 0
+                    for group_channels in config['training']['loss_groups']:
+                        g_norm_groups.append(torch.sqrt(torch.mean(g[:, c:c+group_channels]**2, dim=(1,2,3), keepdim=True)))
+                        c += group_channels
+                    g_norm = torch.stack(g_norm_groups, dim=1).mean(dim=1, keepdim=True)
                 g = g / (g_norm + config['training'].get('const_c', 0.1))
+                max_g_norm = torch.max(g_norm)
                 
                 # Tangent clipping (Only use this OR normalization)
                 # g = torch.clamp(g, min=-1, max=1)
                 
                 # Calculate loss with adaptive weighting
-                loss = (1 / torch.exp(logvar)) * torch.square(F_theta - F_theta_minus - g) + logvar
-                loss = loss.mean()
+                weight = 1
+                if config['training'].get('use_logvar', True):
+                    loss = weight * (1 / logvar.exp()) * torch.square(F_theta - F_theta_minus - g) + logvar
+                else:
+                    loss = weight * torch.square(F_theta - F_theta_minus - g)
+                
+                loss_groups = []
+                if 'loss_groups' not in config['training']:
+                    loss = loss.mean()
+                else:
+                    c = 0
+                    for group_channels in config['training']['loss_groups']:
+                        loss_groups.append(loss[:, c:c+group_channels].mean())
+                        c += group_channels
+                    loss = torch.stack(loss_groups).mean()
 
                 state.seen += images.shape[0]
                 state.step += 1
@@ -227,7 +273,9 @@ def distill(config_path, ckpt_path, debug_run, resume_id):
                 stats_hist['loss'].append(loss.item())
                 progress_bar.set_postfix({'loss': f"{np.mean(stats_hist['loss']):.4f}", 
                                         "lr": lr,
-                                        "grad_norm": grad_norm.item()})
+                                        "grad_norm": grad_norm.item(),
+                                        "max_f_theta_grad_norm": max_f_theta_grad_norm.item(),
+                                        "max_g_norm": max_g_norm.item()})
                 progress_bar.update(1)
 
         state.epoch += 1

@@ -14,8 +14,6 @@ from matplotlib import colors
 from terrain_diffusion.training.utils import recursive_to
 from terrain_diffusion.data.laplacian_encoder import *
 
-scheduler = EDMDPMSolverMultistepScheduler(0.002, 80.0, 0.5)
-
 device = 'cuda'
 
 def get_model(checkpoint_path, sigma_rel=None, ema_step=None):
@@ -33,7 +31,7 @@ def get_model(checkpoint_path, sigma_rel=None, ema_step=None):
     return model
 
 autoencoder = EDMAutoencoder.from_pretrained('checkpoints/models/autoencoder').to(device)
-model = get_model('checkpoints/diffusion_base-128x3-simple/latest_checkpoint', sigma_rel=0.05).to(device)
+model = get_model('checkpoints/consistency_base-192x3/latest_checkpoint', sigma_rel=0.1).to(device)
 
 # Enable parallel processing on CPU
 torch.set_num_threads(16)
@@ -58,32 +56,26 @@ for batch in dataloader:
     
     print("c: ", conditional_inputs)
     
-    scheduler.set_timesteps(32)
-    samples = torch.randn(images.shape, device=device) * scheduler.sigmas[0]
-    sigma_data = scheduler.config.sigma_data
+    sigma_data = 0.5
+    pred_x0 = torch.zeros_like(images)
+    noise = torch.randn_like(images) * sigma_data
     
     i = 0
-    for t, sigma in tqdm(zip(scheduler.timesteps, scheduler.sigmas)):
-        sigma, t = sigma.to(device), t.to(device)
-        scaled_input = scheduler.precondition_inputs(samples, sigma)
-        cnoise = scheduler.trigflow_precondition_noise(sigma.view(-1)).expand(samples.shape[0])
+    for t in [np.arctan(160.0), 1.55, 1.5, 1.3, 1.1]:
+        t = torch.tensor(t).to(device).float()
+        xt = torch.cos(t) * pred_x0 + torch.sin(t) * noise
+        scaled_input = xt / sigma_data
         
         # Get predictions from both models
         x = scaled_input
         if cond_img is not None:
             x = torch.cat([scaled_input, cond_img], dim=1)
-        model_output = model(x, noise_labels=cnoise, conditional_inputs=conditional_inputs)
+        model_output = model(x, noise_labels=t.view(1).expand(x.shape[0]), conditional_inputs=conditional_inputs)
         
-        # Plot the lowfreq channel of model output
-        #if i == 0:  # Only plot for first timestep
-        #    plt.figure(figsize=(10,10))
-        #    plt.imshow(model_output[:, 4].detach().cpu().numpy()[0], cmap='viridis')
-        #    plt.colorbar()
-        #    plt.title("Model Output - Lowfreq Channel")
-        #    plt.show()
-        
-        samples = scheduler.step(model_output, t, samples).prev_sample
+        pred_x0 = torch.cos(t) * xt + torch.sin(t) * model_output * sigma_data
+        noise = torch.randn_like(images) * sigma_data
         i += 1
+    samples = pred_x0
     
     print(torch.std(samples).item())
     samples = samples * 2
@@ -94,7 +86,7 @@ for batch in dataloader:
     watercover = torch.sigmoid(watercover)
     residual = dataset.denormalize_residual(residual, 90)
     lowfreq = dataset.denormalize_lowfreq(lowfreq, 90)
-    #residual, lowfreq = laplacian_denoise(residual, lowfreq, 5.0)
+    residual, lowfreq = laplacian_denoise(residual, lowfreq, 5.0)
     decoded_terrain = laplacian_decode(residual, lowfreq)
     #decoded_terrain = lowfreq
     #decoded_terrain = torch.sign(decoded_terrain) * decoded_terrain**2
