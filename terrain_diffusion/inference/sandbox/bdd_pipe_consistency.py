@@ -96,11 +96,11 @@ def get_weights(size):
     distance_x = 1 - (1 - epsilon) * torch.clamp(torch.abs(x - mid).float() / mid, 0, 1)
     return (distance_y * distance_x)[None, None, :, :]
 
-def process_in_windows(scaled_inputs, cond_inputs, t, window_size=64, stride=32):
+def process_in_windows(scaled_inputs, cond_inputs, t, window_size=64, stride=32, pbar=True):
     w = get_weights(window_size).to(device)
     output = torch.zeros_like(scaled_inputs)
     output_weights = torch.zeros_like(scaled_inputs)
-    for i in range(0, generation_size - window_size + 1, stride):
+    for i in tqdm(range(0, generation_size - window_size + 1, stride), disable=not pbar):
         for j in range(0, generation_size - window_size + 1, stride):
             cond_inputs_window = cond_inputs[:, i:i+window_size, j:j+window_size]
             
@@ -131,7 +131,7 @@ pred_x0 = torch.zeros(1, 5, generation_size, generation_size, device=device) * s
 noise = torch.randn_like(pred_x0) * sigma_data
     
 i = 0
-for sigma in [80, 10, 1]:
+for sigma in [80]:
     sigma = torch.tensor(sigma, dtype=torch.float32)
     t = torch.atan(sigma / sigma_data)
     sigma, t = sigma.to(device), t.to(device)

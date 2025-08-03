@@ -1,0 +1,804 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Infinite Terrain Explorer</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #1a1a1a;
+            color: #ffffff;
+            overflow: hidden;
+        }
+        
+        .container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .header {
+            background: #2d2d2d;
+            padding: 15px 20px;
+            border-bottom: 2px solid #404040;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.5);
+        }
+        
+        .header h1 {
+            font-size: 24px;
+            color: #00ff88;
+            margin-bottom: 5px;
+        }
+        
+        .controls {
+            display: flex;
+            gap: 15px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        
+        .control-group {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .control-group label {
+            font-size: 14px;
+            color: #cccccc;
+        }
+        
+        input, button {
+            padding: 8px 12px;
+            border: 1px solid #555;
+            background: #3a3a3a;
+            color: #ffffff;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        
+        input:focus {
+            outline: none;
+            border-color: #00ff88;
+        }
+        
+        button {
+            background: #007acc;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        
+        button:hover {
+            background: #0095ff;
+        }
+        
+        button:disabled {
+            background: #555;
+            cursor: not-allowed;
+        }
+        
+        .viewer-container {
+            flex: 1;
+            position: relative;
+            background: #000;
+            overflow: hidden;
+        }
+        
+        .terrain-canvas {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            cursor: grab;
+        }
+        
+        .terrain-canvas.dragging {
+            cursor: grabbing;
+        }
+        
+        .terrain-image {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            image-rendering: pixelated;
+            transition: opacity 0.3s;
+        }
+        
+        .loading-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.7);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 100;
+        }
+        
+        .loading-spinner {
+            width: 50px;
+            height: 50px;
+            border: 3px solid #333;
+            border-top: 3px solid #00ff88;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .info-panel {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: rgba(45, 45, 45, 0.9);
+            padding: 15px;
+            border-radius: 8px;
+            border: 1px solid #555;
+            min-width: 250px;
+            backdrop-filter: blur(5px);
+        }
+        
+        .info-panel h3 {
+            color: #00ff88;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+        
+        .info-item {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 5px;
+            font-size: 14px;
+        }
+        
+        .info-item .label {
+            color: #cccccc;
+        }
+        
+        .info-item .value {
+            color: #ffffff;
+            font-weight: bold;
+        }
+        
+        .coordinates {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            background: rgba(45, 45, 45, 0.9);
+            padding: 10px 15px;
+            border-radius: 6px;
+            border: 1px solid #555;
+            font-family: monospace;
+            font-size: 14px;
+            backdrop-filter: blur(5px);
+        }
+        
+        .elevation-tooltip {
+            position: absolute;
+            background: rgba(0, 0, 0, 0.9);
+            color: #ffffff;
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-size: 13px;
+            pointer-events: none;
+            z-index: 200;
+            border: 1px solid #555;
+            display: none;
+        }
+        
+        /* Export Controls */
+        .export-section {
+            border-left: 2px solid #555;
+            padding-left: 15px;
+            margin-left: 10px;
+        }
+        
+        .export-section button {
+            margin-right: 5px;
+        }
+        
+        #setCorner1Btn.active {
+            background: #ff6b35;
+        }
+        
+        #setCorner2Btn.active {
+            background: #ff6b35;
+        }
+        
+        #exportBtn:enabled {
+            background: #00aa55;
+        }
+        
+        #exportBtn:enabled:hover {
+            background: #00cc66;
+        }
+        
+        /* Selection Overlay */
+        .selection-overlay {
+            position: absolute;
+            border: 2px solid #ff6b35;
+            background: rgba(255, 107, 53, 0.2);
+            pointer-events: none;
+            z-index: 50;
+            display: none;
+        }
+        
+        .corner-marker {
+            position: absolute;
+            width: 12px;
+            height: 12px;
+            border: 2px solid #ff6b35;
+            background: #ffffff;
+            border-radius: 50%;
+            pointer-events: none;
+            z-index: 60;
+            transform: translate(-50%, -50%);
+            display: none;
+        }
+        
+        .corner-marker.corner1 {
+            box-shadow: 0 0 8px rgba(255, 107, 53, 0.8);
+        }
+        
+        .corner-marker.corner2 {
+            box-shadow: 0 0 8px rgba(53, 107, 255, 0.8);
+            border-color: #356bff;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🏔️ Infinite Terrain Explorer</h1>
+            <div class="controls">
+                <div class="control-group">
+                    <label>X:</label>
+                    <input type="number" id="posX" value="0" step="100">
+                </div>
+                <div class="control-group">
+                    <label>Y:</label>
+                    <input type="number" id="posY" value="0" step="100">
+                </div>
+                <div class="control-group">
+                    <label>Scale:</label>
+                    <input type="number" id="scaleFactor" value="1.0" min="0.1" max="5.0" step="0.1">
+                </div>
+                <button id="loadBtn">Load Terrain</button>
+                <button id="centerBtn">Center (0,0)</button>
+                
+                <!-- Export Controls -->
+                <div class="control-group export-section">
+                    <button id="setCorner1Btn">Set Corner 1</button>
+                    <button id="setCorner2Btn">Set Corner 2</button>
+                    <button id="exportBtn" disabled>Export TIFF</button>
+                    <button id="clearSelection">Clear Selection</button>
+                </div>
+            </div>
+        </div>
+        
+        <div class="viewer-container">
+            <div class="terrain-canvas" id="terrainCanvas">
+                <img class="terrain-image" id="terrainImage" style="display: none;">
+                
+                <!-- Selection overlay and markers for export region -->
+                <div class="selection-overlay" id="selectionOverlay"></div>
+                <div class="corner-marker corner1" id="corner1Marker"></div>
+                <div class="corner-marker corner2" id="corner2Marker"></div>
+            </div>
+            
+            <div class="loading-overlay" id="loadingOverlay">
+                <div class="loading-spinner"></div>
+            </div>
+            
+            <div class="info-panel">
+                <h3>📊 Terrain Stats</h3>
+                <div class="info-item">
+                    <span class="label">Min Elevation:</span>
+                    <span class="value" id="minElev">-</span>
+                </div>
+                <div class="info-item">
+                    <span class="label">Max Elevation:</span>
+                    <span class="value" id="maxElev">-</span>
+                </div>
+                <div class="info-item">
+                    <span class="label">Mean Elevation:</span>
+                    <span class="value" id="meanElev">-</span>
+                </div>
+                <div class="info-item">
+                    <span class="label">Terrain Size:</span>
+                    <span class="value" id="regionSize">-</span>
+                </div>
+                <div class="info-item">
+                    <span class="label">Scale Factor:</span>
+                    <span class="value" id="imageScale">1.0x</span>
+                </div>
+            </div>
+            
+            <div class="coordinates" id="coordinates">
+                Position: (0, 0)
+            </div>
+            
+            <div class="elevation-tooltip" id="elevationTooltip">
+                Elevation: 0m
+            </div>
+        </div>
+    </div>
+
+    <script>
+        class TerrainViewer {
+            constructor() {
+                this.currentX = 0;
+                this.currentY = 0;
+                this.scaleFactor = 1.0;
+                this.isLoading = false;
+                this.isDragging = false;
+                this.dragStartX = 0;
+                this.dragStartY = 0;
+                this.elevationData = null;
+                this.terrainWidth = 512;
+                this.terrainHeight = 512;
+                
+                // Export functionality
+                this.selectingCorner = null; // null, 'corner1', or 'corner2'
+                this.corner1 = null; // {x, y, canvasX, canvasY}
+                this.corner2 = null; // {x, y, canvasX, canvasY}
+                
+                this.initElements();
+                this.bindEvents();
+                this.loadTerrain();
+            }
+            
+            initElements() {
+                this.canvas = document.getElementById('terrainCanvas');
+                this.image = document.getElementById('terrainImage');
+                this.loadingOverlay = document.getElementById('loadingOverlay');
+                this.posXInput = document.getElementById('posX');
+                this.posYInput = document.getElementById('posY');
+                this.scaleFactorInput = document.getElementById('scaleFactor');
+                this.loadBtn = document.getElementById('loadBtn');
+                this.centerBtn = document.getElementById('centerBtn');
+                this.coordinates = document.getElementById('coordinates');
+                this.tooltip = document.getElementById('elevationTooltip');
+                
+                // Export elements
+                this.setCorner1Btn = document.getElementById('setCorner1Btn');
+                this.setCorner2Btn = document.getElementById('setCorner2Btn');
+                this.exportBtn = document.getElementById('exportBtn');
+                this.clearSelectionBtn = document.getElementById('clearSelection');
+                this.selectionOverlay = document.getElementById('selectionOverlay');
+                this.corner1Marker = document.getElementById('corner1Marker');
+                this.corner2Marker = document.getElementById('corner2Marker');
+                
+                this.minElevDisplay = document.getElementById('minElev');
+                this.maxElevDisplay = document.getElementById('maxElev');
+                this.meanElevDisplay = document.getElementById('meanElev');
+                this.regionSizeDisplay = document.getElementById('regionSize');
+                this.imageScaleDisplay = document.getElementById('imageScale');
+            }
+            
+            bindEvents() {
+                this.loadBtn.addEventListener('click', () => this.loadFromInputs());
+                this.centerBtn.addEventListener('click', () => this.centerView());
+                this.scaleFactorInput.addEventListener('input', () => this.updateScale());
+                
+                // Export button events
+                this.setCorner1Btn.addEventListener('click', () => this.startCornerSelection('corner1'));
+                this.setCorner2Btn.addEventListener('click', () => this.startCornerSelection('corner2'));
+                this.exportBtn.addEventListener('click', () => this.exportTerrain());
+                this.clearSelectionBtn.addEventListener('click', () => this.clearSelection());
+                
+                // Dragging functionality
+                this.canvas.addEventListener('mousedown', (e) => this.startDrag(e));
+                this.canvas.addEventListener('mousemove', (e) => this.drag(e));
+                this.canvas.addEventListener('mouseup', (e) => this.endDrag(e));
+                this.canvas.addEventListener('mouseleave', () => this.endDrag());
+                
+                // Click for corner selection (higher priority than drag when selecting)
+                this.canvas.addEventListener('click', (e) => this.handleCanvasClick(e));
+                
+                // Hover for elevation
+                this.canvas.addEventListener('mousemove', (e) => this.showElevation(e));
+                this.canvas.addEventListener('mouseleave', () => this.hideElevation());
+                
+                // Keyboard shortcuts
+                document.addEventListener('keydown', (e) => this.handleKeyboard(e));
+                
+                // Handle window resize
+                window.addEventListener('resize', () => this.loadTerrain());
+            }
+            
+            updateScale() {
+                this.scaleFactor = parseFloat(this.scaleFactorInput.value) || 1.0;
+                this.imageScaleDisplay.textContent = `${this.scaleFactor.toFixed(1)}x`;
+                this.loadTerrain();
+            }
+            
+            getWindowDimensions() {
+                const rect = this.canvas.getBoundingClientRect();
+                return {
+                    width: rect.width,
+                    height: rect.height
+                };
+            }
+            
+            async loadTerrain() {
+                if (this.isLoading) return;
+                
+                this.isLoading = true;
+                this.loadingOverlay.style.display = 'flex';
+                this.loadBtn.disabled = true;
+                
+                try {
+                    const windowDims = this.getWindowDimensions();
+                    const response = await fetch(`/api/terrain?x=${this.currentX}&y=${this.currentY}&window_width=${windowDims.width}&window_height=${windowDims.height}&scale=${this.scaleFactor}`);
+                    
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! status: ${response.status}`);
+                    }
+                    
+                    const data = await response.json();
+                    
+                    if (data.error) {
+                        throw new Error(data.error);
+                    }
+                    
+                    // Update image
+                    this.image.src = `data:image/png;base64,${data.image}`;
+                    this.image.style.display = 'block';
+                    this.elevationData = data.elevation_data;
+                    this.terrainWidth = data.stats.width;
+                    this.terrainHeight = data.stats.height;
+                    
+                    // Update stats
+                    this.updateStats(data.stats);
+                    
+                    // Update input fields
+                    this.posXInput.value = this.currentX;
+                    this.posYInput.value = this.currentY;
+                    this.updateCoordinates();
+                    
+                    // Update selection display for new view
+                    this.updateSelectionDisplay();
+                    
+                } catch (error) {
+                    console.error('Error loading terrain:', error);
+                    alert(`Failed to load terrain: ${error.message}`);
+                } finally {
+                    this.isLoading = false;
+                    this.loadingOverlay.style.display = 'none';
+                    this.loadBtn.disabled = false;
+                }
+            }
+            
+            updateStats(stats) {
+                this.minElevDisplay.textContent = `${stats.min_elevation.toFixed(1)}m`;
+                this.maxElevDisplay.textContent = `${stats.max_elevation.toFixed(1)}m`;
+                this.meanElevDisplay.textContent = `${stats.mean_elevation.toFixed(1)}m`;
+                this.regionSizeDisplay.textContent = `${stats.width}×${stats.height}`;
+            }
+            
+            updateCoordinates() {
+                this.coordinates.textContent = `Position: (${this.currentX}, ${this.currentY})`;
+            }
+            
+            loadFromInputs() {
+                this.currentX = parseInt(this.posXInput.value) || 0;
+                this.currentY = parseInt(this.posYInput.value) || 0;
+                this.updateScale();
+            }
+            
+            centerView() {
+                this.currentX = 0;
+                this.currentY = 0;
+                this.loadTerrain();
+            }
+            
+            startDrag(e) {
+                // Don't start drag if we're selecting a corner
+                if (this.selectingCorner) {
+                    return;
+                }
+                
+                this.isDragging = true;
+                this.dragStartX = e.clientX;
+                this.dragStartY = e.clientY;
+                this.canvas.classList.add('dragging');
+                e.preventDefault();
+            }
+            
+            drag(e) {
+                if (!this.isDragging) return;
+                
+                const deltaX = e.clientX - this.dragStartX;
+                const deltaY = e.clientY - this.dragStartY;
+                
+                // Apply visual feedback during drag
+                this.image.style.transform = `translate(${deltaX}px, ${deltaY}px)`;
+            }
+            
+            endDrag(e) {
+                if (!this.isDragging) return;
+                
+                this.isDragging = false;
+                this.canvas.classList.remove('dragging');
+                
+                // Calculate the new position based on drag distance
+                const deltaX = this.dragStartX - (e ? e.clientX : this.dragStartX);
+                const deltaY = this.dragStartY - (e ? e.clientY : this.dragStartY);
+                
+                // Convert pixel movement to terrain coordinates
+                const canvasRect = this.canvas.getBoundingClientRect();
+                const terrainUnitsPerPixelX = this.terrainWidth / canvasRect.width;
+                const terrainUnitsPerPixelY = this.terrainHeight / canvasRect.height;
+                
+                this.currentX = Math.round(this.currentX + deltaX * terrainUnitsPerPixelX);
+                this.currentY = Math.round(this.currentY + deltaY * terrainUnitsPerPixelY);
+                
+                // Reset image transform
+                this.image.style.transform = '';
+                
+                // Load new terrain
+                this.loadTerrain();
+            }
+            
+            showElevation(e) {
+                if (!this.elevationData || this.isDragging) return;
+                
+                const canvasRect = this.canvas.getBoundingClientRect();
+                const x = Math.floor((e.clientX - canvasRect.left) / canvasRect.width * this.terrainWidth);
+                const y = Math.floor((e.clientY - canvasRect.top) / canvasRect.height * this.terrainHeight);
+                
+                if (x >= 0 && x < this.terrainWidth && y >= 0 && y < this.terrainHeight) {
+                    const elevation = this.elevationData[y][x];
+                    
+                    this.tooltip.textContent = `Elevation: ${elevation.toFixed(1)}m`;
+                    this.tooltip.style.left = `${e.clientX + 10}px`;
+                    this.tooltip.style.top = `${e.clientY - 30}px`;
+                    this.tooltip.style.display = 'block';
+                }
+            }
+            
+            hideElevation() {
+                this.tooltip.style.display = 'none';
+            }
+            
+            handleKeyboard(e) {
+                if (this.isLoading) return;
+                
+                const step = 100;
+                switch(e.key) {
+                    case 'ArrowUp':
+                    case 'w':
+                        this.currentY -= step;
+                        this.loadTerrain();
+                        e.preventDefault();
+                        break;
+                    case 'ArrowDown':
+                    case 's':
+                        this.currentY += step;
+                        this.loadTerrain();
+                        e.preventDefault();
+                        break;
+                    case 'ArrowLeft':
+                    case 'a':
+                        this.currentX -= step;
+                        this.loadTerrain();
+                        e.preventDefault();
+                        break;
+                    case 'ArrowRight':
+                    case 'd':
+                        this.currentX += step;
+                        this.loadTerrain();
+                        e.preventDefault();
+                        break;
+                    case ' ':
+                        this.centerView();
+                        e.preventDefault();
+                        break;
+                    case '=':
+                    case '+':
+                        this.scaleFactor = Math.min(5.0, this.scaleFactor + 0.1);
+                        this.scaleFactorInput.value = this.scaleFactor.toFixed(1);
+                        this.updateScale();
+                        e.preventDefault();
+                        break;
+                    case '-':
+                        this.scaleFactor = Math.max(0.1, this.scaleFactor - 0.1);
+                        this.scaleFactorInput.value = this.scaleFactor.toFixed(1);
+                        this.updateScale();
+                        e.preventDefault();
+                        break;
+                }
+            }
+            
+            // Export functionality methods
+            startCornerSelection(corner) {
+                // Cancel any existing selection
+                this.selectingCorner = corner;
+                
+                // Update button states
+                this.setCorner1Btn.classList.toggle('active', corner === 'corner1');
+                this.setCorner2Btn.classList.toggle('active', corner === 'corner2');
+                
+                // Change cursor
+                this.canvas.style.cursor = 'crosshair';
+            }
+            
+            handleCanvasClick(e) {
+                if (this.selectingCorner && !this.isDragging) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    this.setCorner(e);
+                }
+            }
+            
+            setCorner(e) {
+                if (!this.selectingCorner) return;
+                
+                const canvasRect = this.canvas.getBoundingClientRect();
+                const canvasX = e.clientX - canvasRect.left;
+                const canvasY = e.clientY - canvasRect.top;
+                
+                // Convert canvas coordinates to terrain coordinates
+                const terrainX = Math.round(this.currentX + (canvasX / canvasRect.width * this.terrainWidth));
+                const terrainY = Math.round(this.currentY + (canvasY / canvasRect.height * this.terrainHeight));
+                
+                const cornerData = {
+                    x: terrainX,
+                    y: terrainY,
+                    canvasX: canvasX,
+                    canvasY: canvasY
+                };
+                
+                if (this.selectingCorner === 'corner1') {
+                    this.corner1 = cornerData;
+                } else if (this.selectingCorner === 'corner2') {
+                    this.corner2 = cornerData;
+                }
+                
+                // End corner selection
+                this.selectingCorner = null;
+                this.setCorner1Btn.classList.remove('active');
+                this.setCorner2Btn.classList.remove('active');
+                this.canvas.style.cursor = 'grab';
+                
+                this.updateSelectionDisplay();
+            }
+            
+            updateSelectionDisplay() {
+                if (this.corner1 && this.corner2) {
+                    // Show selection rectangle
+                    const canvasRect = this.canvas.getBoundingClientRect();
+                    
+                    // Convert terrain coordinates back to current canvas coordinates
+                    const corner1CanvasX = (this.corner1.x - this.currentX) / this.terrainWidth * canvasRect.width;
+                    const corner1CanvasY = (this.corner1.y - this.currentY) / this.terrainHeight * canvasRect.height;
+                    const corner2CanvasX = (this.corner2.x - this.currentX) / this.terrainWidth * canvasRect.width;
+                    const corner2CanvasY = (this.corner2.y - this.currentY) / this.terrainHeight * canvasRect.height;
+                    
+                    const minX = Math.min(corner1CanvasX, corner2CanvasX);
+                    const minY = Math.min(corner1CanvasY, corner2CanvasY);
+                    const maxX = Math.max(corner1CanvasX, corner2CanvasX);
+                    const maxY = Math.max(corner1CanvasY, corner2CanvasY);
+                    
+                    // Update overlay
+                    this.selectionOverlay.style.left = `${minX}px`;
+                    this.selectionOverlay.style.top = `${minY}px`;
+                    this.selectionOverlay.style.width = `${maxX - minX}px`;
+                    this.selectionOverlay.style.height = `${maxY - minY}px`;
+                    this.selectionOverlay.style.display = 'block';
+                    
+                    // Show corner markers
+                    this.corner1Marker.style.left = `${corner1CanvasX}px`;
+                    this.corner1Marker.style.top = `${corner1CanvasY}px`;
+                    this.corner1Marker.style.display = 'block';
+                    
+                    this.corner2Marker.style.left = `${corner2CanvasX}px`;
+                    this.corner2Marker.style.top = `${corner2CanvasY}px`;
+                    this.corner2Marker.style.display = 'block';
+                    
+                    // Enable export button
+                    this.exportBtn.disabled = false;
+                } else {
+                    // Hide selection
+                    this.selectionOverlay.style.display = 'none';
+                    this.corner1Marker.style.display = 'none';
+                    this.corner2Marker.style.display = 'none';
+                    this.exportBtn.disabled = true;
+                    
+                    // Show individual corner markers if set
+                    if (this.corner1) {
+                        const canvasRect = this.canvas.getBoundingClientRect();
+                        const corner1CanvasX = (this.corner1.x - this.currentX) / this.terrainWidth * canvasRect.width;
+                        const corner1CanvasY = (this.corner1.y - this.currentY) / this.terrainHeight * canvasRect.height;
+                        this.corner1Marker.style.left = `${corner1CanvasX}px`;
+                        this.corner1Marker.style.top = `${corner1CanvasY}px`;
+                        this.corner1Marker.style.display = 'block';
+                    }
+                    
+                    if (this.corner2) {
+                        const canvasRect = this.canvas.getBoundingClientRect();
+                        const corner2CanvasX = (this.corner2.x - this.currentX) / this.terrainWidth * canvasRect.width;
+                        const corner2CanvasY = (this.corner2.y - this.currentY) / this.terrainHeight * canvasRect.height;
+                        this.corner2Marker.style.left = `${corner2CanvasX}px`;
+                        this.corner2Marker.style.top = `${corner2CanvasY}px`;
+                        this.corner2Marker.style.display = 'block';
+                    }
+                }
+            }
+            
+            clearSelection() {
+                this.corner1 = null;
+                this.corner2 = null;
+                this.selectingCorner = null;
+                this.setCorner1Btn.classList.remove('active');
+                this.setCorner2Btn.classList.remove('active');
+                this.canvas.style.cursor = 'grab';
+                this.updateSelectionDisplay();
+            }
+            
+            async exportTerrain() {
+                if (!this.corner1 || !this.corner2) {
+                    alert('Please select both corners first.');
+                    return;
+                }
+                
+                this.exportBtn.disabled = true;
+                this.exportBtn.textContent = 'Exporting...';
+                
+                try {
+                    const url = `/api/export?x1=${this.corner1.x}&y1=${this.corner1.y}&x2=${this.corner2.x}&y2=${this.corner2.y}`;
+                    
+                    const response = await fetch(url);
+                    
+                    if (!response.ok) {
+                        const errorData = await response.json();
+                        throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
+                    }
+                    
+                    // Download the file
+                    const blob = await response.blob();
+                    const downloadUrl = window.URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = downloadUrl;
+                    a.download = `terrain_${this.corner1.x}_${this.corner1.y}_to_${this.corner2.x}_${this.corner2.y}.tif`;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    window.URL.revokeObjectURL(downloadUrl);
+                    
+                    console.log('Terrain exported successfully');
+                    
+                } catch (error) {
+                    console.error('Error exporting terrain:', error);
+                    alert(`Failed to export terrain: ${error.message}`);
+                } finally {
+                    this.exportBtn.disabled = false;
+                    this.exportBtn.textContent = 'Export TIFF';
+                }
+            }
+        }
+        
+        // Initialize the terrain viewer when page loads
+        document.addEventListener('DOMContentLoaded', () => {
+            new TerrainViewer();
+        });
+    </script>
+</body>
+</html> 
