@@ -36,6 +36,7 @@ Terrain Diffusion is an AI-powered terrain generation framework designed to repl
 ## 🧪 Demo
 
 Now available is an interactive web app for generating terrain. To launch, juse use `python run_terrain_viewer.py`.
+<img width="1920" height="920" alt="image" src="https://github.com/user-attachments/assets/f3c581a8-c9b8-4965-8158-2bf63b6155d5" />
 
 ## 📜 License
 
