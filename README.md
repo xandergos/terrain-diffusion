@@ -31,7 +31,7 @@ Terrain Diffusion is an AI-powered terrain generation framework designed to repl
 - Condition diffusion on low-frequency features (e.g., mean elevation) for tile alignment
 - Generate low-freq map via GAN (translation invariant, no padding)
 - Final pipeline: `GAN → Base Consistency Model → Consistency Decoder`
-- Uses [xandergos/infinite-tensors](https://github.com/xandergos/infinite-tensors) for efficient on-demand generation
+- Uses [xandergos/infinite-tensor](https://github.com/xandergos/infinite-tensor) for efficient on-demand generation
 
 ## 🧪 Demo
 
