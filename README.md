@@ -33,7 +33,7 @@ Terrain Diffusion is an AI-powered terrain generation framework designed to repl
 - Final pipeline: `GAN → Base Consistency Model → Consistency Decoder`
 - Uses [xandergos/infinite-tensor](https://github.com/xandergos/infinite-tensor) for efficient on-demand generation
 
-## 🧪 Demo
+## 🧪 Example
 
 <img width="1920" height="920" alt="image" src="https://github.com/user-attachments/assets/f3c581a8-c9b8-4965-8158-2bf63b6155d5" />
 
