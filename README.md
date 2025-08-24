@@ -1,46 +1,42 @@
-# Terrain Diffusion
+# Terrain Diffusion (WIP - HIGHLY EXPERIMENTAL)
 
-This is a repository that aims to utilize diffusion models to generate realistic terrain data. It creates high-quality, diverse terrain samples for various applications such as video game development, environmental simulations, and geographical studies.
-Repo is currently unstable while experimenting, changes will occur rapidly and may break things.
+Terrain Diffusion is an AI-powered terrain generation framework designed to replace traditional procedural noise functions (like Perlin noise) with a fast, high-fidelity, and infinitely tileable generative model. Built on cutting-edge diffusion techniques, it can generate elevation maps that span land and ocean, produce consistent terrain on an infinite grid, and support climate and water generation.
 
-Key features of Terrain Diffusion include:
+## 🚀 Features
 
-1. Diffusion-based terrain generation: Using diffusion models to create detailed and natural-looking terrain. For this task, I used the EDM2 architecture, with some modifications to support (almost) zero-SNR.
+- **Hyper-realistic terrain generation**: Trained on real-world elevation data
+- **Fast inference**: Uses a 1- or 2-step continuous-time consistency model (CTCM)
+- **Infinitely tileable**: Seamless stitching on an infinite 2D grid
+- **Physically accurate scale**: Outputs elevation in meters (not normalized)
+- **Modular generation**: Supports generation of water and climate maps
+- **Infinite-space support**: Backed by [xandergos/infinite-tensor](https://github.com/xandergos/infinite-tensor)
 
-2. Multi-scale approach: Generating terrain at different resolutions (64x64, 256x256, 1024x1024 and beyond). This is performed with diffusion super-resolution. To ensure that terrain remains realistic, and to avoid artifacts, the terrain is encoded into a latent space with a laplacian pyramid, which ensures that generated terrain contains both large scale features like mountain ranges, and fine details like small hills, rivers, and accurate erosion patterns.
+## 🧠 How It Works
 
-3. Tileable terrain: Optionally, the terrain can be generated in a tileable fashion. This allows terrain to be generated in real-time and infinitely, useful for real-time applications such as video games. This is done with a tile-stiching method like Multi-Diffusion.
+### 1. **Autoencoder Training**
+- Trained on elevation data using a custom Laplacian-based encoder to separate low and high frequencies
+- Solves the issue of small model errors being massively magnified due to wide ranges in elevation (from -10,000m to +10,000m)
 
-5. Conditional generation: Ability to generate terrain based on specific conditions or labels, allowing for more controlled output.
+### 2. **Diffusion Training**
+- Trained a diffusion (EDM2) decoder on latent terrain representations
+- Trained a diffusion (EDM2) model to generate latent terrain representations
+- Low and high frequencies generated separately for improved accuracy and robustness
 
-5. Flexible configuration: Nearly every part of the training process can be configured, including model architecture, training data, and training parameters.
+### 3. **Acceleration via sCM**
+- Diffusion models are distilled following the process in "Simplifying, Stabilizing & Scaling Continuous-Time Consistency Models".
+- Distillation code modified from [xandergos/sCM-mnist](https://github.com/xandergos/sCM-mnist)
+- Achieves near real-time generation speed with just 1–2 denoising steps, FID increases by just ~10%.
 
-6. Integration with wandb: Tracking experiments and visualizing results using Weights & Biases for better model monitoring and analysis.
+### 4. **Tileability & Infinite Generation**
+- Condition diffusion on low-frequency features (e.g., mean elevation) for tile alignment
+- Generate low-freq map via GAN (translation invariant, no padding)
+- Final pipeline: `GAN → Base Consistency Model → Consistency Decoder`
+- Uses [xandergos/infinite-tensor](https://github.com/xandergos/infinite-tensor) for efficient on-demand generation
 
-# Tiled Generation
-This project implements an infinitely tileable, high-order diffusion sampler for generating infinite terrain. To my knowledge, it is the only implementation of such an algorithm. It builds on the idea of merging diffusion model outputs, similar to previous work like [Multi Diffusion](https://arxiv.org/abs/2302.08113). The key challenge lies in ensuring that tiles align seamlessly across different noise levels and timesteps. When denoising one tile, you also need data from surrounding tiles, which have to be processed at the same timestep. This results in a pyramid structure, where tiles must be denoised at decreasing levels. This introduces overhead on the order of $O(t^3)$, where $t$ is the number of sampling timesteps. Thankfully, this overhead largely disappears when many tiles are sampled near each other, since most of these computations can be reused. It also means that the overhead is minimal when $t$ is very small, which these days can be accomplished with [various](https://arxiv.org/abs/2303.01469) [methods](https://arxiv.org/abs/2202.00512). Keep in mind, however, that as $t$ approaches 1, the models lose the ability to "communicate," and the tiling becomes less seamless. Nonetheless, I have found that the issue is negligible with $t \geq 5$.
+## 🧪 Example
 
-Here is the output of the base model (generates 64x64 images where 1 pixel is roughly 4km) on a 1024x1024 map. In real terms, the map has about 1/15th the area of all land on earth, or slightly larger than the contiguous United States (if it was half water). Details are lacking because this image generates very large scale features. With bounded tiling, generation takes 4096 model evaluations with 15 timesteps, which takes 17 seconds on my RTX 3090 Ti. This increases to ~18000 evaluations and 75 seconds with infinite tiling.
+<img width="1920" height="920" alt="image" src="https://github.com/user-attachments/assets/f3c581a8-c9b8-4965-8158-2bf63b6155d5" />
 
-Note: Pretrained models will be released when the codebase is no longer unstable.
-![768x768 Terrain](https://github.com/user-attachments/assets/e2bbe10d-a99d-4727-bee2-e4ffaa6ce70a)
+## 📜 License
 
-To demonstrate how tiled generation works, I used a toy diffusion model that generates an image sampled from a normal distribution with mean 0 and standard deviation 0.5. In theory, an ideal output would have the entire image being a constant (STD = 0). In practice, adjacent tiles becomes more correlated but do not match exactly, which is exactly what is desired for diverse yet seamless outputs. Indeed, as shown below, adding overlap massively increases the correlation between adjacent tiles (more than I expected, really), and makes the output far smoother. Note that these examples use a bounded sampler, which reduces the overhead around the borders. In fact, in the case where the entire boundary is sampled, it removes the overhead entirely. Infinite (unbounded) generation should look almost identical, except for minor differences at the boundary where outputs are not merged.
-
-Without tiled generation (overlap = 0/64):
-Each tile is independent. In this case, each tile takes a normal distribution with STD 0.5
-![No Tiled Generation](https://github.com/user-attachments/assets/d305428e-8a70-455d-86cc-8eb68e33254e)
-
-With some tile overlap (overlap = 16/64):
-Adjacent tiles become vastly more correlated. STD drops significantly. The image is "seamless" in the sense there is no sharp boundary between tiles, but you can still tell where there tiles are. This should be less of an issue with models that have smoother outputs (as is the case with terrain).
-![overlap16](https://github.com/user-attachments/assets/fdc03bee-3e6f-42ea-9d60-1549350a0779)
-
-With full tile overlap (overlap = 32/64):
-The image is almost perfectly smooth, but there is not a significant change in STD, which tells us this may be overkill for many applications. Note how the image looks pretty similar to perlin noise! A good property to have when we are generating terrain.
-![overlap32](https://github.com/user-attachments/assets/6eeef120-7af4-442b-a740-84008a22a9fb)
-
-### Datasets
-Koppen Geiger Climate Classification: https://www.nature.com/articles/s41597-023-02549-6
-WorldClim Bioclimatic Variables: https://www.worldclim.org/data/worldclim21.html
-Various EarthEngine Datasets: See data/downloading/data.py
-ETOPO Global Elevation (Using 60 arc-second here): https://www.ncei.noaa.gov/products/etopo-global-relief-model
+MIT License
