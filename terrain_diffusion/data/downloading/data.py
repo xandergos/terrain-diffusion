@@ -1,6 +1,7 @@
 import click
 import ee
 import os
+import requests
 from typing import Tuple, List
 
 from tqdm import tqdm
@@ -18,15 +19,17 @@ def initialize_ee():
         opt_url='https://earthengine-highvolume.googleapis.com'
     )
 
-def export_cell_data(image, cell: Tuple[float, float, float, float], output_dir: str, cell_index: int, output_size: int = 1024, image_name = None):
+def download_cell_data(image, cell: Tuple[float, float, float, float], output_dir: str, cell_index: int, output_size: int = 1024, image_name: str = None):
     """
-    Export Earth Engine data for a specific grid cell with exact pixel dimensions.
+    Download Earth Engine data for a specific grid cell directly to local filesystem.
     
     Args:
+        image: Earth Engine image to download
         cell: Tuple of (min_lon, min_lat, max_lon, max_lat) defining the cell bounds
-        output_dir: Directory to save the exported data
+        output_dir: Directory to save the downloaded data
         cell_index: Index of the cell for unique naming
         output_size: Desired width and height of the output image in pixels
+        image_name: Name prefix for the saved file
     """
     min_lon, min_lat, max_lon, max_lat = cell
     region = ee.Geometry.Rectangle([min_lon, min_lat, max_lon, max_lat])
@@ -44,22 +47,33 @@ def export_cell_data(image, cell: Tuple[float, float, float, float], output_dir:
         max_lat   # yTranslation: latitude of the top-left corner
     ]
     
-    # Configure export parameters
-    export_params = {
-        'image': image,
-        'description': f'{cell_index}',
-        'folder': os.path.basename(output_dir),
-        'region': region,
-        'crs': 'EPSG:4326',
-        'crsTransform': crs_transform,
-        'maxPixels': 1e9,
-        'skipEmptyTiles': True
-    }
-    
-    # Start the export task
-    task = ee.batch.Export.image.toDrive(**export_params)
-    task.start()
-    return task
+    try:
+        # Get download URL
+        url = image.getDownloadURL({
+            'region': region,
+            'crs': 'EPSG:4326',
+            'crsTransform': crs_transform,
+            'format': 'GeoTIFF',
+            'maxPixels': 1e9
+        })
+        
+        # Download the file
+        response = requests.get(url, stream=True)
+        response.raise_for_status()
+        
+        # Save to local file
+        filename = f"{image_name}_{cell_index}.tif" if image_name else f"cell_{cell_index}.tif"
+        filepath = os.path.join(output_dir, filename)
+        
+        with open(filepath, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+                
+        return filepath
+        
+    except Exception as e:
+        print(f"Error downloading cell {cell_index}: {e}")
+        return None
 
 def calculate_land_percentage(cell: Tuple[float, float, float, float], resolution: float = 0.1) -> float:
     """
@@ -93,11 +107,15 @@ def calculate_land_percentage(cell: Tuple[float, float, float, float], resolutio
 @click.option('--land_threshold', type=float, default=0.1, help='Required land coverage percentage per export cell (Default 0.1%)')
 def download_data_cli(image, output_dir, output_size, output_resolution, land_threshold):
     """
-    Download terrain data for all grid cells using Earth Engine.
-    Only processes cells with >50% land coverage.
+    Download terrain data for all grid cells using Earth Engine directly to local filesystem.
+    Only processes cells with land coverage above the specified threshold.
     
     Args:
-        output_dir: Directory where the exported data will be saved
+        image: Type of image to download (dem, landcover_class, landcover_water)
+        output_dir: Directory where the downloaded data will be saved
+        output_size: Output size of the image in pixels
+        output_resolution: Output resolution of the image in meters
+        land_threshold: Required land coverage percentage per cell
     """
     # Initialize Earth Engine
     initialize_ee()
@@ -132,19 +150,20 @@ def download_data_cli(image, output_dir, output_size, output_resolution, land_th
     print(f"Found {len(filtered_cells)} cells with >{land_threshold}% land coverage")
     
     # Ask for confirmation
-    confirmation = input("Do you want to proceed with the export? (y/n): ")
+    confirmation = input("Do you want to proceed with the download? (y/n): ")
     if confirmation.lower() != 'y':
-        print("Export cancelled")
+        print("Download cancelled")
         return []
         
-    # Create export tasks
-    tasks = []
-    for i, cell in tqdm(filtered_cells, desc="Exporting cells"):
-        task = export_cell_data(export_image, cell, output_dir, i, output_size, image_name)
-        tasks.append(task)
+    # Download files directly
+    downloaded_files = []
+    for i, cell in tqdm(filtered_cells, desc="Downloading cells"):
+        filepath = download_cell_data(export_image, cell, output_dir, i, output_size, image_name)
+        if filepath:
+            downloaded_files.append(filepath)
         
-    print(f"Started {len(tasks)} export tasks. Check your Google Drive for the results.")
-    return tasks
+    print(f"Downloaded {len(downloaded_files)} files to {output_dir}")
+    return downloaded_files
     
 if __name__ == "__main__":
     download_data_cli()
