@@ -114,9 +114,6 @@ class MPGenerator(ModelMixin, ConfigMixin):
             init_skip = init_skip[:, :, start_h:start_h + stem.shape[2], start_w:start_w + stem.shape[3]]
         x = mp_sum([stem, init_skip], w=0.5)
         
-        # Then upsample
-        x = self.initial_up(x)
-        
         for block in self.blocks:
             x = block(x, emb=None)
                 

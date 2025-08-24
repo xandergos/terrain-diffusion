@@ -53,19 +53,27 @@ for i in range(repeats):
             z = model.postencode(enc_mean, enc_logvar, use_mode=False)
             print(enc_mean.shape)
             decoded_x = model.decode(z)
-            
-        enc_residual, enc_lowfreq = decoded_x[:, :1], decoded_x[:, 1:2]
+        
+        enc_residual, enc_water = decoded_x[:, :1], torch.sigmoid(decoded_x[:, 1:2])
         enc_residual = dataset.denormalize_residual(enc_residual, 90)
-        enc_lowfreq = dataset.denormalize_lowfreq(enc_lowfreq, 90)
-        enc_residual, enc_lowfreq = laplacian_denoise(enc_residual, enc_lowfreq, 5.0)
-        decoded_terrain = laplacian_decode(enc_residual, enc_lowfreq)
+        enc_terrain = enc_water
+        
+        # enc_residual, enc_lowfreq = decoded_x[:, :1], decoded_x[:, 1:2]
+        # enc_residual = dataset.denormalize_residual(enc_residual, 90)
+        # enc_lowfreq = dataset.denormalize_lowfreq(enc_lowfreq, 90)
+        # enc_residual, enc_lowfreq = laplacian_denoise(enc_residual, enc_lowfreq, 5.0)
+        # decoded_terrain = laplacian_decode(enc_residual, enc_lowfreq)
         #decoded_terrain = decoded_x[:, 3:4]
         
-        true_residual, true_lowfreq = images[:, :1], images[:, 1:2]
+        true_residual, true_water = images[:, :1], images[:, 1:2]
         true_residual = dataset.denormalize_residual(true_residual, 90)
-        true_lowfreq = dataset.denormalize_lowfreq(true_lowfreq, 90)
-        true_residual, true_lowfreq = laplacian_denoise(true_residual, true_lowfreq, 5.0)
-        true_terrain = laplacian_decode(true_residual, true_lowfreq)
+        true_terrain = true_water
+        
+        # true_residual, true_lowfreq = images[:, :1], images[:, 1:2]
+        # true_residual = dataset.denormalize_residual(true_residual, 90)
+        # true_lowfreq = dataset.denormalize_lowfreq(true_lowfreq, 90)
+        # true_residual, true_lowfreq = laplacian_denoise(true_residual, true_lowfreq, 5.0)
+        # true_terrain = laplacian_decode(true_residual, true_lowfreq)
         #true_terrain = images[:, 3:4]
         
         if mode == 'plot':
@@ -78,7 +86,7 @@ for i in range(repeats):
             ax1.set_title('Original')
             ax1.axis('off')
             
-            ax2.imshow(decoded_terrain[0].permute(1, 2, 0).cpu().numpy())
+            ax2.imshow(enc_terrain[0].permute(1, 2, 0).cpu().numpy())
             ax2.set_title('Decoded')
             ax2.axis('off')
             
@@ -95,7 +103,7 @@ for i in range(repeats):
             mse_pooled = F.mse_loss(true_terrain, pooled).item()
             
             # Calculate MSE between clean and decoded
-            mse_decoded = F.mse_loss(true_terrain, decoded_terrain).item()
+            mse_decoded = F.mse_loss(true_terrain, enc_terrain).item()
             
             print(f"MSE between original and mean pooled: {mse_pooled:.4f}")
             print(f"MSE between original and decoded: {mse_decoded:.4f}")
@@ -113,7 +121,7 @@ for i in range(repeats):
             plt.show()
         elif mode == 'evaluate':
             # Calculate MSE between original and decoded images
-            mse = F.mse_loss(true_terrain, decoded_terrain).item()
+            mse = F.mse_loss(true_terrain, enc_terrain).item()
             mses.append(mse)
             print(f"Average MSE: {torch.tensor(mses).mean().item():.4f}")
         elif mode == 'stats':

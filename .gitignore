@@ -250,3 +250,5 @@ experiments/
 # Scripts
 create_encoded_dataset.sh
 create_base_dataset.sh
+
+data/

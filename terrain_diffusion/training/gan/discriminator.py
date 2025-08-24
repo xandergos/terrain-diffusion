@@ -28,7 +28,7 @@ class MPDiscriminator(nn.Module):
         super().__init__()
         
         # Initial conv to get to model_channels
-        self.in_conv = MPConv(in_channels + 1, model_channels, kernel=[3, 3])  # +1 for bias channel
+        self.in_conv = MPConv(in_channels + 1, model_channels, kernel=[1, 1])  # +1 for bias channel
         
         self.noise_level = noise_level
         

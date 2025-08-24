@@ -15,29 +15,27 @@ app = Flask(__name__)
 
 # Initialize the infinite terrain (this takes time on first load)
 print("Loading infinite terrain generator...")
-terrain = create_unbounded_pipe(sigmas=[80, 5], cond_input_scaling=1) # Shape = (Infinite, Infinite), accessed as terrain[x1:x2, y1:y2]
+terrain = create_unbounded_pipe(sigmas=[80, 5], cond_input_scaling=1/8) # Shape = (Infinite, Infinite), accessed as terrain[x1:x2, y1:y2]
 print("Terrain loaded!")
 
 def signed_sqrt_to_elevation(values):
     """Convert signed sqrt values back to elevation in meters"""
     return np.sign(values) * values * values
 
-def elevation_to_color(elevation_data):
-    """Map elevation (m) → RGB using absolute Earth elevation scale.
+def elevation_to_color(elevation_data, water_data=None):
+    """Map elevation (m) → RGB using adaptive elevation scale.
     
-    • Uses Mt. Everest (8848m) and Mariana Trench (-11034m) as reference points
-    • Gradient is applied to √|elevation| so changes near sea-level are clearer.
-    • Water   : light-cyan (shallow) → dark-blue (deep).
+    • Uses maximum elevation in current window as reference
+    • Water: light-cyan (shallow) → dark-blue (deep)
     • Beach/shore (0-1m): sand color
-    • Low land: lush green → olive.
-    • Highlands/mountains: brown → white (snow).
+    • Land (>1m): black → white gradient, scaled to local max elevation
+    • If water_data provided: overlays light blue based on water probability
     """
     h, w = elevation_data.shape
     rgb_image = np.zeros((h, w, 3), dtype=np.uint8)
 
-    # Earth's elevation extremes
+    # Earth's elevation extremes for water only
     MAX_DEPTH = 11034  # Mariana Trench depth (positive value)
-    MAX_ELEVATION = 8848  # Mt. Everest height
 
     # --- Water ----------------------------------------------------------------
     water_mask = elevation_data < 0
@@ -64,22 +62,26 @@ def elevation_to_color(elevation_data):
         higher_mask = elevation_data > 1.0
         if np.any(higher_mask):
             higher_elev = elevation_data[higher_mask]
-            t = np.sqrt(higher_elev) / np.sqrt(MAX_ELEVATION)   # normalize to sqrt of max elevation
-            t = np.clip(t, 0, 1)                                # clamp to [0,1]
+            # Use local maximum elevation for better contrast
+            local_max = np.max(higher_elev)
+            t = np.sqrt(higher_elev) / np.sqrt(local_max)   # normalize to sqrt of local max
+            t = np.clip(t, 0, 1)                            # clamp to [0,1]
+            
+            # Create grayscale values (black to white)
+            gray_value = (t * 255).astype(np.uint8)
+            rgb_image[higher_mask] = np.column_stack([gray_value, gray_value, gray_value])
 
-            bp    = np.array([0.0, 0.3, 0.6, 1.0])       # break-points
-            cols  = np.array([
-                [110, 220, 110],   # lush green lowlands
-                [170, 190,  90],   # olive/grass
-                [180, 140, 110],   # brown rock
-                [255, 255, 255],   # snow
-            ])
-
-            land_rgb = np.zeros((t.shape[0], 3))
-            for c in range(3):                          # interpolate per channel
-                land_rgb[:, c] = np.interp(t, bp, cols[:, c])
-
-            rgb_image[higher_mask] = land_rgb.astype(np.uint8)
+    # --- Water Data Overlay ---------------------------------------------------
+    if water_data is not None:
+        # Light blue overlay color
+        water_overlay = np.array([180, 220, 255])  # Light blue
+        
+        # For each pixel, blend the overlay based on water probability
+        for i in range(3):  # RGB channels
+            rgb_image[..., i] = (
+                rgb_image[..., i] * (1 - water_data) + 
+                water_overlay[i] * water_data
+            ).astype(np.uint8)
 
     return rgb_image
 
@@ -94,8 +96,8 @@ def get_terrain():
         # Get parameters from request
         x = int(request.args.get('x', 0))
         y = int(request.args.get('y', 0))
-        window_width = int(request.args.get('window_width', 1920))
-        window_height = int(request.args.get('window_height', 1080))
+        window_width = round(float(request.args.get('window_width', 1920)))
+        window_height = round(float(request.args.get('window_height', 1080)))
         scale = float(request.args.get('scale', 1.0))
         
         # Calculate terrain dimensions based on window aspect ratio
@@ -118,13 +120,17 @@ def get_terrain():
         
         # Extract terrain data - the terrain is accessed as terrain[y1:y2, x1:x2]
         print(f"Generating terrain for region: x={x}, y={y}, width={width}, height={height}, scale={scale}")
-        terrain_data = terrain[y:y+height, x:x+width].cpu().numpy()
+        terrain_data = terrain[:, y:y+height, x:x+width].cpu().numpy()
         
         # Convert signed sqrt values to actual elevation
-        elevation_data = signed_sqrt_to_elevation(terrain_data)
+        elevation_data = signed_sqrt_to_elevation(terrain_data[0])
+        if terrain_data.shape[0] == 2:
+            water_data = terrain_data[1]
+        else:
+            water_data = None
         
         # Create colored image
-        rgb_image = elevation_to_color(elevation_data)
+        rgb_image = elevation_to_color(elevation_data, water_data)
         
         # Convert to PIL Image and then to base64
         pil_image = Image.fromarray(rgb_image)
@@ -185,7 +191,7 @@ def export_terrain():
         print(f"Exporting terrain region: x1={min_x}, y1={min_y}, x2={max_x}, y2={max_y} (size: {width}x{height})")
         
         # Extract terrain data - the terrain is accessed as terrain[y1:y2, x1:x2]
-        terrain_data = terrain[min_y:max_y, min_x:max_x].cpu().numpy()
+        terrain_data = terrain[0, min_y:max_y, min_x:max_x].cpu().numpy()
         
         # Convert signed sqrt values to actual elevation
         elevation_data = signed_sqrt_to_elevation(terrain_data)

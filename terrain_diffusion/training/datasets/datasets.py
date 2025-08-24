@@ -114,9 +114,6 @@ class H5AutoencoderDataset(Dataset):
         return max(len(keys) for keys in self.keys)
 
     def __getitem__(self, index):
-        LOWFREQ_MEAN = -2128
-        LOWFREQ_STD = 2353
-        
         subset_idx = random.choices(range(len(self.subset_weights)), weights=self.subset_weights, k=1)[0]
         index = random.randrange(len(self.keys[subset_idx]))
         class_label = self.subset_class_labels[subset_idx] if self.subset_class_labels is not None else None
@@ -1486,9 +1483,6 @@ class FileGANDataset(Dataset):
     def __init__(self, dataset_names, crop_size=(32, 32), resize_size=(32, 32)):
         self.crop_size = crop_size
         self.resize_size = resize_size
-        
-        # Load and process all TIF files
-        data_dict = {}
         
         data_arrays = []
         for tif_file in dataset_names:

@@ -52,7 +52,8 @@ def export_cell_data(image, cell: Tuple[float, float, float, float], output_dir:
         'region': region,
         'crs': 'EPSG:4326',
         'crsTransform': crs_transform,
-        'maxPixels': 1e9
+        'maxPixels': 1e9,
+        'skipEmptyTiles': True
     }
     
     # Start the export task
@@ -116,9 +117,7 @@ def download_data_cli(image, output_dir, output_size, output_resolution, land_th
             .mosaic()
         image_name = "landcover_class"
     elif image == "landcover_water":
-        export_image = ee.ImageCollection("COPERNICUS/Landcover/100m/Proba-V-C3/Global") \
-            .select('water-permanent-coverfraction') \
-            .mosaic()
+        export_image = ee.Image("MERIT/Hydro/v1_0_1").select('wat')
         image_name = "landcover_water"
     else:
         raise ValueError(f"Invalid image option: {image}. Please choose 'dem' or 'landcover'.")

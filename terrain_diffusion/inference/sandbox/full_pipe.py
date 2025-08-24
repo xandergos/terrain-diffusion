@@ -1,14 +1,17 @@
 import os
+import uuid
 
 import torch
 from terrain_diffusion.training.gan.generator import MPGenerator
 from ema_pytorch import PostHocEMA
 from safetensors.torch import load_model
-from infinite_tensors.infinite_tensors import InfiniteTensor, TensorWindow
+from infinite_tensor import MemoryTileStore, TensorWindow
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Slider
 from terrain_diffusion.training.unet import EDMUnet2D
 from terrain_diffusion.inference.scheduler.functional_dpmsolver import multistep_dpm_solver_second_order_update, dpm_solver_first_order_update, precondition_outputs
+
+tile_store = MemoryTileStore()
 
 def make_weights(size):
     s = size
@@ -89,7 +92,8 @@ def base_generator(ctx):
     return torch.randn((1, 128, 512, 512))
 
 
-latent_tensor = InfiniteTensor(
+latent_tensor = tile_store.get_or_create(
+    uuid.uuid4(),
     shape=(1, 128, None, None),
     f=base_generator,
     output_window=TensorWindow((1, 128, 512, 512))
@@ -99,7 +103,8 @@ def f(ctx, x):
     out = gan.raw_forward(x.to('cuda')).to('cpu')
     return torch.cat([out, torch.ones([1, 1, 252, 252])], dim=1)
 
-gan_tensor = InfiniteTensor(
+gan_tensor = tile_store.get_or_create(
+    uuid.uuid4(),
     shape=(1, 7, None, None),
     f=f,
     output_window=TensorWindow((1, 7, 252, 252), window_stride=(1, 7, 240, 240)),
@@ -107,19 +112,22 @@ gan_tensor = InfiniteTensor(
     args_windows=(TensorWindow((1, 128, 40, 40), window_stride=(1, 128, 30, 30)),),
 )
 while gan_tensor[0, 0, 1, 1] < 1.5:
-    latent_tensor = InfiniteTensor(
+    latent_tensor = tile_store.get_or_create(
+        uuid.uuid4(),
         shape=(1, 128, None, None),
         f=base_generator,
         output_window=TensorWindow((1, 128, 512, 512))
     )
-    gan_tensor = InfiniteTensor(
+    gan_tensor = tile_store.get_or_create(
+        uuid.uuid4(),
         shape=(1, 7, None, None),
         f=f,
         output_window=TensorWindow((1, 7, 252, 252), window_stride=(1, 7, 240, 240)),
         args=(latent_tensor,),
         args_windows=(TensorWindow((1, 128, 40, 40), window_stride=(1, 128, 30, 30)),),
     )
-gan_tensor = InfiniteTensor(
+gan_tensor = tile_store.get_or_create(
+    uuid.uuid4(),
     shape=(1, 6, None, None),
     f=lambda ctx, x: x[:, :-1] / x[:, [-1]],
     output_window=TensorWindow((1, 6, 64, 64)),
@@ -127,7 +135,8 @@ gan_tensor = InfiniteTensor(
     args_windows=(TensorWindow((1, 7, 64, 64)),)
 )
 
-cond_inputs = InfiniteTensor(
+cond_inputs = tile_store.get_or_create(
+    uuid.uuid4(),
     shape=(1, 6, None, None),
     f=lambda ctx, x: torch.nn.functional.interpolate(x, scale_factor=32, mode='nearest'),
     output_window=TensorWindow((1, 6, 256, 256)),
@@ -214,7 +223,8 @@ def denoise_latent_multistep(ctx, noisy_latent, sigma_t, sigma_s0, sigma_s1, mod
     )
     return torch.cat([next_latents, torch.ones([1, 1, 64, 64])], dim=1)
 
-noisy_latents = [InfiniteTensor(
+noisy_latents = [tile_store.get_or_create(
+    uuid.uuid4(),
     shape=(1, 35, None, None), # Extra channel for weight
     f=lambda ctx: torch.cat([torch.randn([1, 34, 512, 512]) * sigmas[0], torch.ones([1, 1, 512, 512])], dim=1),
     output_window=TensorWindow((1, 35, 512, 512)),
@@ -225,7 +235,8 @@ sigma_s1 = None
 i = 0
 stride_every = 5
 for sigma_t, sigma_s0 in zip(sigmas[1:], sigmas[:-1]):
-    model_preds.append(InfiniteTensor(
+    model_preds.append(tile_store.get_or_create(
+        uuid.uuid4(),
         shape=(1, 35, None, None), # Extra channel for weight
         f=pred_x0,
         output_window=TensorWindow((1, 35, 64, 64), window_stride=(1, 35, stride, stride)),
@@ -234,7 +245,8 @@ for sigma_t, sigma_s0 in zip(sigmas[1:], sigmas[:-1]):
                     TensorWindow((1, 6, 64, 64), window_stride=(1, 6, stride, stride)))
     ))
     if len(model_preds) == 1:
-        noisy_latents.append(InfiniteTensor(
+        noisy_latents.append(tile_store.get_or_create(
+            uuid.uuid4(),
             shape=(1, 35, None, None),
             f=denoise_latent_singlestep,
             output_window=TensorWindow((1, 35, 64, 64)),
@@ -242,7 +254,8 @@ for sigma_t, sigma_s0 in zip(sigmas[1:], sigmas[:-1]):
             args_windows=(TensorWindow((1, 35, 64, 64)), None, None, TensorWindow((1, 35, 64, 64)))
         ))
     else:
-        noisy_latents.append(InfiniteTensor(
+        noisy_latents.append(tile_store.get_or_create(
+            uuid.uuid4(),
             shape=(1, 35, None, None),
             f=denoise_latent_multistep,
             output_window=TensorWindow((1, 35, 64, 64)),
@@ -253,7 +266,8 @@ for sigma_t, sigma_s0 in zip(sigmas[1:], sigmas[:-1]):
         ))
     sigma_s1 = sigma_s0
 
-model_preds.append(InfiniteTensor(
+model_preds.append(tile_store.get_or_create(
+    uuid.uuid4(),
     shape=(1, 35, None, None), # Extra channel for weight
     f=pred_x0,
     output_window=TensorWindow((1, 35, 64, 64), window_stride=(1, 35, stride, stride)),
@@ -263,7 +277,8 @@ model_preds.append(InfiniteTensor(
 ))
 
 # Example usage:
-scaled_model_pred = InfiniteTensor(
+scaled_model_pred = tile_store.get_or_create(
+    uuid.uuid4(),
     shape=(1, 35, None, None),
     f=lambda ctx, x: torch.cat([x[:, :-1] / sigma_data, x[:, [-1]]], dim=1),
     output_window=TensorWindow((1, 35, 64, 64)),

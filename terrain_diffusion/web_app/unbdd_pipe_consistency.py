@@ -1,4 +1,5 @@
 import os
+import uuid
 
 import torch
 from tqdm import tqdm
@@ -12,11 +13,13 @@ import matplotlib.pyplot as plt
 from terrain_diffusion.training.unet import EDMAutoencoder, EDMUnet2D
 from terrain_diffusion.inference.scheduler.functional_dpmsolver import multistep_dpm_solver_second_order_update, dpm_solver_first_order_update, precondition_outputs
 from matplotlib.widgets import Slider
-from infinite_tensors.infinite_tensors import InfiniteTensor, TensorWindow
+from infinite_tensor import MemoryTileStore, TensorWindow
 
 def create_unbounded_pipe(sigmas: list[int] = None, cond_input_scaling: float = 1.0):
     if sigmas is None:
         sigmas = [80, 10, 1]
+    
+    tile_store = MemoryTileStore()
     
     def get_weights(size):
         s = size
@@ -48,15 +51,18 @@ def create_unbounded_pipe(sigmas: list[int] = None, cond_input_scaling: float = 
         generator = torch.Generator().manual_seed(seed)
         return torch.randn(1, 128, 128, 128, generator=generator)  # Return on CPU
 
-    cond_inputs_size = round(64 * cond_input_scaling)
+    cond_inputs_size = round(8 * 8 * cond_input_scaling)
     def cond_inputs_generator(ctx, latent_tensor):
         """Generate conditional inputs from latent using GAN"""
         # Get the latent window and move to device for processing
         latent_window = latent_tensor.to(device)
         with torch.no_grad():
-            cond_result = gan.raw_forward(latent_window)[:, :, 2:-2, 2:-2]
+            cond_result = gan.forward(latent_window)[:, :, 1:-1, 1:-1]
+            
+        # Pad cond_result with 5 additional zero channels
+        cond_result = torch.cat([cond_result, torch.zeros_like(cond_result[:, :1]).repeat(1, 5, 1, 1)], dim=1)
         
-        # Interpolate to window size (64x64 window from 14x14 latent)
+        # Interpolate to window size
         cond_interpolated = torch.nn.functional.interpolate(cond_result, size=(cond_inputs_size, cond_inputs_size), mode='nearest')
         return cond_interpolated[0].cpu()  # Return on CPU
 
@@ -97,7 +103,7 @@ def create_unbounded_pipe(sigmas: list[int] = None, cond_input_scaling: float = 
 
     device = 'cuda'
     torch.no_grad().__enter__()
-    gan = get_model(MPGenerator, 'checkpoints/gan/latest_checkpoint', sigma_rel=0.05, device=device)
+    gan = get_model(MPGenerator, 'checkpoints/gan_simple/latest_checkpoint', sigma_rel=0.2, device=device)
     model = get_model(EDMUnet2D, 'checkpoints/consistency_base-192x3/latest_checkpoint', sigma_rel=0.05, device=device)
     autoencoder = EDMAutoencoder.from_pretrained('checkpoints/models/autoencoder').to(device)
 
@@ -111,26 +117,29 @@ def create_unbounded_pipe(sigmas: list[int] = None, cond_input_scaling: float = 
     sigma_data = 0.5
 
     # Create infinite latent tensor
-    latent_infinite = InfiniteTensor(
+    latent_infinite = tile_store.get_or_create(
+        uuid.uuid4(),
         shape=(1, 128, None, None),
         f=latent_generator,
         output_window=TensorWindow((1, 128, 128, 128))
     )
 
     # Create infinite conditional inputs tensor
-    cond_inputs_infinite = InfiniteTensor(
+    cond_inputs_infinite = tile_store.get_or_create(
+        uuid.uuid4(),
         shape=(6, None, None),
         f=cond_inputs_generator,
         output_window=TensorWindow((6, cond_inputs_size, cond_inputs_size)),
         args=(latent_infinite,),
-        args_windows=[TensorWindow((1, 128, 14, 14), window_stride=(1, 128, 5, 5), dimension_map=(None, 0, 1, 2))]
+        args_windows=[TensorWindow((1, 128, 21, 21), stride=(1, 128, 2, 2), dimension_map=(None, 0, 1, 2))]
     )
 
     # Mark latent_infinite for cleanup since it's only used by cond_inputs_infinite
     latent_infinite.mark_for_cleanup()
 
     # Initialize infinite prediction tensor
-    pred_x0_infinite = InfiniteTensor(
+    pred_x0_infinite = tile_store.get_or_create(
+        uuid.uuid4(),
         shape=(1, 5, None, None),
         f=lambda ctx: torch.zeros(1, 5, 64, 64) * sigma_data,  # Return on CPU
         output_window=TensorWindow((1, 5, 64, 64))
@@ -144,7 +153,8 @@ def create_unbounded_pipe(sigmas: list[int] = None, cond_input_scaling: float = 
         cnoise = t.expand(1)
         
         # Create noise for this step
-        noise_infinite = InfiniteTensor(
+        noise_infinite = tile_store.get_or_create(
+            uuid.uuid4(),
             shape=(1, 5, None, None),
             f=noise_generator,
             output_window=TensorWindow((1, 5, 64, 64))
@@ -154,7 +164,8 @@ def create_unbounded_pipe(sigmas: list[int] = None, cond_input_scaling: float = 
         def create_x_t(ctx, noise_tensor, pred_tensor):
             return torch.sin(t.cpu()) * noise_tensor + torch.cos(t.cpu()) * pred_tensor
         
-        x_t_infinite = InfiniteTensor(
+        x_t_infinite = tile_store.get_or_create(
+            uuid.uuid4(),
             shape=(1, 5, None, None),
             f=create_x_t,
             output_window=TensorWindow((1, 5, 64, 64)),
@@ -169,18 +180,20 @@ def create_unbounded_pipe(sigmas: list[int] = None, cond_input_scaling: float = 
         def model_step_wrapper(ctx, x_t_tensor, cond_tensor):
             return process_model_step(ctx, x_t_tensor, cond_tensor, cnoise)
         
-        model_output_infinite = InfiniteTensor(
+        model_output_infinite = tile_store.get_or_create(
+            uuid.uuid4(),
             shape=(1, 6, None, None),
             f=model_step_wrapper,
-            output_window=TensorWindow((1, 6, 64, 64), window_stride=(1, 6, 32, 32)),
+            output_window=TensorWindow((1, 6, 64, 64), stride=(1, 6, 32, 32)),
             args=(x_t_infinite, cond_inputs_infinite),
-            args_windows=[TensorWindow((1, 5, 64, 64), window_stride=(1, 5, 32, 32)), TensorWindow((6, 64, 64), window_stride=(6, 32, 32), dimension_map=(1, 2, 3))]
+            args_windows=[TensorWindow((1, 5, 64, 64), stride=(1, 5, 32, 32)), TensorWindow((6, 8, 8), stride=(6, 4, 4), dimension_map=(1, 2, 3))]
         )
         
         # Mark x_t_infinite for cleanup since it's only used by model_output_infinite
         x_t_infinite.mark_for_cleanup()
         
-        model_output_infinite = InfiniteTensor(
+        model_output_infinite = tile_store.get_or_create(
+            uuid.uuid4(),
             shape=(1, 5, None, None),
             f=lambda ctx, x_t_tensor: x_t_tensor[:, :-1] / x_t_tensor[:, -1:],
             output_window=TensorWindow((1, 5, 64, 64)),
@@ -192,7 +205,8 @@ def create_unbounded_pipe(sigmas: list[int] = None, cond_input_scaling: float = 
         def update_pred_x0(ctx, x_t_tensor, model_output_tensor):
             return torch.cos(t.cpu()) * x_t_tensor + torch.sin(t.cpu()) * model_output_tensor * sigma_data
         
-        new_pred_x0_infinite = InfiniteTensor(
+        new_pred_x0_infinite = tile_store.get_or_create(
+            uuid.uuid4(),
             shape=(1, 5, None, None),
             f=update_pred_x0,
             output_window=TensorWindow((1, 5, 64, 64)),
@@ -224,60 +238,64 @@ def create_unbounded_pipe(sigmas: list[int] = None, cond_input_scaling: float = 
         lowfreq = dataset.denormalize_lowfreq(lowfreq, 90)
         residual, lowfreq = laplacian_denoise(residual, lowfreq, 5.0)
         decoded_terrain = laplacian_decode(residual, lowfreq)
-        decoded_terrain = torch.cat([decoded_terrain.cpu() * weights512, weights512], dim=1)
+        decoded_terrain = torch.cat([decoded_terrain.cpu() * weights512, watercover.cpu() * weights512, weights512], dim=1)
         return decoded_terrain
 
-    decoded_terrain_infinite = InfiniteTensor(
-        shape=(1, 2, None, None),
+    decoded_terrain_infinite = tile_store.get_or_create(
+        uuid.uuid4(),
+        shape=(1, 3, None, None),
         f=decode_samples,
-        output_window=TensorWindow((1, 2, 512, 512), window_stride=(1, 2, 256, 256)),
+        output_window=TensorWindow((1, 3, 512, 512), stride=(1, 3, 256, 256)),
         args=(pred_x0_infinite,),
-        args_windows=[TensorWindow((1, 5, 64, 64), window_stride=(1, 5, 32, 32))]
+        args_windows=[TensorWindow((1, 5, 64, 64), stride=(1, 5, 32, 32))]
     )
-
 
     mode = 'decoded'
     if mode == 'decoded':
-        final_terrain_infinite = InfiniteTensor(
-            shape=(None, None),
-            f=lambda ctx, pred_tensor: torch.squeeze(pred_tensor[:, 0:1] / pred_tensor[:, 1:2], dim=(0, 1)),
-            output_window=TensorWindow((512, 512), window_stride=(512, 512)),
+        final_terrain_infinite = tile_store.get_or_create(
+            uuid.uuid4(),
+            shape=(2, None, None),
+            f=lambda ctx, pred_tensor: torch.squeeze(pred_tensor[:, 0:2] / pred_tensor[:, -1:], dim=0),
+            output_window=TensorWindow((2, 512, 512), stride=(2, 512, 512)),
             args=(decoded_terrain_infinite,),
-            args_windows=[TensorWindow((1, 2, 512, 512), window_stride=(1, 2, 512, 512), dimension_map=(None, None, 0, 1))]
+            args_windows=[TensorWindow((1, 3, 512, 512), stride=(1, 3, 512, 512), dimension_map=(None, 0, 1, 2))]
         )
     elif mode == 'lowres':
         def decode_lowres(ctx, pred_tensor):
-            lowres = torch.squeeze(pred_tensor[:, 4:5] * 2, dim=(0, 1))
+            lowres = torch.squeeze(pred_tensor[:, 4:5] * 2, dim=0)
             lowres = lowres * 38.6 - 31.4
             return lowres
         
-        final_terrain_infinite = InfiniteTensor(
-            shape=(None, None),
+        final_terrain_infinite = tile_store.get_or_create(
+            uuid.uuid4(),
+            shape=(1, None, None),
             f=decode_lowres,
-            output_window=TensorWindow((512, 512), window_stride=(512, 512)),
+            output_window=TensorWindow((1, 512, 512), stride=(1, 512, 512)),
             args=(pred_x0_infinite,),
-            args_windows=[TensorWindow((1, 5, 512, 512), window_stride=(1, 5, 512, 512), dimension_map=(None, None, 0, 1))]
+            args_windows=[TensorWindow((1, 5, 512, 512), stride=(1, 5, 512, 512), dimension_map=(None, 0, 1, 2))]
         )
     elif mode == 'conditional':
         def decode_cond(ctx, cond_tensor):
-            elev = cond_tensor[0] * 2435 - 2607
+            elev = cond_tensor[:1] * 2435 - 2607
             elev = torch.sign(elev) * torch.sqrt(torch.abs(elev))
             return elev
         
-        final_terrain_infinite = InfiniteTensor(
-            shape=(None, None),
+        final_terrain_infinite = tile_store.get_or_create(
+            uuid.uuid4(),
+            shape=(1, None, None),
             f=decode_cond,
-            output_window=TensorWindow((64, 64)),
+            output_window=TensorWindow((1, 64, 64)),
             args=(cond_inputs_infinite,),
-            args_windows=[TensorWindow((6, 64, 64), window_stride=(6, 64, 64), dimension_map=(None, 0, 1))]
+            args_windows=[TensorWindow((6, 64, 64), stride=(6, 64, 64))]
         )
     elif mode == 'latent':
-        final_terrain_infinite = InfiniteTensor(
-            shape=(None, None),
+        final_terrain_infinite = tile_store.get_or_create(
+            uuid.uuid4(),
+            shape=(1, None, None),
             f=lambda ctx, pred_tensor: torch.squeeze(pred_tensor[:, 0], dim=0),  # Take just first latent channel
-            output_window=TensorWindow((64, 64)),
+            output_window=TensorWindow((1, 64, 64)),
             args=(pred_x0_infinite,),
-            args_windows=[TensorWindow((1, 5, 64, 64), window_stride=(1, 5, 64, 64), dimension_map=(None, None, 0, 1))]
+            args_windows=[TensorWindow((1, 5, 64, 64), stride=(1, 5, 64, 64), dimension_map=(None, 0, 1, 2))]
         )
 
     # Mark cond_inputs_infinite for cleanup since we're done with diffusion steps
