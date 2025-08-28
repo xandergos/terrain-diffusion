@@ -1480,9 +1480,13 @@ class FileGANDataset(Dataset):
         data (numpy.ndarray): Array of shape (n_datasets, height, width) containing stacked data
         available_datasets (list): List of available dataset names
     """
-    def __init__(self, dataset_names, crop_size=(32, 32), resize_size=(32, 32)):
+    def __init__(self, dataset_names, crop_size=(32, 32), resize_size=(32, 32), 
+                 filter_threshold=None, filter_pct=0.5, max_filter_tries=50):
         self.crop_size = crop_size
         self.resize_size = resize_size
+        self.filter_threshold = filter_threshold
+        self.filter_pct = float(filter_pct)
+        self.max_filter_tries = int(max_filter_tries)
         
         data_arrays = []
         for tif_file in dataset_names:
@@ -1537,9 +1541,28 @@ class FileGANDataset(Dataset):
         max_h = self.height - self.crop_size[0]
         max_w = self.width - self.crop_size[1]
         
-        # Generate random crop coordinates
-        h_start = np.random.randint(0, max_h + 1)
-        w_start = np.random.randint(0, max_w + 1)
+        # Choose target side of threshold if requested
+        if self.filter_threshold is not None:
+            want_above = (np.random.random() < self.filter_pct)
+            h_start = w_start = 0
+            found = False
+            for _ in range(self.max_filter_tries):
+                h_start = np.random.randint(0, max_h + 1)
+                w_start = np.random.randint(0, max_w + 1)
+                first_mean = self.data[0, 
+                                       h_start:h_start + self.crop_size[0],
+                                       w_start:w_start + self.crop_size[1]].mean()
+                if (first_mean > self.filter_threshold) == want_above:
+                    found = True
+                    break
+            if not found:
+                # fallback to a random crop if condition not found
+                h_start = np.random.randint(0, max_h + 1)
+                w_start = np.random.randint(0, max_w + 1)
+        else:
+            # Generate random crop coordinates
+            h_start = np.random.randint(0, max_h + 1)
+            w_start = np.random.randint(0, max_w + 1)
         
         # Extract the crop
         crop = self.data[:, 
@@ -1567,4 +1590,3 @@ class FileGANDataset(Dataset):
             return {'image': crop}
         
         return {'image': torch.from_numpy(crop).float()}
-

@@ -1,3 +1,4 @@
+import time
 import click
 import ee
 import os
@@ -48,26 +49,40 @@ def download_cell_data(image, cell: Tuple[float, float, float, float], output_di
     ]
     
     try:
+        # Save to local file
+        filename = f"{image_name}_{cell_index}.tif" if image_name else f"cell_{cell_index}.tif"
+        filepath = os.path.join(output_dir, filename)
+        temp_filepath = filepath + ".tmp"
+        
+        if os.path.exists(filepath):
+            print(f"File {filepath} already exists")
+            return filepath
+        
         # Get download URL
         url = image.getDownloadURL({
             'region': region,
             'crs': 'EPSG:4326',
-            'crsTransform': crs_transform,
-            'format': 'GeoTIFF',
+            'crs_transform': crs_transform,  # snake_case here
+            'format': 'GEO_TIFF',
+            'filePerBand': False,
             'maxPixels': 1e9
         })
         
-        # Download the file
+        # Download the file to temp location
         response = requests.get(url, stream=True)
         response.raise_for_status()
         
-        # Save to local file
-        filename = f"{image_name}_{cell_index}.tif" if image_name else f"cell_{cell_index}.tif"
-        filepath = os.path.join(output_dir, filename)
+        try:
+            with open(temp_filepath, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+        except Exception as e:
+            print(f"Error downloading cell {cell_index}. Retrying in 60 seconds: {e}")
+            time.sleep(60)
+            raise
         
-        with open(filepath, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
+        # Move temp file to final location
+        os.rename(temp_filepath, filepath)
                 
         return filepath
         
@@ -135,7 +150,9 @@ def download_data_cli(image, output_dir, output_size, output_resolution, land_th
             .mosaic()
         image_name = "landcover_class"
     elif image == "landcover_water":
-        export_image = ee.Image("MERIT/Hydro/v1_0_1").select('wat')
+        # Use JRC Global Surface Water for comprehensive water detection
+        export_image = ee.Image("JRC/GSW1_4/GlobalSurfaceWater").select('occurrence')
+        #export_image = jrc_water.gte(1).uint8()
         image_name = "landcover_water"
     else:
         raise ValueError(f"Invalid image option: {image}. Please choose 'dem' or 'landcover'.")

@@ -1,6 +1,7 @@
 import click
 from terrain_diffusion.training.diffusion.train import main as train_main
 from terrain_diffusion.training.autoencoder.train_ae import main as train_ae_main
+from terrain_diffusion.training.gan.train_gan import main as train_gan_main
 from terrain_diffusion.training.consistency.distill import distill as distill_main
 from terrain_diffusion.training.save_model import save_model as save_model_main
 from terrain_diffusion.data.preprocessing.build_base_dataset import process_base_dataset as build_base_dataset_main
@@ -16,6 +17,7 @@ def cli():
 
 # Training commands
 cli.add_command(train_main, name='train')
+cli.add_command(train_gan_main, name='train-gan')
 cli.add_command(train_ae_main, name='train-ae')
 cli.add_command(distill_main, name='distill')
 cli.add_command(save_model_main, name='save-model')

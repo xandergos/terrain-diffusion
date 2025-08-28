@@ -3,6 +3,7 @@ import uuid
 
 import torch
 from tqdm import tqdm
+from terrain_diffusion.common.model_utils import get_model
 from terrain_diffusion.data.laplacian_encoder import laplacian_decode, laplacian_denoise
 from terrain_diffusion.inference.scheduler.dpmsolver import EDMDPMSolverMultistepScheduler
 from terrain_diffusion.training.datasets.datasets import H5LatentsDataset, H5LatentsSimpleDataset
@@ -31,19 +32,6 @@ def create_unbounded_pipe(sigmas: list[int] = None, cond_input_scaling: float = 
         return (distance_y * distance_x)[None, None, :, :]
 
     weights64 = get_weights(64)
-
-    def get_model(cls, checkpoint_path, sigma_rel=None, ema_step=None, device='cpu'):
-        config_path = os.path.join(checkpoint_path, 'model_config')
-        model = cls.from_config(cls.load_config(config_path))
-
-        if sigma_rel is not None:
-            # sigma_rels are placeholders since we dont use them
-            ema = PostHocEMA(model, sigma_rels=[0.05, 0.1], checkpoint_folder=os.path.join(checkpoint_path, '..', 'phema')).to(device)
-            ema.synthesize_ema_model(sigma_rel=sigma_rel, step=ema_step).copy_params_from_ema_to_model()
-        else:
-            load_model(model, os.path.join(checkpoint_path, 'model.safetensors'))
-
-        return model.to(device)
 
     def latent_generator(ctx):
         """Generate infinite latent noise for GAN input"""

@@ -138,6 +138,16 @@ def main(ctx, config_path, ckpt_path, debug_run, resume_id):
         
     if debug_run:
         config['wandb']['mode'] = 'disabled'
+    # Auto-resume W&B run from checkpoint metadata if available (unless explicitly provided)
+    if ckpt_path and not resume_id and not debug_run:
+        try:
+            with open(os.path.join(ckpt_path, 'wandb_run.json'), 'r') as f:
+                run_meta = json.load(f)
+            if 'id' in run_meta and run_meta['id']:
+                config['wandb']['id'] = run_meta['id']
+                config['wandb']['resume'] = 'must'
+        except Exception:
+            pass
     if resume_id:
         config['wandb']['id'] = resume_id
         config['wandb']['resume'] = 'must'
@@ -198,6 +208,12 @@ def main(ctx, config_path, ckpt_path, debug_run, resume_id):
         with open(os.path.join(base_folder_path + '_checkpoint', 'config.json'), 'w') as f:
             json.dump(config, f, indent=2)
         generator.save_config(os.path.join(base_folder_path + '_checkpoint', f'model_config'))
+        # Persist W&B run id for seamless resumption
+        try:
+            with open(os.path.join(base_folder_path + '_checkpoint', 'wandb_run.json'), 'w') as f:
+                json.dump({'id': wandb.run.id if wandb.run else None}, f)
+        except Exception:
+            pass
 
     printed_size = False
 
@@ -214,7 +230,7 @@ def main(ctx, config_path, ckpt_path, debug_run, resume_id):
     print("Warming beta_2 from", initial_beta_2, "to", final_beta_2)
 
     while state['epoch'] < config['training']['epochs']:
-        stats_hist = {'g_loss': [], 'd_loss': [], 'kl_loss': [], 'range_loss': []}
+        stats_hist = {'g_loss': [], 'd_loss': [], 'kl_loss': [], 'range_loss': [], 'r_loss': []}
         progress_bar = tqdm(train_iter, desc=f"Epoch {state['epoch']}", 
                           total=config['training']['epoch_steps'])
         
@@ -344,10 +360,17 @@ def main(ctx, config_path, ckpt_path, debug_run, resume_id):
             stats_hist['g_loss'].append(g_loss.item())
             stats_hist['kl_loss'].append(kl_loss.item())
             stats_hist['range_loss'].append(range_loss.item())
+            stats_hist['r_loss'].append((r_reg.item() / current_r_gamma) if current_r_gamma > 0 else 0)
             state['seen'] += batch_size
             state['step'] += 1
             
-            lr = lr_scheduler.get(state.seen)
+            lr_warmup = linear_warmup(
+                config['training'].get('lr_warmup_factor', 1.0), 
+                1.0, 
+                state['step'], 
+                config['training'].get('burnin_steps', 1)
+            )
+            lr = lr_scheduler.get(state.seen) * lr_warmup
             for g in g_optimizer.param_groups:
                 g['lr'] = lr
             for g in d_optimizer.param_groups:
@@ -384,6 +407,7 @@ def main(ctx, config_path, ckpt_path, debug_run, resume_id):
                 'train/d_loss': np.mean(stats_hist['d_loss']),
                 'train/g_loss': np.mean(stats_hist['g_loss']),
                 'train/kl_loss': np.mean(stats_hist['kl_loss']),
+                'train/r_loss': np.mean(stats_hist['r_loss']),
                 'epoch': state['epoch'],
                 'step': state['step'],
                 'seen': state['seen'],

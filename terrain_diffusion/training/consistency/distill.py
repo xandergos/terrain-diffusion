@@ -115,6 +115,16 @@ def distill(config_path, ckpt_path, debug_run, resume_id):
     if accelerator.is_main_process:
         if debug_run:
             config['wandb']['mode'] = 'disabled'
+        # Auto-resume W&B run from checkpoint metadata if available (unless explicitly provided)
+        if ckpt_path and not resume_id and not debug_run:
+            try:
+                with open(os.path.join(ckpt_path, 'wandb_run.json'), 'r') as f:
+                    run_meta = json.load(f)
+                if 'id' in run_meta and run_meta['id']:
+                    config['wandb']['id'] = run_meta['id']
+                    config['wandb']['resume'] = 'must'
+            except Exception:
+                pass
         if resume_id:
             config['wandb']['id'] = resume_id
             config['wandb']['resume'] = 'must'
@@ -152,6 +162,12 @@ def distill(config_path, ckpt_path, debug_run, resume_id):
         with open(os.path.join(base_folder_path + '_checkpoint', f'config.json'), 'w') as f:
             json.dump(config, f, indent=2)
         model.save_config(os.path.join(base_folder_path + '_checkpoint', f'model_config'))
+        # Persist W&B run id for seamless resumption
+        try:
+            with open(os.path.join(base_folder_path + '_checkpoint', 'wandb_run.json'), 'w') as f:
+                json.dump({'id': wandb.run.id if wandb.run else None}, f)
+        except Exception:
+            pass
 
     grad_norm = torch.tensor(0.0, device=accelerator.device)
     dataloader_iter = iter(dataloader)

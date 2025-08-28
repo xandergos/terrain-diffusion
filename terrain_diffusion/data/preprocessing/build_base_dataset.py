@@ -23,7 +23,7 @@ from terrain_diffusion.data.preprocessing.calculate_stds import calculate_stats_
 
 @click.command()
 @click.option('--highres-elevation-folder', type=str, required=True, help='Path to the folder containing high-resolution elevation files')
-@click.option('--lowres_elevation_file', type=str, required=True, help='Path to the file containing low-resolution elevation data')
+@click.option('--lowres-elevation-file', type=str, required=True, help='Path to the file containing low-resolution elevation data')
 @click.option('--highres-size', type=int, default=4096, help='Size of the high-resolution images')
 @click.option('--lowres-size', type=int, default=128, help='Size of the low-resolution images')
 @click.option('--lowres-sigma', type=float, default=5.0, help='Sigma for Gaussian smoothing of low-resolution images')
