@@ -1,1 +1,0 @@
-python3.11 ./terrain_diffusion/inference/evaluation/sweep_fid.py -c ./configs/sweeps/sr_fid.cfg
