@@ -1,4 +1,6 @@
-## Download `data`
+# Setup From Scratch
+
+### Download data
 
 #### 1. Download DEM data
 
@@ -19,6 +21,7 @@ Download the file [here](https://www.ngdc.noaa.gov/thredds/catalog/global/ETOPO2
 #### 5. Download WorldClim data
 
 Download `bio 10m`, `bio 30s`, and `elev 10m` [here](https://www.worldclim.org/data/worldclim21.html). Extract all into `data/global`.
+
 #### 6. Download Koppen-geiger data
 
 1. Go to https://www.gloh2o.org/koppen/
@@ -27,23 +30,25 @@ Download `bio 10m`, `bio 30s`, and `elev 10m` [here](https://www.worldclim.org/d
 4. Extra files can be discarded
 
 ### Create Base Dataset
-(Requires data to be downloaded and placed in data/ folder)
+
+##### Prerequisites: Requires data to be downloaded and placed in data/ folder
 
 ```./util_scripts/create_base_dataset.sh```
 
-
-## Train models from scratch
-
-
-### 1. Train GAN
+### Train GAN
 
 ##### Prerequisites: WorldClim data downloaded
 
 ```python terrain_diffusion train-gan --config ./configs/gan/gan.cfg```
 
-### 2. Train AutoEncoder
+### Train AutoEncoder
 
-##### Prerequisites: Base dataset created
+##### Prerequisites: Base dataset
 
 ```python terrain_diffusion train-ae --config ./configs/autoencoder/autoencoder_x8.yaml```
 
+### Create Encoded Dataset
+
+##### Prerequisites: Trained autoencoder + Base dataset
+
+```./util_scripts/create_encoded_dataset.sh```
