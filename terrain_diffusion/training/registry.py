@@ -3,7 +3,7 @@ from confection import registry
 from terrain_diffusion.training.datasets.datasets import *
 from terrain_diffusion.data.laplacian_encoder import *
 from terrain_diffusion.training.gan.discriminator import MPDiscriminator
-from terrain_diffusion.training.gan.discriminator_basic import PatchDiscriminator
+from terrain_diffusion.training.gan.discriminator_basic import PatchDiscriminator, ResNetDiscriminator
 from terrain_diffusion.training.gan.generator import MPGenerator
 from terrain_diffusion.training.loss import CosineLRScheduler, SqrtLRScheduler, ConstantLRScheduler
 from terrain_diffusion.inference.scheduler.dpmsolver import EDMDPMSolverMultistepScheduler
@@ -19,6 +19,7 @@ def build_registry():
     registry.model.register("generator", func=MPGenerator)
     registry.model.register("discriminator", func=MPDiscriminator)
     registry.model.register("discriminator_basic", func=PatchDiscriminator)
+    registry.model.register("discriminator_resnet", func=ResNetDiscriminator)
     
     registry.lr_sched = catalogue.create("confection", "lr_sched", entry_points=False)
     registry.lr_sched.register("sqrt", func=SqrtLRScheduler)

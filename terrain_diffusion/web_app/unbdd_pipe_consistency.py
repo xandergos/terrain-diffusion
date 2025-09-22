@@ -45,10 +45,10 @@ def create_unbounded_pipe(sigmas: list[int] = None, cond_input_scaling: float = 
         # Get the latent window and move to device for processing
         latent_window = latent_tensor.to(device)
         with torch.no_grad():
-            cond_result = gan.forward(latent_window)[:, :, 1:-1, 1:-1]
+            cond_result = gan.raw_forward(latent_window)[:, :, 1:-1, 1:-1]
             
-        # Pad cond_result with 5 additional zero channels
-        cond_result = torch.cat([cond_result, torch.zeros_like(cond_result[:, :1]).repeat(1, 5, 1, 1)], dim=1)
+        # Pad cond_result with 5 additional zero channels (For simple gan)
+        # cond_result = torch.cat([cond_result, torch.zeros_like(cond_result[:, :1]).repeat(1, 5, 1, 1)], dim=1)
         
         # Interpolate to window size
         cond_interpolated = torch.nn.functional.interpolate(cond_result, size=(cond_inputs_size, cond_inputs_size), mode='nearest')
@@ -56,7 +56,7 @@ def create_unbounded_pipe(sigmas: list[int] = None, cond_input_scaling: float = 
 
     def noise_generator(ctx):
         """Generate infinite noise tensor"""
-        return torch.randn(1, 5, 64, 64) * sigma_data  # Return on CPU
+        return torch.randn(1, 10, 64, 64) * sigma_data  # Return on CPU
 
     def process_model_step(ctx, x_t_tensor, cond_inputs_tensor, cnoise_val):
         """Process a single model step on infinite tensors"""
@@ -65,7 +65,7 @@ def create_unbounded_pipe(sigmas: list[int] = None, cond_input_scaling: float = 
         cond_window = cond_inputs_tensor.to(device)
         
         # Extract conditional features from the window
-        thresholded = (torch.amax(cond_window[5], dim=[-1, -2]) < -1).long()
+        thresholded = (torch.amax(cond_window[5], dim=[-1, -2]) < -3).long()
         
         weighted_cond_inputs = torch.sum(cond_window * torch.sigmoid(cond_window[5:]), dim=[-1, -2]) \
             / (torch.sum(torch.sigmoid(cond_window[5:]), dim=[-1, -2]) + 1e-8)
@@ -82,7 +82,14 @@ def create_unbounded_pipe(sigmas: list[int] = None, cond_input_scaling: float = 
         with torch.no_grad():
             model_output = model(x_t_window / sigma_data,
                                 noise_labels=cnoise_val.to(device).expand(x_t_window.shape[0]),
-                                conditional_inputs=[mean_elev.to(device).view(1).expand(x_t_window.shape[0])])
+                                conditional_inputs=[
+                                    mean_elev.to(device).view(1).expand(x_t_window.shape[0]),
+                                    mean_temp.to(device).view(1).expand(x_t_window.shape[0]),
+                                    std_temp.to(device).view(1).expand(x_t_window.shape[0]),
+                                    mean_prec.to(device).view(1).expand(x_t_window.shape[0]),
+                                    std_prec.to(device).view(1).expand(x_t_window.shape[0]),
+                                    all_water.to(device).view(1).expand(x_t_window.shape[0])
+                                    ])
         
         # Return on CPU
         model_output = model_output.cpu() * weights64
@@ -91,11 +98,11 @@ def create_unbounded_pipe(sigmas: list[int] = None, cond_input_scaling: float = 
 
     device = 'cuda'
     torch.no_grad().__enter__()
-    gan = get_model(MPGenerator, 'checkpoints/gan_simple/latest_checkpoint', sigma_rel=0.2, device=device)
+    gan = get_model(MPGenerator, 'checkpoints/gan/latest_checkpoint', sigma_rel=0.2, device=device)
     model = get_model(EDMUnet2D, 'checkpoints/consistency_base-192x3/latest_checkpoint', sigma_rel=0.05, device=device)
     autoencoder = EDMAutoencoder.from_pretrained('checkpoints/models/autoencoder').to(device)
 
-    dataset = H5LatentsDataset('dataset.h5', 64, [[0.1, 1.0]], [90], [1], eval_dataset=False,
+    dataset = H5LatentsDataset('data/dataset.h5', 64, [[0.1, 1.0]], [90], [1], eval_dataset=False,
                             latents_mean=[0, 0, 0, 0],
                             latents_std=[1, 1, 1, 1],
                             sigma_data=0.5,
@@ -128,9 +135,9 @@ def create_unbounded_pipe(sigmas: list[int] = None, cond_input_scaling: float = 
     # Initialize infinite prediction tensor
     pred_x0_infinite = tile_store.get_or_create(
         uuid.uuid4(),
-        shape=(1, 5, None, None),
-        f=lambda ctx: torch.zeros(1, 5, 64, 64) * sigma_data,  # Return on CPU
-        output_window=TensorWindow((1, 5, 64, 64))
+        shape=(1, 10, None, None),
+        f=lambda ctx: torch.zeros(1, 10, 64, 64) * sigma_data,  # Return on CPU
+        output_window=TensorWindow((1, 10, 64, 64))
     )
 
     # Process through diffusion steps
@@ -143,9 +150,9 @@ def create_unbounded_pipe(sigmas: list[int] = None, cond_input_scaling: float = 
         # Create noise for this step
         noise_infinite = tile_store.get_or_create(
             uuid.uuid4(),
-            shape=(1, 5, None, None),
+            shape=(1, 10, None, None),
             f=noise_generator,
-            output_window=TensorWindow((1, 5, 64, 64))
+            output_window=TensorWindow((1, 10, 64, 64))
         )
         
         # Create x_t = sin(t) * noise + cos(t) * pred_x0
@@ -154,11 +161,11 @@ def create_unbounded_pipe(sigmas: list[int] = None, cond_input_scaling: float = 
         
         x_t_infinite = tile_store.get_or_create(
             uuid.uuid4(),
-            shape=(1, 5, None, None),
+            shape=(1, 10, None, None),
             f=create_x_t,
-            output_window=TensorWindow((1, 5, 64, 64)),
+            output_window=TensorWindow((1, 10, 64, 64)),
             args=(noise_infinite, pred_x0_infinite),
-            args_windows=[TensorWindow((1, 5, 64, 64)), TensorWindow((1, 5, 64, 64))]
+            args_windows=[TensorWindow((1, 10, 64, 64)), TensorWindow((1, 10, 64, 64))]
         )
         
         # Mark noise_infinite for cleanup since it's only used by x_t_infinite
@@ -170,11 +177,11 @@ def create_unbounded_pipe(sigmas: list[int] = None, cond_input_scaling: float = 
         
         model_output_infinite = tile_store.get_or_create(
             uuid.uuid4(),
-            shape=(1, 6, None, None),
+            shape=(1, 11, None, None),
             f=model_step_wrapper,
-            output_window=TensorWindow((1, 6, 64, 64), stride=(1, 6, 32, 32)),
+            output_window=TensorWindow((1, 11, 64, 64), stride=(1, 11, 32, 32)),
             args=(x_t_infinite, cond_inputs_infinite),
-            args_windows=[TensorWindow((1, 5, 64, 64), stride=(1, 5, 32, 32)), TensorWindow((6, 8, 8), stride=(6, 4, 4), dimension_map=(1, 2, 3))]
+            args_windows=[TensorWindow((1, 10, 64, 64), stride=(1, 10, 32, 32)), TensorWindow((6, 8, 8), stride=(6, 4, 4), dimension_map=(1, 2, 3))]
         )
         
         # Mark x_t_infinite for cleanup since it's only used by model_output_infinite
@@ -182,11 +189,11 @@ def create_unbounded_pipe(sigmas: list[int] = None, cond_input_scaling: float = 
         
         model_output_infinite = tile_store.get_or_create(
             uuid.uuid4(),
-            shape=(1, 5, None, None),
+            shape=(1, 10, None, None),
             f=lambda ctx, x_t_tensor: x_t_tensor[:, :-1] / x_t_tensor[:, -1:],
-            output_window=TensorWindow((1, 5, 64, 64)),
+            output_window=TensorWindow((1, 10, 64, 64)),
             args=(model_output_infinite,),
-            args_windows=[TensorWindow((1, 6, 64, 64))]
+            args_windows=[TensorWindow((1, 11, 64, 64))]
         )
         
         # Update pred_x0 = cos(t) * x_t + sin(t) * model_output * sigma_data
@@ -195,11 +202,11 @@ def create_unbounded_pipe(sigmas: list[int] = None, cond_input_scaling: float = 
         
         new_pred_x0_infinite = tile_store.get_or_create(
             uuid.uuid4(),
-            shape=(1, 5, None, None),
+            shape=(1, 10, None, None),
             f=update_pred_x0,
-            output_window=TensorWindow((1, 5, 64, 64)),
+            output_window=TensorWindow((1, 10, 64, 64)),
             args=(x_t_infinite, model_output_infinite),
-            args_windows=[TensorWindow((1, 5, 64, 64)), TensorWindow((1, 5, 64, 64))]
+            args_windows=[TensorWindow((1, 10, 64, 64)), TensorWindow((1, 10, 64, 64))]
         )
         
         # Mark model_output_infinite for cleanup since it's only used by new_pred_x0_infinite
@@ -235,7 +242,7 @@ def create_unbounded_pipe(sigmas: list[int] = None, cond_input_scaling: float = 
         f=decode_samples,
         output_window=TensorWindow((1, 3, 512, 512), stride=(1, 3, 256, 256)),
         args=(pred_x0_infinite,),
-        args_windows=[TensorWindow((1, 5, 64, 64), stride=(1, 5, 32, 32))]
+        args_windows=[TensorWindow((1, 10, 64, 64), stride=(1, 10, 32, 32))]
     )
 
     mode = 'decoded'

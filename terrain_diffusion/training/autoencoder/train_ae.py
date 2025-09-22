@@ -463,6 +463,11 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
             cond_img = batch.get('cond_img')
             conditional_inputs = batch.get('cond_inputs')
             batch_size = images.shape[0]
+            
+            # New real images for discriminator
+            batch_real = next(train_iter)
+            real_images = batch_real['image']
+            real_batch_size = real_images.shape[0]
 
             # Train autoencoder (like generator in GAN training)
             with accelerator.accumulate(model):
@@ -531,6 +536,10 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
                         else:
                             sigmoided_decoded_x = decoded_x
                             
+                        if True:
+                            with torch.no_grad():
+                                real_pred = discriminator(real_images)
+                        
                         fake_pred = discriminator(sigmoided_decoded_x)
                         adv_loss = torch.nn.functional.softplus(real_pred.detach() - fake_pred).mean()
                         loss = loss + adv_loss * config['training']['discriminator_weight']

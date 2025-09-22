@@ -28,15 +28,15 @@ training:
       losses: ["bce"]
       weights: [1]
       task_weight: 0.2
-  encoder_only: true
+  encoder_only: false
   discriminator_weight: 1.0
-  r_gamma: 0.00
+  r_gamma: 0.005
   r_interval: 1
   disc_lr_mult: 1
   burnin_steps: 20480
   r_warmup_factor: 1
   lr_warmup_factor: 1
-  disc_lr_warmup_factor: 8
+  disc_lr_warmup_factor: 1
   sigmoid_channels: [1]
 
 evaluation:
@@ -81,20 +81,26 @@ model:
   conditional_inputs: []
   direct_skips: []
 
+#discriminator:
+#  "@model": discriminator
+#  in_channels: 2
+#  additional_vars: 0
+#  additional_vars_hidden: 0
+#  model_channels: 64
+#  channel_mults: [1, 2, 4, 4]
+#  layers_per_block: 2
+#  dropout: 0.0
+#  noise_level: 0.0
+
 discriminator:
-  "@model": discriminator
+  "@model": discriminator_basic
   in_channels: 2
-  additional_vars: 0
-  additional_vars_hidden: 0
   model_channels: 64
-  channel_mults: [1, 2, 4, 4]
-  layers_per_block: 2
-  dropout: 0.0
-  noise_level: 0.0
+  n_layers: 4
 
 lr_sched:
   "@lr_sched": "constant"
-  lr: 0.0005
+  lr: 0.00005
 
 train_dataset:
   "@dataset": "h5_autoencoder"
