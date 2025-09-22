@@ -222,7 +222,7 @@ class H5AutoencoderDataset(Dataset):
             res_group = f[str(resolution)]
             return residual * res_group.attrs['residual_std'] + res_group.attrs['residual_mean']
     
-    def denormalize_lowfreq(self, lowfreq, resolution):
+    def denormalize_lowfreq(self, lowfreq, resolution=None):
         LOWFREQ_MEAN = -31.4
         LOWFREQ_STD = 38.6
         return lowfreq * LOWFREQ_STD + LOWFREQ_MEAN
@@ -376,38 +376,13 @@ class H5DecoderTerrainDataset(Dataset):
                     data_watercover = torch.rot90(data_watercover, k=rotate_k, dims=[-2, -1])
             except KeyError:
                 data_watercover = torch.zeros((1, lh, lw))
-            
-            # Load landcover data
-            landcover_classes = [0, 20, 30, 40, 50, 60, 70, 80, 90, 100, 111, 112, 113, 114, 115, 116, 121, 122, 123, 124, 125, 126, 200]
-            if f"{group_path}/landcover" in f:
-                landcover_data = f[f"{group_path}/landcover"]
-                landcover_data = torch.from_numpy(landcover_data[li:li+lh, lj:lj+lw]).long()
-            else:
-                landcover_data = torch.full((lh, lw), 200, dtype=torch.long)
-            max_class = landcover_classes[-1]
-            lookup = torch.full((max_class + 1,), len(landcover_classes) - 1, dtype=torch.long)
-            for idx, class_val in enumerate(landcover_classes):
-                lookup[class_val] = idx
-            landcover_indices = lookup[landcover_data]
-            landcover_onehot = F.one_hot(landcover_indices, num_classes=len(landcover_classes)).float()
-            landcover_onehot = landcover_onehot.permute(2, 0, 1)  # [C, H, W] format
-            landcover_onehot = landcover_onehot / torch.sqrt(torch.mean(landcover_onehot, dim=0, keepdim=True)) * self.sigma_data
-            if flip:
-                landcover_onehot = torch.flip(landcover_onehot, dims=[-1])
-            if rotate_k != 0:
-                landcover_onehot = torch.rot90(landcover_onehot, k=rotate_k, dims=[-2, -1])
-            
                 
         image = torch.cat([
             data_residual,
-            data_watercover,
-            landcover_onehot
+            data_watercover
         ], dim=0)
         
-        cond_image = torch.cat([
-            F.interpolate(sampled_latent[None], size=(self.crop_size, self.crop_size), mode='nearest')[0],
-            F.interpolate(landcover_onehot[None, :, ::8, ::8], size=(self.crop_size, self.crop_size), mode='nearest')[0] / self.sigma_data
-        ], dim=0)
+        cond_image = F.interpolate(sampled_latent[None], size=(self.crop_size, self.crop_size), mode='nearest')[0]
         
         # Only include sampled_latent in img tensor instead of concatenating with other data
         if class_label is not None:
@@ -779,26 +754,6 @@ class H5LatentsDataset(Dataset):
             data_lowfreq = (data_lowfreq - LOWFREQ_MEAN) / LOWFREQ_STD * self.sigma_data
             lowfreq_mean = torch.mean(data_lowfreq) / self.sigma_data
             
-            # Load landcover data
-            landcover_classes = [0, 20, 30, 40, 50, 60, 70, 80, 90, 100, 111, 112, 113, 114, 115, 116, 121, 122, 123, 124, 125, 126, 200]
-            if f"{group_path}/landcover_mini" in f:
-                landcover_data = f[f"{group_path}/landcover_mini"]
-                landcover_data = torch.from_numpy(landcover_data[li:li+lh, lj:lj+lw]).long()
-            else:
-                landcover_data = torch.full((h, w), 200, dtype=torch.long)
-            max_class = landcover_classes[-1]
-            lookup = torch.full((max_class + 1,), len(landcover_classes) - 1, dtype=torch.long)
-            for idx, class_val in enumerate(landcover_classes):
-                lookup[class_val] = idx
-            landcover_indices = lookup[landcover_data]
-            landcover_onehot = F.one_hot(landcover_indices, num_classes=len(landcover_classes)).float()
-            landcover_onehot = landcover_onehot.permute(2, 0, 1)  # [C, H, W] format
-            landcover_onehot = landcover_onehot / torch.sqrt(torch.mean(landcover_onehot, dim=0, keepdim=True)) * self.sigma_data
-            if flip:
-                landcover_onehot = torch.flip(landcover_onehot, dims=[-1])
-            if rotate_k != 0:
-                landcover_onehot = torch.rot90(landcover_onehot, k=rotate_k, dims=[-2, -1])
-            
             # Load climate data
             # (0=temp, 3=temp seasonality, 11=precip, 14=precip seasonality)
             if f"{group_path}/climate" in f:
@@ -810,15 +765,15 @@ class H5LatentsDataset(Dataset):
                     climate_nanmean = torch.zeros(4)
                 else:
                     climate_nanmean = torch.nanmean(climate_data, dim=(-2, -1))
-                climate_data_mask = torch.stack([torch.isnan(climate_data).any(dim=0), ~torch.isnan(climate_data).any(dim=0)], dim=0).float() * np.sqrt(2) * self.sigma_data
+                climate_data_mask = torch.isnan(climate_data).any(dim=0).float().unsqueeze(0) * np.sqrt(2) * self.sigma_data
                 climate_data = torch.nan_to_num(climate_data, nan=0.0)
             else:
                 climate_data = torch.zeros(4, lh, lw)
-                climate_data_mask = torch.zeros(2, lh, lw)
+                climate_data_mask = torch.zeros(1, lh, lw)
                 climate_data_mask[0] = np.sqrt(2) * self.sigma_data
                 climate_nanmean = torch.zeros(4)
                 any_nan_climate = True
-                
+            
         image = torch.cat([
             sampled_latent,
             data_lowfreq,
@@ -843,7 +798,7 @@ class H5LatentsDataset(Dataset):
             res_group = f[str(resolution)]
             return residual * res_group.attrs['residual_std'] + res_group.attrs['residual_mean']
     
-    def denormalize_lowfreq(self, lowfreq, resolution):
+    def denormalize_lowfreq(self, lowfreq, resolution=None):
         LOWFREQ_MEAN = -31.4
         LOWFREQ_STD = 38.6
         return lowfreq * LOWFREQ_STD + LOWFREQ_MEAN
@@ -1022,7 +977,7 @@ class H5LatentsSimpleDataset(Dataset):
             res_group = f[str(resolution)]
             return residual * res_group.attrs['residual_std'] + res_group.attrs['residual_mean']
         
-    def denormalize_lowfreq(self, lowfreq, resolution):
+    def denormalize_lowfreq(self, lowfreq, resolution=None):
         LOWFREQ_MEAN = -31.4
         LOWFREQ_STD = 38.6
         return lowfreq * LOWFREQ_STD + LOWFREQ_MEAN
@@ -1216,7 +1171,7 @@ class H5DirectDataset(Dataset):
             res_group = f[str(resolution)]
             return residual * res_group.attrs['residual_std'] + res_group.attrs['residual_mean']
         
-    def denormalize_lowfreq(self, lowfreq, resolution):
+    def denormalize_lowfreq(self, lowfreq, resolution=None):
         LOWFREQ_MEAN = -31.4
         LOWFREQ_STD = 38.6
         return lowfreq * LOWFREQ_STD + LOWFREQ_MEAN

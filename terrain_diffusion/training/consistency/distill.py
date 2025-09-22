@@ -169,6 +169,9 @@ def distill(config_path, ckpt_path, debug_run, resume_id):
         except Exception:
             pass
 
+    # TEMP: log every step instead of every epoch. Set to False to revert.
+    TEMP_LOG_EVERY_STEP = False
+
     grad_norm = torch.tensor(0.0, device=accelerator.device)
     dataloader_iter = iter(dataloader)
     while state.epoch < config['training']['epochs']:
@@ -287,22 +290,36 @@ def distill(config_path, ckpt_path, debug_run, resume_id):
                     ema.update()
 
                 stats_hist['loss'].append(loss.item())
-                progress_bar.set_postfix({'loss': f"{np.mean(stats_hist['loss']):.4f}", 
+                progress_bar.set_postfix({'loss': f"{np.nanmean(stats_hist['loss']):.4f}", 
                                         "lr": lr,
                                         "grad_norm": grad_norm.item(),
                                         "max_f_theta_grad_norm": max_f_theta_grad_norm.item(),
                                         "max_g_norm": max_g_norm.item()})
                 progress_bar.update(1)
 
+                # TEMP: per-step logging
+                if accelerator.is_main_process and TEMP_LOG_EVERY_STEP:
+                    wandb.log({
+                        "loss": loss.item(),
+                        "lr": lr,
+                        "step": state.step,
+                        "epoch": state.epoch,
+                        "seen": state.seen,
+                        "grad_norm": grad_norm.item(),
+                        "max_f_theta_grad_norm": max_f_theta_grad_norm.item(),
+                        "max_g_norm": max_g_norm.item()
+                    }, step=state.step, commit=True)
+
         state.epoch += 1
         if accelerator.is_main_process:
-            wandb.log({
-                "loss": np.mean(stats_hist['loss']),
-                "lr": lr,
-                "step": state.step,
-                "epoch": state.epoch,
-                "seen": state.seen
-            }, step=state.epoch, commit=True)
+            if not TEMP_LOG_EVERY_STEP:
+                wandb.log({
+                    "loss": np.nanmean(stats_hist['loss']),
+                    "lr": lr,
+                    "step": state.step,
+                    "epoch": state.epoch,
+                    "seen": state.seen
+                }, step=state.epoch, commit=True)
             if state.epoch % config['logging']['temp_save_epochs'] == 0:
                 save_checkpoint(f"{config['logging']['save_dir']}/latest", overwrite=True)
             if state.epoch % config['logging']['save_epochs'] == 0:

@@ -1,5 +1,7 @@
 # Setup From Scratch
 
+All steps can be completed with 24GB of GPU RAM
+
 ### Download data
 
 #### 1. Download DEM data
@@ -37,18 +39,40 @@ Download `bio 10m`, `bio 30s`, and `elev 10m` [here](https://www.worldclim.org/d
 
 ### Train GAN
 
-##### Prerequisites: WorldClim data downloaded
+##### Prerequisites: WorldClim data downloaded, uses ~4GB GPU RAM
 
 ```python terrain_diffusion train-gan --config ./configs/gan/gan.cfg```
 
+Optional: Save disk space by deleting all checkpoints except `latest_checkpoint` in `checkpoints/gan`.
+
 ### Train AutoEncoder
 
-##### Prerequisites: Base dataset
+##### Prerequisites: Base dataset, 18GB GPU RAM
 
-```python terrain_diffusion train-ae --config ./configs/autoencoder/autoencoder_x8.yaml```
+```python terrain_diffusion train-ae --config ./configs/autoencoder/autoencoder_x8.cfg```
+
+Optional: Save disk space by deleting all checkpoints except `latest_checkpoint` in `checkpoints/autoencoder_x8`.
 
 ### Create Encoded Dataset
 
-##### Prerequisites: Trained autoencoder + Base dataset
+##### Prerequisites: Trained autoencoder + Base dataset. 8GB of GPU RAM
 
 ```./util_scripts/create_encoded_dataset.sh```
+
+### Train Diffusion Decoder
+
+Train main model:
+
+```python terrain_diffusion train --config ./configs/diffusion_decoder_64-3.cfg```
+
+Train guidance model:
+
+```python terrain_diffusion train --config ./configs/diffusion_decoder_32-3.cfg```
+
+Perform autoguidance sweep:
+
+```python ./terrain_diffusion/inference/evaluation/sweep_fid.py --config ./configs/sweeps/decoder_fid_64_32.cfg```
+
+Train consistency model:
+
+```python terrain_diffusion distill --config ./configs/diffusion_decoder/consistency/

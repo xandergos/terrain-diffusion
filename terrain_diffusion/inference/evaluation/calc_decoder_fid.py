@@ -8,10 +8,10 @@ This script provides functionality to:
 4. Support flexible evaluation parameters like guidance scale, sampling steps, and batch processing
 
 Typical Use:
-python evaluate_sr_fid.py --main-config path/to/main_config.cfg \
+python calc_decoder_fid.py --main-config path/to/main_config.cfg \
                            --guide-config path/to/guide_config.cfg \
                            --guidance-scale 1.0 \
-                           --max-samples 32768
+                           --num-samples 32768
 """
 
 
@@ -22,84 +22,25 @@ import numpy as np
 from tqdm import tqdm
 from confection import Config, registry
 from ema_pytorch import PostHocEMA
-from torch.utils.data import DataLoader
 from torchmetrics.image.fid import FrechetInceptionDistance
-from terrain_diffusion.data.laplacian_encoder import laplacian_decode, laplacian_denoise
-from terrain_diffusion.inference.evaluation.utils import get_dataloader
+from terrain_diffusion.inference.evaluation.utils import *
 from terrain_diffusion.training.datasets.datasets import LongDataset
 from terrain_diffusion.training.registry import build_registry
-from terrain_diffusion.training.unet import EDMAutoencoder
 from terrain_diffusion.training.utils import recursive_to
 from PIL import Image
 
-
-def create_models(main_resolved, guide_resolved=None, main_sigma_rel=0.05, guide_sigma_rel=0.05, 
-                  guide_ema_step=None, save_models=False):
-    """
-    Create and initialize the main and guidance models from config files.
-    
-    Args:
-        main_resolved (str): Path to main model config file
-        guide_resolved (str, optional): Path to guidance model config file. Defaults to None.
-        main_sigma_rel (float, optional): EMA sigma_rel for main model. Defaults to 0.05.
-        guide_sigma_rel (float, optional): EMA sigma_rel for guidance model. Defaults to 0.05.
-        guide_ema_step (int, optional): EMA step for guidance model. Defaults to None.
-        save_models (bool, optional): Save the models after loading. Defaults to False.
-    
-    Returns:
-        tuple: (main_model, guide_model)
-    """
-    # Initialize models
-    model_m = main_resolved['model']
-    model_g = guide_resolved['model'] if guide_resolved else None
-    
-    # Apply EMA for main model
-    phema_m_dir = f"{main_resolved['logging']['save_dir']}/phema"
-    assert os.path.exists(phema_m_dir), f"Error: The phema directory {phema_m_dir} does not exist."
-    main_resolved['ema']['checkpoint_folder'] = phema_m_dir
-    ema_m = PostHocEMA(model_m, **main_resolved['ema'])
-    ema_m.load_state_dict(torch.load(f"{main_resolved['logging']['save_dir']}/latest_checkpoint/phema.pt", weights_only=True))
-    ema_m.synthesize_ema_model(sigma_rel=main_sigma_rel).copy_params_from_ema_to_model()
-    
-    # Apply EMA for guidance model if it exists
-    if guide_resolved:
-        phema_g_dir = f"{guide_resolved['logging']['save_dir']}/phema"
-        assert os.path.exists(phema_g_dir), f"Error: The phema directory {phema_g_dir} does not exist."
-        guide_resolved['ema']['checkpoint_folder'] = phema_g_dir
-        ema_g = PostHocEMA(model_g, **guide_resolved['ema'])
-        ema_g.load_state_dict(torch.load(f"{guide_resolved['logging']['save_dir']}/latest_checkpoint/phema.pt", weights_only=True))
-        ema_g.synthesize_ema_model(sigma_rel=guide_sigma_rel, step=guide_ema_step).copy_params_from_ema_to_model()
-    
-    if save_models:
-        checkpoint_path = main_resolved['logging']['save_dir']
-        save_path = os.path.join(checkpoint_path, 'saved_model')
-        model_m.save_pretrained(save_path)
-        print(f'Saved main model to {save_path}.')
-
-        if guide_resolved:
-            checkpoint_path = guide_resolved['logging']['save_dir']
-            save_path = os.path.join(checkpoint_path, 'saved_model')
-            model_g.save_pretrained(save_path)
-            print(f'Saved guidance model to {save_path}.')
-    
-    # Move models to device and compile
-    model_m = torch.compile(model_m)
-    if model_g:
-        model_g = torch.compile(model_g)
-    
-    return model_m, model_g
-
-def evaluate_models_fid(model_m, 
-                        model_g, 
-                        model_ae,
-                        scheduler, 
-                        dataloader, 
-                        num_samples=2048,
-                        guidance_scale=1.0, 
-                        scheduler_steps=15, 
-                        save_samples_dir=None, 
-                        log_samples=None, 
-                        dtype=torch.float32):
+def calc_decoder_fid(model_m, 
+                     model_g, 
+                     scheduler, 
+                     dataloader, 
+                     num_samples=2048,
+                     guidance_scale=1.0, 
+                     scheduler_steps=15, 
+                     save_samples_dir=None, 
+                     save_n_samples=100,
+                     log_samples=None, 
+                     dtype=torch.float32,
+                     sweep_config=None):
     """
     Evaluate models using Fréchet Inception Distance (FID).
     
@@ -108,12 +49,12 @@ def evaluate_models_fid(model_m,
         model_g: Guidance model (can be None)
         scheduler: Diffusion scheduler
         dataloader: Data loader for validation dataset
-        guidance_scale (float, optional): Scale for guidance. Defaults to 1.0.
         num_samples (int, optional): Maximum number of samples to evaluate. Defaults to 2048 (minimum).
-        batch_size (int, optional): Batch size for evaluation. Defaults to 64.
-        scheduler_steps (int, optional): Number of steps for scheduler. Defaults to 32.
-        log_samples (int, optional): Number of samples between logging (if enabled). Defaults to num_samples.
+        guidance_scale (float, optional): Scale for guidance. Defaults to 1.0.
+        scheduler_steps (int, optional): Number of steps for scheduler. Defaults to 15.
         save_samples_dir (str, optional): Directory to save generated samples. Defaults to None.
+        save_n_samples (int, optional): Number of samples to save (default: 100).
+        log_samples (int, optional): Number of samples between logging (if enabled). Defaults to num_samples.
         dtype (torch.dtype, optional): Data type for inputs. Defaults to torch.float32.
     Returns:
         float: Final FID score
@@ -153,10 +94,7 @@ def evaluate_models_fid(model_m,
                 cnoise = scheduler.trigflow_precondition_noise(sigma.view(-1).expand(samples.shape[0]))
                 
                 # Get model predictions
-                if cond_img:
-                    x = torch.cat([scaled_input, cond_img], dim=1)
-                else:
-                    x = scaled_input
+                x = torch.cat([scaled_input, cond_img], dim=1)
                 with torch.autocast(device_type="cuda", dtype=dtype):
                     if not model_g or guidance_scale == 1.0:
                         model_output = model_m(x, noise_labels=cnoise, conditional_inputs=cond_inputs)
@@ -167,28 +105,15 @@ def evaluate_models_fid(model_m,
                 
                 samples = scheduler.step(model_output, t, samples).prev_sample
             
+            # Only evaluate first channel
+            samples = samples[:, :1]
+
             # Process and update FID metrics
-            def decode(samples):
-                samples = samples * 2
-                latent = samples[:, :4]
-                lowfreq = samples[:, 4:5]
-                decoded = model_ae.decode(latent)
-                residual, watercover = decoded[:, :1], decoded[:, 1:2]
-                watercover = torch.sigmoid(watercover)
-                residual = dataloader.dataset.base_dataset.denormalize_residual(residual, 90)
-                lowfreq = dataloader.dataset.base_dataset.denormalize_lowfreq(lowfreq, 90)
-                residual, lowfreq = laplacian_denoise(residual, lowfreq, 5.0)
-                decoded_terrain = laplacian_decode(residual, lowfreq)
-                return decoded_terrain
-            
-            # Process and update FID metrics
-            real_samples = decode(batch['image'])
-            samples = decode(samples)
-            
+            real_samples = batch['image'][:, :1]
             real_min = torch.amin(real_samples, dim=(1, 2, 3), keepdim=True)
             real_max = torch.amax(real_samples, dim=(1, 2, 3), keepdim=True)
             
-            value_range = torch.maximum(real_max - real_min, torch.tensor(0.1))
+            value_range = torch.maximum(real_max - real_min, torch.tensor(1.0))
             value_mid = (real_min + real_max) / 2
             
             # Normalize and process samples
@@ -213,6 +138,8 @@ def evaluate_models_fid(model_m,
             if save_samples_dir is not None:
                 os.makedirs(save_samples_dir, exist_ok=True)
                 for i, (sample, real_sample) in enumerate(zip(samples_norm, real_norm)):
+                    if samples_generated + i >= save_n_samples:
+                        break
                     fake_filename = os.path.join(save_samples_dir, f'{samples_generated + i:06d}_fake.png')
                     real_filename = os.path.join(save_samples_dir, f'{samples_generated + i:06d}_real.png')
                     
@@ -241,21 +168,22 @@ def evaluate_models_fid(model_m,
 @click.option("--scheduler-steps", type=int, default=15, help="Number of steps for scheduler (default: 15)")
 @click.option("--log-samples", type=int, default=None, help="Number of samples to generate between logs (Default: num_samples)")
 @click.option("--save-samples-dir", type=click.Path(file_okay=False, writable=True), help="Directory to save generated samples (default: None)", default=None)
+@click.option("--save-n-samples", type=int, default=100, help="Number of samples to save (default: 100)")
 @click.option("--save-models", is_flag=True, help="Save models to disk (default: False)", default=False)
 @click.option("--device", type=str, default='cuda', help="Device to run evaluation on (default: 'cuda')")
 @click.option("--dtype", type=str, default='float32', help="Data type for inputs (default: 'float32')")
-def evaluate_sr_fid_cli(main_config, 
+def calc_decoder_fid_cli(main_config, 
                         guide_config, 
                         main_sigma_rel, 
                         guide_sigma_rel, 
                         guide_ema_step, 
                         guidance_scale, 
-                        ae_path,
                         num_samples, 
                         batch_size, 
                         scheduler_steps, 
                         log_samples, 
                         save_samples_dir, 
+                        save_n_samples,
                         save_models, 
                         device, 
                         dtype):
@@ -279,23 +207,19 @@ def evaluate_sr_fid_cli(main_config,
         
     scheduler = main_resolved['scheduler']
     
-    ae = EDMAutoencoder.from_pretrained('checkpoints/models/autoencoder').to(device)
-    
-    evaluate_models_fid(
+    calc_decoder_fid(
         model_m, 
         model_g, 
-        ae,
         scheduler, 
         dataloader, 
         num_samples, 
         guidance_scale, 
-        batch_size, 
         scheduler_steps, 
         save_samples_dir, 
+        save_n_samples,
         log_samples, 
-        {'float16': torch.float16, 'bfloat16': torch.bfloat16, 'float32': torch.float32}[dtype],
-        enable_logging=True)
+        {'float16': torch.float16, 'bfloat16': torch.bfloat16, 'float32': torch.float32}[dtype])
 
 
 if __name__ == "__main__":
-    evaluate_sr_fid_cli()
+    calc_decoder_fid_cli()

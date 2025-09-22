@@ -248,3 +248,4 @@ fabric.properties
 experiments/
 
 data/
+tmp/

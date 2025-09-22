@@ -47,14 +47,14 @@ class MPDiscriminator(nn.Module):
                                              out_channels, 
                                              emb_channels=0,
                                              mode='enc',
-                                             activation='leaky_relu',
+                                             activation='silu',
                                              resample_mode='keep'))
             
             self.blocks.append(UNetBlock(cur_channels if layers_per_block == 1 else out_channels, 
                                          out_channels, 
                                          emb_channels=0,
                                          mode='enc',
-                                         activation='leaky_relu',
+                                         activation='silu',
                                          resample_mode='down' if k != len(channel_mults) - 1 else 'keep'))
             
             cur_channels = out_channels
@@ -72,8 +72,8 @@ class MPDiscriminator(nn.Module):
         ) if additional_vars > 0 else None
         
         # Final classification layer
-        final_input_size = cur_channels + (16 if additional_vars > 0 else 0)
-        self.final_conv = MPConv(final_input_size, 1, kernel=[])  # 1x1 conv for final output
+        final_input_size = cur_channels # + (16 if additional_vars > 0 else 0)
+        self.final_conv = MPConv(final_input_size, 1, kernel=[1, 1])  # 1x1 conv for final output
         self.gain = nn.Parameter(torch.ones([]))
 
     def forward(self, x, additional_vars=None):
@@ -89,16 +89,19 @@ class MPDiscriminator(nn.Module):
         for block in self.blocks:
             x = block(x, emb=None)
         
+        # Final classification
+        x = self.final_conv(x, gain=self.gain)
+        
         # Global average pooling
         x = self.global_pool(x).squeeze(-1).squeeze(-1)
         
         # Process additional variables if provided
         if self.additional_vars_head is not None and additional_vars is not None:
+            assert False # Not supported rn
             additional_features = self.additional_vars_head(additional_vars)
             x = torch.cat([x, additional_features], dim=1)
-        
-        # Final classification
-        return self.final_conv(x, gain=self.gain)
+            
+        return x
 
     def norm_weights(self):
         """Normalize all the weights in the model"""

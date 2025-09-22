@@ -2,7 +2,6 @@ from contextlib import contextmanager
 import json
 import click
 from datetime import datetime
-import hamiltorch.samplers
 import numpy as np
 import os
 import torch

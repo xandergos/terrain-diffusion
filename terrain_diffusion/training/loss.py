@@ -34,3 +34,10 @@ class CosineLRScheduler:
         if self.warmup_nimg > 0:
             lr *= min(nimg / self.warmup_nimg, 1)
         return lr
+
+class ConstantLRScheduler:
+    def __init__(self, lr):
+        self.lr = lr
+
+    def get(self, nimg):
+        return self.lr
