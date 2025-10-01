@@ -233,14 +233,19 @@ def create_unbounded_pipe(sigmas: list[int] = None, cond_input_scaling: float = 
         lowfreq = dataset.denormalize_lowfreq(lowfreq, 90)
         residual, lowfreq = laplacian_denoise(residual, lowfreq, 5.0)
         decoded_terrain = laplacian_decode(residual, lowfreq)
-        decoded_terrain = torch.cat([decoded_terrain.cpu() * weights512, watercover.cpu() * weights512, weights512], dim=1)
+        
+        climate = samples[:, 5:9]
+        climate = torch.nn.functional.interpolate(climate, size=decoded_terrain.shape[-2:], mode='nearest').cpu()
+        climate = dataset.denormalize_climate(climate, 90)
+        
+        decoded_terrain = torch.cat([decoded_terrain.cpu() * weights512, watercover.cpu() * weights512, climate * weights512, weights512], dim=1)
         return decoded_terrain
 
     decoded_terrain_infinite = tile_store.get_or_create(
         uuid.uuid4(),
-        shape=(1, 3, None, None),
+        shape=(1, 7, None, None),
         f=decode_samples,
-        output_window=TensorWindow((1, 3, 512, 512), stride=(1, 3, 256, 256)),
+        output_window=TensorWindow((1, 7, 512, 512), stride=(1, 7, 256, 256)),
         args=(pred_x0_infinite,),
         args_windows=[TensorWindow((1, 10, 64, 64), stride=(1, 10, 32, 32))]
     )
@@ -249,11 +254,11 @@ def create_unbounded_pipe(sigmas: list[int] = None, cond_input_scaling: float = 
     if mode == 'decoded':
         final_terrain_infinite = tile_store.get_or_create(
             uuid.uuid4(),
-            shape=(2, None, None),
-            f=lambda ctx, pred_tensor: torch.squeeze(pred_tensor[:, 0:2] / pred_tensor[:, -1:], dim=0),
-            output_window=TensorWindow((2, 512, 512), stride=(2, 512, 512)),
+            shape=(6, None, None),
+            f=lambda ctx, pred_tensor: torch.squeeze(pred_tensor[:, :-1] / pred_tensor[:, -1:], dim=0),
+            output_window=TensorWindow((6, 512, 512), stride=(6, 512, 512)),
             args=(decoded_terrain_infinite,),
-            args_windows=[TensorWindow((1, 3, 512, 512), stride=(1, 3, 512, 512), dimension_map=(None, 0, 1, 2))]
+            args_windows=[TensorWindow((1, 7, 512, 512), stride=(1, 7, 512, 512), dimension_map=(None, 0, 1, 2))]
         )
     elif mode == 'lowres':
         def decode_lowres(ctx, pred_tensor):

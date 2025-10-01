@@ -793,6 +793,12 @@ class H5LatentsDataset(Dataset):
             
         return {'image': image.float(), 'cond_inputs': cond_inputs, 'path': group_path}
 
+    def denormalize_climate(self, climate, resolution):
+        """Denormalize climate data to original scale. Climate data should have shape [B, 4, H, W]"""
+        with h5py.File(self.h5_file, 'r') as f:
+            res_group = f[str(resolution)]
+            return climate * res_group.attrs['climate_std'][None, [0, 3, 11, 14], None, None] + res_group.attrs['climate_mean'][None, [0, 3, 11, 14], None, None]
+
     def denormalize_residual(self, residual, resolution):
         with h5py.File(self.h5_file, 'r') as f:
             res_group = f[str(resolution)]

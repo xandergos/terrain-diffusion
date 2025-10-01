@@ -15,12 +15,155 @@ app = Flask(__name__)
 
 # Initialize the infinite terrain (this takes time on first load)
 print("Loading infinite terrain generator...")
-terrain = create_unbounded_pipe(sigmas=[80, 5], cond_input_scaling=1/8) # Shape = (Infinite, Infinite), accessed as terrain[x1:x2, y1:y2]
+terrain = create_unbounded_pipe(sigmas=[80, 5], cond_input_scaling=1/16) # Shape = (Infinite, Infinite), accessed as terrain[x1:x2, y1:y2]
 print("Terrain loaded!")
 
 def signed_sqrt_to_elevation(values):
     """Convert signed sqrt values back to elevation in meters"""
     return np.sign(values) * values * values
+
+def temperature_to_color(temperature_data, elevation_data, water_data=None):
+    """Map temperature data as overlay over terrain.
+    
+    Temperature is already in Celsius.
+    Creates a semi-transparent overlay with cold (blue) to hot (red) gradient
+    """
+    h, w = temperature_data.shape
+    
+    # First, get the base terrain image
+    terrain_image = elevation_to_color(elevation_data, water_data)
+    
+    # Temperature is already in Celsius
+    temp_celsius = temperature_data
+    
+    # Get the actual temperature range from the data for adaptive scaling
+    temp_min = np.min(temp_celsius)
+    temp_max = np.max(temp_celsius)
+    
+    # Expand range slightly for better visualization
+    temp_range = temp_max - temp_min
+    if temp_range > 0:
+        temp_norm = (temp_celsius - temp_min) / temp_range
+    else:
+        temp_norm = np.zeros_like(temp_celsius)
+    
+    temp_norm = np.clip(temp_norm, 0, 1)
+    
+    # Create temperature overlay colors
+    overlay_image = np.zeros((h, w, 3), dtype=np.uint8)
+    
+    # Create color gradient: blue (cold) to red (hot)
+    # Blue for cold temperatures
+    blue_component = (1 - temp_norm) * 255
+    # Red for hot temperatures  
+    red_component = temp_norm * 255
+    # Green component peaks in the middle
+    green_component = (1 - np.abs(temp_norm - 0.5) * 2) * 255
+    
+    overlay_image[:, :, 0] = red_component.astype(np.uint8)
+    overlay_image[:, :, 1] = green_component.astype(np.uint8)
+    overlay_image[:, :, 2] = blue_component.astype(np.uint8)
+    
+    # Blend the overlay with the terrain (60% terrain, 40% temperature overlay)
+    alpha = 0.4  # Overlay strength
+    blended_image = (
+        terrain_image.astype(np.float32) * (1 - alpha) + 
+        overlay_image.astype(np.float32) * alpha
+    ).astype(np.uint8)
+    
+    return blended_image
+
+def precipitation_to_color(precipitation_data, elevation_data, water_data=None):
+    """Map precipitation data as overlay over terrain.
+    
+    Precipitation is in mm/year.
+    Creates a semi-transparent overlay with dry (brown/yellow) to wet (blue/green) gradient
+    """
+    h, w = precipitation_data.shape
+    
+    # First, get the base terrain image
+    terrain_image = elevation_to_color(elevation_data, water_data)
+    
+    # Precipitation is already in mm/year, ensure non-negative
+    precip_mm_year = np.clip(precipitation_data, 0, None)
+    
+    # Normalize using the actual data range for adaptive scaling
+    precip_max = np.max(precip_mm_year)
+    if precip_max > 0:
+        precip_norm = precip_mm_year / precip_max
+    else:
+        precip_norm = np.zeros_like(precip_mm_year)
+    
+    # Create precipitation overlay colors
+    overlay_image = np.zeros((h, w, 3), dtype=np.uint8)
+    
+    # Create color gradient: brown/yellow (dry) to blue/green (wet)
+    # Dry areas: brown/yellow
+    dry_color = np.array([139, 115, 85])  # Brown
+    # Wet areas: blue/green
+    wet_color = np.array([65, 105, 225])  # Royal blue
+    
+    # Interpolate between dry and wet colors
+    for i in range(3):
+        overlay_image[:, :, i] = (
+            dry_color[i] * (1 - precip_norm) + wet_color[i] * precip_norm
+        ).astype(np.uint8)
+    
+    # Blend the overlay with the terrain (65% terrain, 35% precipitation overlay)
+    alpha = 0.35  # Overlay strength
+    blended_image = (
+        terrain_image.astype(np.float32) * (1 - alpha) + 
+        overlay_image.astype(np.float32) * alpha
+    ).astype(np.uint8)
+    
+    return blended_image
+
+def variation_to_color(variation_data, elevation_data, water_data=None):
+    """Map variation data (standard deviation) as overlay over terrain.
+    
+    Variation represents standard deviation.
+    Creates a semi-transparent overlay with low (transparent) to high (bright) variation gradient
+    """
+    h, w = variation_data.shape
+    
+    # First, get the base terrain image
+    terrain_image = elevation_to_color(elevation_data, water_data)
+    
+    # Standard deviation is already in appropriate units, ensure non-negative
+    std_dev = np.clip(variation_data, 0, None)
+    
+    # Normalize using the actual data range for adaptive scaling
+    std_max = np.max(std_dev)
+    if std_max > 0:
+        var_norm = std_dev / std_max
+    else:
+        var_norm = np.zeros_like(std_dev)
+    
+    # Create variation overlay colors
+    overlay_image = np.zeros((h, w, 3), dtype=np.uint8)
+    
+    # Create color gradient: transparent (low variation) to bright (high variation)
+    # Low variation: use terrain color (will blend to show terrain)
+    # High variation: bright purple/magenta
+    high_var_color = np.array([255, 100, 255])  # Bright magenta
+    
+    # For variation overlay, we use variable alpha based on variation intensity
+    # Low variation areas will show more terrain, high variation areas will show more overlay
+    for i in range(3):
+        overlay_image[:, :, i] = high_var_color[i]
+    
+    # Variable alpha blending: low variation = more terrain, high variation = more overlay
+    alpha = var_norm * 0.5  # Maximum 50% overlay strength
+    
+    # Blend the overlay with the terrain using variable alpha
+    blended_image = np.zeros_like(terrain_image)
+    for i in range(3):
+        blended_image[:, :, i] = (
+            terrain_image[:, :, i].astype(np.float32) * (1 - alpha) + 
+            overlay_image[:, :, i].astype(np.float32) * alpha
+        ).astype(np.uint8)
+    
+    return blended_image
 
 def elevation_to_color(elevation_data, water_data=None):
     """Map elevation (m) → RGB using adaptive elevation scale.
@@ -99,6 +242,7 @@ def get_terrain():
         window_width = round(float(request.args.get('window_width', 1920)))
         window_height = round(float(request.args.get('window_height', 1080)))
         scale = float(request.args.get('scale', 1.0))
+        channel = request.args.get('channel', 'terrain')
         
         # Calculate terrain dimensions based on window aspect ratio
         # Long side should be 2048 pixels, scaled by the scale factor
@@ -119,18 +263,62 @@ def get_terrain():
         height = min(max(height, 64), 10240)
         
         # Extract terrain data - the terrain is accessed as terrain[y1:y2, x1:x2]
-        print(f"Generating terrain for region: x={x}, y={y}, width={width}, height={height}, scale={scale}")
+        print(f"Generating terrain for region: x={x}, y={y}, width={width}, height={height}, scale={scale}, channel={channel}")
         terrain_data = terrain[:, y:y+height, x:x+width].cpu().numpy()
         
-        # Convert signed sqrt values to actual elevation
-        elevation_data = signed_sqrt_to_elevation(terrain_data[0])
-        if terrain_data.shape[0] == 2:
-            water_data = terrain_data[1]
+        # Process data based on selected channel
+        if channel == 'terrain':
+            # Convert signed sqrt values to actual elevation
+            elevation_data = signed_sqrt_to_elevation(terrain_data[0])
+            water_data = terrain_data[1] if terrain_data.shape[0] > 1 else None
+            rgb_image = elevation_to_color(elevation_data, water_data)
+            data_for_stats = elevation_data
+            stats_label = 'elevation'
+            stats_unit = 'm'
+        elif channel == 'temperature':
+            # Mean temperature (channel 2) - already in Celsius
+            temperature_data = terrain_data[2]
+            elevation_data = signed_sqrt_to_elevation(terrain_data[0])
+            water_data = terrain_data[1] if terrain_data.shape[0] > 1 else None
+            rgb_image = temperature_to_color(temperature_data, elevation_data, water_data)
+            data_for_stats = temperature_data  # Already in Celsius
+            stats_label = 'temperature'
+            stats_unit = '°C'
+        elif channel == 'temperature_var':
+            # Temperature variation (channel 3) - standard deviation in °C (multiplied by 100)
+            temp_var_data = terrain_data[3] / 100.0  # Convert back to actual °C
+            elevation_data = signed_sqrt_to_elevation(terrain_data[0])
+            water_data = terrain_data[1] if terrain_data.shape[0] > 1 else None
+            rgb_image = variation_to_color(temp_var_data, elevation_data, water_data)
+            data_for_stats = temp_var_data  # Now in actual °C
+            stats_label = 'temperature_variation'
+            stats_unit = '°C'
+        elif channel == 'precipitation':
+            # Mean precipitation (channel 4) - already in mm/year
+            precipitation_data = terrain_data[4]
+            elevation_data = signed_sqrt_to_elevation(terrain_data[0])
+            water_data = terrain_data[1] if terrain_data.shape[0] > 1 else None
+            rgb_image = precipitation_to_color(precipitation_data, elevation_data, water_data)
+            data_for_stats = precipitation_data
+            stats_label = 'precipitation'
+            stats_unit = 'mm/year'
+        elif channel == 'precipitation_var':
+            # Precipitation variation (channel 5) - standard deviation in mm/year
+            precip_var_data = terrain_data[5]
+            elevation_data = signed_sqrt_to_elevation(terrain_data[0])
+            water_data = terrain_data[1] if terrain_data.shape[0] > 1 else None
+            rgb_image = variation_to_color(precip_var_data, elevation_data, water_data)
+            data_for_stats = precip_var_data
+            stats_label = 'precipitation_variation'
+            stats_unit = 'mm/year'
         else:
-            water_data = None
-        
-        # Create colored image
-        rgb_image = elevation_to_color(elevation_data, water_data)
+            # Default to terrain
+            elevation_data = signed_sqrt_to_elevation(terrain_data[0])
+            water_data = terrain_data[1] if terrain_data.shape[0] > 1 else None
+            rgb_image = elevation_to_color(elevation_data, water_data)
+            data_for_stats = elevation_data
+            stats_label = 'elevation'
+            stats_unit = 'm'
         
         # Convert to PIL Image and then to base64
         pil_image = Image.fromarray(rgb_image)
@@ -139,18 +327,21 @@ def get_terrain():
         buffer.seek(0)
         image_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
         
-        # Also send elevation statistics
-        min_elevation = float(np.min(elevation_data))
-        max_elevation = float(np.max(elevation_data))
-        mean_elevation = float(np.mean(elevation_data))
+        # Calculate statistics for the selected data
+        min_value = float(np.min(data_for_stats))
+        max_value = float(np.max(data_for_stats))
+        mean_value = float(np.mean(data_for_stats))
         
         return jsonify({
             'image': image_base64,
-            'elevation_data': elevation_data.tolist(),
+            'data': data_for_stats.tolist(),
             'stats': {
-                'min_elevation': min_elevation,
-                'max_elevation': max_elevation,
-                'mean_elevation': mean_elevation,
+                'min_value': min_value,
+                'max_value': max_value,
+                'mean_value': mean_value,
+                'stats_label': stats_label,
+                'stats_unit': stats_unit,
+                'channel': channel,
                 'width': width,
                 'height': height,
                 'x': x,

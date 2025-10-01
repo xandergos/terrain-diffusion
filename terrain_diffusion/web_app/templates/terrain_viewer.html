@@ -57,7 +57,7 @@
             color: #cccccc;
         }
         
-        input, button {
+        input, button, select {
             padding: 8px 12px;
             border: 1px solid #555;
             background: #3a3a3a;
@@ -66,7 +66,7 @@
             font-size: 14px;
         }
         
-        input:focus {
+        input:focus, select:focus {
             outline: none;
             border-color: #00ff88;
         }
@@ -279,6 +279,16 @@
                     <label>Scale:</label>
                     <input type="number" id="scaleFactor" value="1.0" min="0.1" max="5.0" step="0.1">
                 </div>
+                <div class="control-group">
+                    <label>View:</label>
+                    <select id="channelSelector">
+                        <option value="terrain">Terrain</option>
+                        <option value="temperature">Mean Temperature</option>
+                        <option value="temperature_var">Temperature Variation</option>
+                        <option value="precipitation">Mean Precipitation</option>
+                        <option value="precipitation_var">Precipitation Variation</option>
+                    </select>
+                </div>
                 <button id="loadBtn">Load Terrain</button>
                 <button id="centerBtn">Center (0,0)</button>
                 
@@ -307,17 +317,17 @@
             </div>
             
             <div class="info-panel">
-                <h3>📊 Terrain Stats</h3>
+                <h3 id="statsTitle">📊 Terrain Stats</h3>
                 <div class="info-item">
-                    <span class="label">Min Elevation:</span>
+                    <span class="label" id="minLabel">Min Elevation:</span>
                     <span class="value" id="minElev">-</span>
                 </div>
                 <div class="info-item">
-                    <span class="label">Max Elevation:</span>
+                    <span class="label" id="maxLabel">Max Elevation:</span>
                     <span class="value" id="maxElev">-</span>
                 </div>
                 <div class="info-item">
-                    <span class="label">Mean Elevation:</span>
+                    <span class="label" id="meanLabel">Mean Elevation:</span>
                     <span class="value" id="meanElev">-</span>
                 </div>
                 <div class="info-item">
@@ -346,6 +356,7 @@
                 this.currentX = 0;
                 this.currentY = 0;
                 this.scaleFactor = 1.0;
+                this.selectedChannel = 'terrain';
                 this.isLoading = false;
                 this.isDragging = false;
                 this.dragStartX = 0;
@@ -371,6 +382,7 @@
                 this.posXInput = document.getElementById('posX');
                 this.posYInput = document.getElementById('posY');
                 this.scaleFactorInput = document.getElementById('scaleFactor');
+                this.channelSelector = document.getElementById('channelSelector');
                 this.loadBtn = document.getElementById('loadBtn');
                 this.centerBtn = document.getElementById('centerBtn');
                 this.coordinates = document.getElementById('coordinates');
@@ -385,6 +397,10 @@
                 this.corner1Marker = document.getElementById('corner1Marker');
                 this.corner2Marker = document.getElementById('corner2Marker');
                 
+                this.statsTitle = document.getElementById('statsTitle');
+                this.minLabel = document.getElementById('minLabel');
+                this.maxLabel = document.getElementById('maxLabel');
+                this.meanLabel = document.getElementById('meanLabel');
                 this.minElevDisplay = document.getElementById('minElev');
                 this.maxElevDisplay = document.getElementById('maxElev');
                 this.meanElevDisplay = document.getElementById('meanElev');
@@ -396,6 +412,7 @@
                 this.loadBtn.addEventListener('click', () => this.loadFromInputs());
                 this.centerBtn.addEventListener('click', () => this.centerView());
                 this.scaleFactorInput.addEventListener('input', () => this.updateScale());
+                this.channelSelector.addEventListener('change', () => this.updateChannel());
                 
                 // Export button events
                 this.setCorner1Btn.addEventListener('click', () => this.startCornerSelection('corner1'));
@@ -429,6 +446,11 @@
                 this.loadTerrain();
             }
             
+            updateChannel() {
+                this.selectedChannel = this.channelSelector.value;
+                this.loadTerrain();
+            }
+            
             getWindowDimensions() {
                 const rect = this.canvas.getBoundingClientRect();
                 return {
@@ -446,7 +468,7 @@
                 
                 try {
                     const windowDims = this.getWindowDimensions();
-                    const response = await fetch(`/api/terrain?x=${this.currentX}&y=${this.currentY}&window_width=${windowDims.width}&window_height=${windowDims.height}&scale=${this.scaleFactor}`);
+                    const response = await fetch(`/api/terrain?x=${this.currentX}&y=${this.currentY}&window_width=${windowDims.width}&window_height=${windowDims.height}&scale=${this.scaleFactor}&channel=${this.selectedChannel}`);
                     
                     if (!response.ok) {
                         throw new Error(`HTTP error! status: ${response.status}`);
@@ -461,7 +483,9 @@
                     // Update image
                     this.image.src = `data:image/png;base64,${data.image}`;
                     this.image.style.display = 'block';
-                    this.elevationData = data.elevation_data;
+                    this.currentData = data.data;
+                    this.currentStatsLabel = data.stats.stats_label;
+                    this.currentStatsUnit = data.stats.stats_unit;
                     this.terrainWidth = data.stats.width;
                     this.terrainHeight = data.stats.height;
                     
@@ -487,10 +511,41 @@
             }
             
             updateStats(stats) {
-                this.minElevDisplay.textContent = `${stats.min_elevation.toFixed(1)}m`;
-                this.maxElevDisplay.textContent = `${stats.max_elevation.toFixed(1)}m`;
-                this.meanElevDisplay.textContent = `${stats.mean_elevation.toFixed(1)}m`;
+                const unit = stats.stats_unit || '';
+                const precision = stats.stats_label === 'elevation' ? 1 : 2;
+                
+                // Update values
+                this.minElevDisplay.textContent = `${stats.min_value.toFixed(precision)}${unit}`;
+                this.maxElevDisplay.textContent = `${stats.max_value.toFixed(precision)}${unit}`;
+                this.meanElevDisplay.textContent = `${stats.mean_value.toFixed(precision)}${unit}`;
                 this.regionSizeDisplay.textContent = `${stats.width}×${stats.height}`;
+                
+                // Update labels and title based on data type
+                let title, label;
+                if (stats.stats_label === 'elevation') {
+                    title = '📊 Terrain Stats';
+                    label = 'Elevation';
+                } else if (stats.stats_label === 'temperature') {
+                    title = '🌡️ Temperature Stats';
+                    label = 'Temperature';
+                } else if (stats.stats_label === 'temperature_variation') {
+                    title = '🌡️ Temperature Variation Stats';
+                    label = 'Temp. Variation';
+                } else if (stats.stats_label === 'precipitation') {
+                    title = '🌧️ Precipitation Stats';
+                    label = 'Precipitation';
+                } else if (stats.stats_label === 'precipitation_variation') {
+                    title = '🌧️ Precipitation Variation Stats';
+                    label = 'Precip. Variation';
+                } else {
+                    title = '📊 Data Stats';
+                    label = 'Value';
+                }
+                
+                this.statsTitle.textContent = title;
+                this.minLabel.textContent = `Min ${label}:`;
+                this.maxLabel.textContent = `Max ${label}:`;
+                this.meanLabel.textContent = `Mean ${label}:`;
             }
             
             updateCoordinates() {
@@ -558,16 +613,26 @@
             }
             
             showElevation(e) {
-                if (!this.elevationData || this.isDragging) return;
+                if (!this.currentData || this.isDragging) return;
                 
                 const canvasRect = this.canvas.getBoundingClientRect();
                 const x = Math.floor((e.clientX - canvasRect.left) / canvasRect.width * this.terrainWidth);
                 const y = Math.floor((e.clientY - canvasRect.top) / canvasRect.height * this.terrainHeight);
                 
                 if (x >= 0 && x < this.terrainWidth && y >= 0 && y < this.terrainHeight) {
-                    const elevation = this.elevationData[y][x];
+                    const value = this.currentData[y][x];
+                    const unit = this.currentStatsUnit || '';
+                    const precision = this.currentStatsLabel === 'elevation' ? 1 : 2;
                     
-                    this.tooltip.textContent = `Elevation: ${elevation.toFixed(1)}m`;
+                    // Create appropriate label
+                    let label = 'Value';
+                    if (this.currentStatsLabel === 'elevation') label = 'Elevation';
+                    else if (this.currentStatsLabel === 'temperature') label = 'Temperature';
+                    else if (this.currentStatsLabel === 'temperature_variation') label = 'Temp. Variation';
+                    else if (this.currentStatsLabel === 'precipitation') label = 'Precipitation';
+                    else if (this.currentStatsLabel === 'precipitation_variation') label = 'Precip. Variation';
+                    
+                    this.tooltip.textContent = `${label}: ${value.toFixed(precision)}${unit}`;
                     this.tooltip.style.left = `${e.clientX + 10}px`;
                     this.tooltip.style.top = `${e.clientY - 30}px`;
                     this.tooltip.style.display = 'block';
