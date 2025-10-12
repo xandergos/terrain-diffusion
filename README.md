@@ -17,7 +17,7 @@ Terrain Diffusion is an AI-powered terrain generation framework designed to repl
 - A diffusion (EDM2) decoder learns to convert latent vectors to terrain with improved fidelity
 - Another diffusion model learns to generate latent terrain representations directly
 - Coarse and fine details generated separately for improved accuracy and robustness
-- A GAN generates the most large-scale features, ensuring coherence on continental scales
+- A tileable GAN generates the most large-scale features, ensuring coherence on continental scales
 
 ### 2. **Acceleration via sCM**
 - Diffusion models are distilled following the process in "Simplifying, Stabilizing & Scaling Continuous-Time Consistency Models".
@@ -25,8 +25,7 @@ Terrain Diffusion is an AI-powered terrain generation framework designed to repl
 - Achieves near real-time generation speed with just 1–2 denoising steps
 
 ### 3. **Tileability & Infinite Generation**
-- Condition diffusion on low-frequency features (e.g., mean elevation) for tile alignment
-- Generate low-freq map via GAN (translation invariant, no padding)
+- Final map is generated in tiles, and stitched together seamlessly
 - Final pipeline: `GAN → Base Consistency Model → Consistency Decoder`
 - Uses [xandergos/infinite-tensor](https://github.com/xandergos/infinite-tensor) for efficient on-demand generation
 
