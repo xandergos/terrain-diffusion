@@ -1,13 +1,13 @@
-# Terrain Diffusion (WIP - HIGHLY EXPERIMENTAL)
+# Terrain Diffusion
 
 Terrain Diffusion is an AI-powered terrain generation framework designed to replace traditional procedural noise functions (like Perlin noise) with a fast, high-fidelity, and infinitely tileable generative model. Built on cutting-edge diffusion techniques, it can generate elevation maps that span land and ocean, produce consistent terrain on an infinite grid, and support climate and water generation.
 
 ## 🚀 Features
 
 - **Hyper-realistic terrain generation**: Trained on real-world elevation data
-- **Fast inference**: Uses a 1- or 2-step continuous-time consistency model (CTCM)
+- **Fast inference**: Uses a 1- or 2-step continuous-time consistency model
 - **Infinitely tileable**: Seamless stitching on an infinite 2D grid backed by [xandergos/infinite-tensor](https://github.com/xandergos/infinite-tensor)
-- **Physically accurate scale**: Outputs elevation in meters (not normalized)
+- **Physically accurate scale**: Outputs elevation in meters
 - **Modular generation**: Supports generation of water and climate maps
 
 ## 🧠 How It Works
