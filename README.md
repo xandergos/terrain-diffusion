@@ -8,7 +8,6 @@ Terrain Diffusion is an AI-powered terrain generation framework designed to repl
 - **Fast inference**: Uses a 1- or 2-step continuous-time consistency model
 - **Infinitely tileable**: Seamless stitching on an infinite 2D grid backed by [xandergos/infinite-tensor](https://github.com/xandergos/infinite-tensor)
 - **Physically accurate scale**: Outputs elevation in meters
-- **Modular generation**: Supports generation of water and climate maps
 
 ## How It Works
 
