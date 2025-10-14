@@ -172,11 +172,7 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
             # Update progress bar
             postfix = {}
             for k, v in stats_hist.items():
-                if isinstance(v[-1], (int, float)):
-                    if k.endswith('_norm') or k == 'lr':
-                        postfix[k] = f"{v[-1]:.4f}"
-                    else:
-                        postfix[k] = f"{np.mean(v[-10:]):.4f}"
+                postfix[k] = f"{np.mean(v[-10:]):.4f}"
             progress_bar.set_postfix(postfix)
             progress_bar.update(1)
         

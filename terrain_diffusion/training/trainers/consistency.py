@@ -6,7 +6,7 @@ from tqdm import tqdm
 from ema_pytorch import PostHocEMA
 
 from terrain_diffusion.training.trainers.trainer import Trainer
-from terrain_diffusion.training.datasets.datasets import LongDataset
+from terrain_diffusion.training.datasets import LongDataset
 from terrain_diffusion.models.edm_unet import EDMUnet2D
 
 
@@ -205,8 +205,10 @@ class ConsistencyTrainer(Trainer):
                     c += group_channels
                 loss = torch.stack(loss_groups).mean()
 
+            # Update state
             state['seen'] += images.shape[0]
             state['step'] += 1
+            
             lr = self.resolved['lr_sched'].get(state['seen'])
             for pg in self.optimizer.param_groups:
                 pg['lr'] = lr
@@ -231,7 +233,8 @@ class ConsistencyTrainer(Trainer):
             'lr': lr,
             'grad_norm': grad_norm.item(),
             'max_f_theta_grad_norm': max_f_theta_grad_norm.item(),
-            'max_g_norm': max_g_norm.item()
+            'max_g_norm': max_g_norm.item(),
+            'batch_size': images.shape[0]
         }
     
     def evaluate(self):

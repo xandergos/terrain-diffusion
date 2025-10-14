@@ -2,7 +2,7 @@ import os
 from ema_pytorch import PostHocEMA
 import torch
 from torch.utils.data import DataLoader
-from terrain_diffusion.training.datasets.datasets import LongDataset
+from terrain_diffusion.training.datasets import LongDataset
 from ema_pytorch import PostHocEMA
 
 from terrain_diffusion.models.edm_unet import EDMUnet2D

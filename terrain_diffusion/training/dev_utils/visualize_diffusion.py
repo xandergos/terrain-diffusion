@@ -32,7 +32,7 @@ from matplotlib.widgets import Button
 import yaml
 from confection import Config, registry
 from torch.utils.data import DataLoader
-from terrain_diffusion.training.datasets.datasets import H5LatentsDataset, LongDataset
+from terrain_diffusion.training.datasets import H5LatentsDataset, LongDataset
 from terrain_diffusion.models.edm_autoencoder import EDMAutoencoder
 from terrain_diffusion.models.edm_unet import EDMUnet2D
 from terrain_diffusion.training.registry import build_registry

@@ -24,7 +24,7 @@ from confection import Config, registry
 from ema_pytorch import PostHocEMA
 from torchmetrics.image.fid import FrechetInceptionDistance
 from terrain_diffusion.inference.evaluation.utils import *
-from terrain_diffusion.training.datasets.datasets import LongDataset
+from terrain_diffusion.training.datasets import LongDataset
 from terrain_diffusion.training.registry import build_registry
 from terrain_diffusion.training.utils import recursive_to
 from PIL import Image

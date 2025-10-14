@@ -8,6 +8,10 @@ from terrain_diffusion.training.loss import CosineLRScheduler, SqrtLRScheduler, 
 from terrain_diffusion.inference.scheduler.dpmsolver import EDMDPMSolverMultistepScheduler
 from terrain_diffusion.models.edm_autoencoder import EDMAutoencoder
 from terrain_diffusion.models.edm_unet import EDMUnet2D
+from terrain_diffusion.training.trainers.autoencoder import AutoencoderTrainer
+from terrain_diffusion.training.trainers.consistency import ConsistencyTrainer
+from terrain_diffusion.training.trainers.diffusion import DiffusionTrainer
+from terrain_diffusion.training.trainers.gan import GANTrainer
 
 def build_registry():
     registry.scheduler = catalogue.create("confection", "schedulers", entry_points=False)
@@ -29,7 +33,12 @@ def build_registry():
     registry.dataset.register("h5_autoencoder", func=H5AutoencoderDataset)
     registry.dataset.register("h5_latents", func=H5LatentsDataset)
     registry.dataset.register("file_gan", func=FileGANDataset)
-    registry.dataset.register("gan", func=GANDataset)
+    
+    registry.trainer = catalogue.create("confection", "trainers", entry_points=False)
+    registry.trainer.register("autoencoder", func=lambda: AutoencoderTrainer)
+    registry.trainer.register("consistency", func=lambda: ConsistencyTrainer)
+    registry.trainer.register("diffusion", func=lambda: DiffusionTrainer)
+    registry.trainer.register("gan", func=lambda: GANTrainer)
     
     registry.utils = catalogue.create("confection", "utils", entry_points=False)
     registry.utils.register("create_list", func=lambda *args: list(args))

@@ -7,7 +7,7 @@ import warnings
 from ema_pytorch import PostHocEMA
 
 from terrain_diffusion.training.trainers.trainer import Trainer
-from terrain_diffusion.training.datasets.datasets import LongDataset
+from terrain_diffusion.training.datasets import LongDataset
 from terrain_diffusion.models.edm_unet import EDMUnet2D
 from terrain_diffusion.training.utils import temporary_ema_to_model
 
@@ -163,8 +163,10 @@ class DiffusionTrainer(Trainer):
 
                 loss = self._calc_loss(pred_v_t, v_t, logvar, sigma_data)
 
+            # Update state
             state['seen'] += images.shape[0]
             state['step'] += 1
+            
             lr = self.resolved['lr_sched'].get(state['seen'])
             for g in self.optimizer.param_groups:
                 g['lr'] = lr
@@ -186,7 +188,8 @@ class DiffusionTrainer(Trainer):
         return {
             'loss': loss.item(),
             'lr': lr,
-            'grad_norm': grad_norm
+            'grad_norm': grad_norm,
+            'batch_size': images.shape[0]
         }
     
     def evaluate(self):

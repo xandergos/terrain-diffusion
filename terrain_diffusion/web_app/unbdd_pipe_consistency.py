@@ -6,7 +6,7 @@ from tqdm import tqdm
 from terrain_diffusion.common.model_utils import get_model
 from terrain_diffusion.data.laplacian_encoder import laplacian_decode, laplacian_denoise
 from terrain_diffusion.inference.scheduler.dpmsolver import EDMDPMSolverMultistepScheduler
-from terrain_diffusion.training.datasets.datasets import H5LatentsDataset, H5LatentsSimpleDataset
+from terrain_diffusion.training.datasets import H5LatentsDataset
 from terrain_diffusion.models.mp_generator import MPGenerator
 from ema_pytorch import PostHocEMA
 from safetensors.torch import load_model

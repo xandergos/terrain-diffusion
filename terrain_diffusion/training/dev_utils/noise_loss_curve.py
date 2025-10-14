@@ -4,7 +4,7 @@ import numpy as np
 import torch
 from accelerate import Accelerator
 from confection import Config, registry
-from terrain_diffusion.training.datasets.datasets import LongDataset
+from terrain_diffusion.training.datasets import LongDataset
 from terrain_diffusion.training.registry import build_registry
 from tqdm import tqdm
 from torch.utils.data import DataLoader

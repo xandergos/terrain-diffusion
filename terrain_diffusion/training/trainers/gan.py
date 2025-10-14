@@ -8,7 +8,7 @@ from tqdm import tqdm
 from ema_pytorch import PostHocEMA
 
 from terrain_diffusion.training.trainers.trainer import Trainer
-from terrain_diffusion.training.datasets.datasets import LongDataset
+from terrain_diffusion.training.datasets import LongDataset
 from terrain_diffusion.training.utils import temporary_ema_to_model
 
 
@@ -274,6 +274,10 @@ class GANTrainer(Trainer):
             self.ema.update()
         
         # Update learning rates
+        # Update state
+        state['seen'] += batch_size
+        state['step'] += 1
+        
         lr_warmup = linear_warmup(
             self.config['training'].get('lr_warmup_factor', 1.0), 
             1.0, 
@@ -294,7 +298,8 @@ class GANTrainer(Trainer):
             'r_loss': (r_reg.item() / current_r_gamma) if current_r_gamma > 0 else 0,
             'd_grad_norm': discriminator_grad_norm,
             'g_grad_norm': generator_grad_norm,
-            'lr': lr
+            'lr': lr,
+            'batch_size': batch_size
         }
     
     def evaluate(self):

@@ -26,7 +26,7 @@ from torchmetrics.image.fid import FrechetInceptionDistance
 from torchmetrics.image.kid import KernelInceptionDistance
 from terrain_diffusion.data.laplacian_encoder import laplacian_denoise, laplacian_decode
 from terrain_diffusion.inference.evaluation.utils import *
-from terrain_diffusion.training.datasets.datasets import LongDataset
+from terrain_diffusion.training.datasets import LongDataset
 from terrain_diffusion.training.registry import build_registry
 from terrain_diffusion.training.utils import recursive_to
 from terrain_diffusion.models.edm_autoencoder import EDMAutoencoder

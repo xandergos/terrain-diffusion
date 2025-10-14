@@ -9,7 +9,7 @@ from tqdm import tqdm
 from ema_pytorch import PostHocEMA
 
 from terrain_diffusion.training.trainers.trainer import Trainer
-from terrain_diffusion.training.datasets.datasets import LongDataset
+from terrain_diffusion.training.datasets import LongDataset
 from terrain_diffusion.models.edm_autoencoder import EDMAutoencoder
 
 
@@ -177,6 +177,10 @@ class AutoencoderTrainer(Trainer):
         if self.accelerator.is_main_process:
             self.ema.update()
         
+        # Update state
+        state['seen'] += images.shape[0]
+        state['step'] += 1
+        
         # Update learning rate
         lr = self.resolved['lr_sched'].get(state['seen'])
         for g in self.optimizer.param_groups:
@@ -188,7 +192,7 @@ class AutoencoderTrainer(Trainer):
         stats['perceptual_loss'] = perceptual_loss.item()
         stats['kl_loss'] = kl_loss.item()
         stats['lr'] = lr
-        stats['grad_norm'] = grad_norm
+        stats['grad_norm'] = grad_norm.item()
         
         return stats
     

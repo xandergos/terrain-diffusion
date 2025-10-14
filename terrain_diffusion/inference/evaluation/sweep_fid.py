@@ -9,7 +9,7 @@ from terrain_diffusion.inference.evaluation.calc_decoder_fid import calc_decoder
 from terrain_diffusion.inference.evaluation.utils import *
 from terrain_diffusion.training.registry import build_registry
 from torch.utils.data import DataLoader
-from terrain_diffusion.training.datasets.datasets import LongDataset
+from terrain_diffusion.training.datasets import LongDataset
 
 gpu_lock = multiprocessing.Lock()
 

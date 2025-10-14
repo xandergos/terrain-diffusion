@@ -246,6 +246,7 @@ fabric.properties
 
 # Experiment folders
 experiments/
+experiment_data/
 
 data/
 tmp/
