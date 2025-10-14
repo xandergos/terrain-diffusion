@@ -14,8 +14,9 @@ from terrain_diffusion.training.gan.generator import MPGenerator
 @click.option("--latent-size", type=int, default=None, help="Latent spatial size; defaults to training config value or 21")
 @click.option("--seed", type=int, default=None, help="Random seed")
 @click.option("--device", default="cuda", show_default=True, help="Device string: cuda or cpu")
+@click.option("--downsample", type=int, default=1, show_default=True, help="Apply nxn average pooling to downsample output")
 @torch.no_grad()
-def main(ckpt_dir, sigma_rel, latent_size, seed, device):
+def main(ckpt_dir, sigma_rel, latent_size, seed, device, downsample):
     device = torch.device(device if torch.cuda.is_available() or device == "cpu" else "cpu")
 
     # Load generator with EMA weights copied in
@@ -32,6 +33,29 @@ def main(ckpt_dir, sigma_rel, latent_size, seed, device):
     # Single sample
     z = torch.randn(1, z_channels, latent_size, latent_size, device=device)
     img = generator(z)  # [1, C, H, W]
+
+    # Apply downsampling if specified
+    if downsample > 1:
+        B, C, H, W = img.shape
+        H_out = H // downsample
+        W_out = W // downsample
+        
+        # Unfold all channels into patches
+        patches = torch.nn.functional.unfold(img, kernel_size=downsample, stride=downsample)  # (B, C*kernel*kernel, num_patches)
+        patches = patches.view(B, C, downsample * downsample, -1)  # (B, C, kernel*kernel, num_patches)
+        
+        # Find max elevation (channel 0) index for each patch
+        elev_patches = patches[:, 0, :, :]  # (B, kernel*kernel, num_patches)
+        max_indices = torch.argmax(elev_patches, dim=1, keepdim=True)  # (B, 1, num_patches)
+        
+        # Expand indices to all channels
+        max_indices_expanded = max_indices.unsqueeze(1).expand(B, C, 1, -1)  # (B, C, 1, num_patches)
+        
+        # Gather all channels from the max elevation pixel
+        pooled = torch.gather(patches, dim=2, index=max_indices_expanded).squeeze(2)  # (B, C, num_patches)
+        
+        # Reshape back to image
+        img = pooled.view(B, C, H_out, W_out)
 
     # Prepare normalized channels
     elev = img[0, 0] * 2435.7434 + -2607.8887

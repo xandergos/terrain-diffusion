@@ -187,9 +187,6 @@ def distill(config_path, ckpt_path, debug_run, resume_id):
                 sigma_data = config['training']['sigma_data']
                 sigma = torch.randn(images.shape[0], device=images.device).reshape(-1, 1, 1, 1)
                 sigma = (sigma * config['training']['P_std'] + config['training']['P_mean']).exp()  # Sample τ from proposal distribution
-                if config['training'].get('scale_sigma', False):
-                    sigma = sigma * torch.maximum(torch.std(images, dim=[1, 2, 3], keepdim=True) / sigma_data, 
-                                                  torch.tensor(config['training'].get('sigma_scale_eps', 0.05), device=images.device))
                 t = torch.arctan(sigma / sigma_data)  # Convert to t using arctan
                 t.requires_grad_(True)
                 

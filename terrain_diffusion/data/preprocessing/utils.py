@@ -257,12 +257,12 @@ def process_single_file_base(
     
     if watercover_folder is not None:
         try:
-            watercover = read_raster(os.path.join(watercover_folder, file)).astype(np.float32)
+            watercover = read_raster(os.path.join(watercover_folder, 'landcover_water_' + file)).astype(np.float32)
             assert not np.isnan(watercover).all()
             watercover = skimage.transform.resize(watercover, (highres_size, highres_size), order=0, preserve_range=True)
             if highres_margin > 0:
                 watercover = watercover[..., highres_margin:-highres_margin, highres_margin:-highres_margin]
-        except Exception:
+        except rasterio.RasterioIOError:
             watercover = None
     else:
         watercover = None

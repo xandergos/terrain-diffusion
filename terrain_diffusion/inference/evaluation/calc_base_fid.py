@@ -23,6 +23,7 @@ from tqdm import tqdm
 from confection import Config, registry
 from ema_pytorch import PostHocEMA
 from torchmetrics.image.fid import FrechetInceptionDistance
+from torchmetrics.image.kid import KernelInceptionDistance
 from terrain_diffusion.data.laplacian_encoder import laplacian_denoise, laplacian_decode
 from terrain_diffusion.inference.evaluation.utils import *
 from terrain_diffusion.training.datasets.datasets import LongDataset
@@ -43,7 +44,8 @@ def calc_base_fid(model_m,
                   save_samples_dir=None, 
                   save_n_samples=100,
                   log_samples=None, 
-                  dtype=torch.float32):
+                  dtype=torch.float32,
+                  metric="fid"):
     """
     Evaluate models using Fréchet Inception Distance (FID).
     
@@ -61,6 +63,7 @@ def calc_base_fid(model_m,
         save_n_samples (int, optional): Number of samples to save (default: 100).
         log_samples (int, optional): Number of samples between logging (if enabled). Defaults to num_samples.
         dtype (torch.dtype, optional): Data type for inputs. Defaults to torch.float32.
+        metric (str, optional): Metric to use for evaluation. Defaults to "fid". Options are "fid" or "kid".
     Returns:
         float: Final FID score
     """
@@ -68,8 +71,14 @@ def calc_base_fid(model_m,
         log_samples = num_samples
     
     # Initialize FID metric
-    fid_metric = FrechetInceptionDistance(feature=2048)
-    fid_metric = fid_metric.to(model_m.device)
+    if metric == "fid":
+        fid_metric = FrechetInceptionDistance(feature=2048)
+        fid_metric = fid_metric.to(model_m.device)
+    elif metric == "kid":
+        kid_metric = KernelInceptionDistance(feature=2048)
+        kid_metric = kid_metric.to(model_m.device)
+    else:
+        raise ValueError(f"Invalid metric: {metric}")
 
     autoencoder = EDMAutoencoder.from_pretrained(autoencoder_path).to(model_m.device)
     
@@ -201,9 +210,9 @@ def calc_base_fid(model_m,
         
         # Calculate final FID score
         final_fid_score = fid_metric.compute().item()
-        print(f"Final FID Score ({samples_generated}/{num_samples}): {final_fid_score}")
+        print(f"Final Score ({samples_generated}/{num_samples}): {final_fid_score}")
         return final_fid_score
-    
+
 @click.command()
 @click.option("--main-config", type=click.Path(exists=True), required=True, help="Path to main model config (default: required)")
 @click.option("--guide-config", type=click.Path(exists=True), required=False, help="Path to guidance model config (default: None)", default=None)

@@ -142,7 +142,7 @@ def main(ctx, config_path, ckpt_path, override, steps, samples):
     plt.tight_layout()
     
     # Save plot
-    plt.show()
+    plt.savefig('noise_loss_curve.png')
 
 
 if __name__ == '__main__':

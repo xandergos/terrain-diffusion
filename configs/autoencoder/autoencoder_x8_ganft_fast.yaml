@@ -1,6 +1,6 @@
 # TRAINING
 logging:
-  save_dir: "checkpoints/autoencoder_x8_ganft"
+  save_dir: "checkpoints/autoencoder_x8_ganft_fast_g0.02"
   allow_overwrite: false
   plot_epochs: 50
   save_epochs: 5
@@ -10,9 +10,9 @@ logging:
 training:
   train_batch_size: 32
   gradient_accumulation_steps: 1
-  gradient_clip_val: 5
+  gradient_clip_val: 500
   mixed_precision: "fp16"
-  epochs: 150
+  epochs: 1500
   epoch_steps: 1024
   seed: 74
   kl_weight: 0.005
@@ -29,15 +29,15 @@ training:
       task_weight: 0.5
   decoder_only: false
   discriminator_weight: 1.0
-  r_gamma: 0.01
+  r_gamma: 0.02
   r_interval: 1
   disc_lr_mult: 1.0
   burnin_steps: 10240
   r_warmup_factor: 1
-  lr_warmup_factor: 4
+  lr_warmup_factor: 1
   task_weight_warmup_factor: 1
   disc_lr_warmup_factor: 1
-  disc_weight_warmup_factor: 0
+  disc_weight_warmup_factor: 1
   sigmoid_channels: []
 
 evaluation:

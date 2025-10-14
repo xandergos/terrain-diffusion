@@ -153,7 +153,7 @@ def process_base_dataset(
                     f.flush()
         
         # Calculate stats for residual and climate datasets
-        datasets_to_process = ['residual', 'climate']
+        datasets_to_process = ['residual', 'climate', 'watercover']
         for dataset_name in datasets_to_process:
             means, stds = calculate_stats_welford(res_group, dataset_name, min_stat_landcover_pct)
             

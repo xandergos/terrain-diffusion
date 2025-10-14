@@ -215,16 +215,18 @@ def elevation_to_color(elevation_data, water_data=None):
             rgb_image[higher_mask] = np.column_stack([gray_value, gray_value, gray_value])
 
     # --- Water Data Overlay ---------------------------------------------------
-    if water_data is not None:
-        # Light blue overlay color
-        water_overlay = np.array([180, 220, 255])  # Light blue
-        
-        # For each pixel, blend the overlay based on water probability
-        for i in range(3):  # RGB channels
-            rgb_image[..., i] = (
-                rgb_image[..., i] * (1 - water_data) + 
-                water_overlay[i] * water_data
-            ).astype(np.uint8)
+    #if water_data is not None:
+    #    water_data[~land_mask] = 0
+    #    
+    #    # Light blue overlay color
+    #    water_overlay = np.array([180, 220, 255])  # Light blue
+    #    
+    #    # For each pixel, blend the overlay based on water probability
+    #    for i in range(3):  # RGB channels
+    #        rgb_image[..., i] = (
+    #            rgb_image[..., i] * (1 - water_data) + 
+    #            water_overlay[i] * water_data
+    #        ).astype(np.uint8)
 
     return rgb_image
 

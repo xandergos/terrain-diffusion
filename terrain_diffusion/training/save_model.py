@@ -4,24 +4,24 @@ import click
 from confection import Config
 import torch
 from tqdm import tqdm
+from terrain_diffusion.training.autoencoder.resnet_autoencoder import ResNetAutoencoder
 from terrain_diffusion.training.unet import EDMAutoencoder, EDMUnet2D
 from terrain_diffusion.training.gan.generator import MPGenerator
 from safetensors.torch import load_model
 from ema_pytorch import PostHocEMA
 from diffusers.configuration_utils import ConfigMixin
 
-@click.command()
-@click.option('-c', '--checkpoint-path', required=True, help='Path to the checkpoint directory.')
-@click.option('-e', '--ema-step', type=int, help='EMA step to use.', default=None)
-@click.option('-s', '--sigma-rel', type=float, help='Sigma relative value, can be None.', default=None)
-def save_model(checkpoint_path, ema_step, sigma_rel):
+def load_model_from_checkpoint(checkpoint_path, ema_step=None, sigma_rel=None):
     """
-    Command-line tool to load a model from a checkpoint and optionally apply EMA synthesis.
+    Load a model from a checkpoint and optionally apply EMA synthesis.
     
     Args:
         checkpoint_path: Path to the checkpoint directory.
         ema_step: EMA step to use.
         sigma_rel: Sigma relative value, can be None.
+        
+    Returns:
+        The loaded model.
     """
     # Load model configuration
     config_path = os.path.join(checkpoint_path, 'model_config')
@@ -33,6 +33,8 @@ def save_model(checkpoint_path, ema_step, sigma_rel):
         model = EDMAutoencoder.from_config(EDMAutoencoder.load_config(config_path))
     elif config['_class_name'] == 'MPGenerator':
         model = MPGenerator.from_config(MPGenerator.load_config(config_path))
+    elif config['_class_name'] == 'ResNetAutoencoder':
+        model = ResNetAutoencoder.from_config(ResNetAutoencoder.load_config(config_path))
     else:
         raise ValueError(f'Unknown model class: {config["_class_name"]}')
 
@@ -47,6 +49,22 @@ def save_model(checkpoint_path, ema_step, sigma_rel):
     else:
         load_model(model, os.path.join(checkpoint_path, 'model.safetensors'))
 
+    return model
+
+@click.command()
+@click.option('-c', '--checkpoint-path', required=True, help='Path to the checkpoint directory.')
+@click.option('-e', '--ema-step', type=int, help='EMA step to use.', default=None)
+@click.option('-s', '--sigma-rel', type=float, help='Sigma relative value, can be None.', default=None)
+def save_model(checkpoint_path, ema_step, sigma_rel):
+    """
+    Command-line tool to load a model from a checkpoint and optionally apply EMA synthesis.
+    
+    Args:
+        checkpoint_path: Path to the checkpoint directory.
+        ema_step: EMA step to use.
+        sigma_rel: Sigma relative value, can be None.
+    """
+    model = load_model_from_checkpoint(checkpoint_path, ema_step, sigma_rel)
     model.save_pretrained(os.path.join(checkpoint_path, 'saved_model'))
     save_path = os.path.join(checkpoint_path, 'saved_model')
     print(f'Saved model to {save_path}, with EMA step {ema_step} and sigma rel {sigma_rel}.')

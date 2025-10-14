@@ -23,7 +23,9 @@ class MPDiscriminator(nn.Module):
         model_channels=64,
         channel_mults=[1, 2, 4, 8],
         layers_per_block=1,
-        noise_level=0.1
+        noise_level=0.0,
+        channel_means=None,
+        channel_stds=None
     ):
         super().__init__()
         
@@ -31,6 +33,13 @@ class MPDiscriminator(nn.Module):
         self.in_conv = MPConv(in_channels + 1, model_channels, kernel=[1, 1])  # +1 for bias channel
         
         self.noise_level = noise_level
+        
+        if channel_means is None:
+            channel_means = torch.zeros(in_channels)
+        if channel_stds is None:
+            channel_stds = torch.ones(in_channels)
+        self.channel_means = torch.as_tensor(channel_means)
+        self.channel_stds = torch.as_tensor(channel_stds)
         
         # Main network body
         self.blocks = nn.ModuleList()
@@ -47,14 +56,14 @@ class MPDiscriminator(nn.Module):
                                              out_channels, 
                                              emb_channels=0,
                                              mode='enc',
-                                             activation='silu',
+                                             activation='leaky_relu',
                                              resample_mode='keep'))
             
             self.blocks.append(UNetBlock(cur_channels if layers_per_block == 1 else out_channels, 
                                          out_channels, 
                                          emb_channels=0,
                                          mode='enc',
-                                         activation='silu',
+                                         activation='leaky_relu',
                                          resample_mode='down' if k != len(channel_mults) - 1 else 'keep'))
             
             cur_channels = out_channels
@@ -77,7 +86,7 @@ class MPDiscriminator(nn.Module):
         self.gain = nn.Parameter(torch.ones([]))
 
     def forward(self, x, additional_vars=None):
-        x = (x + torch.randn_like(x) * self.noise_level) / np.sqrt(1 + self.noise_level**2)
+        x = (x - self.channel_means[None, :, None, None].to(dtype=x.dtype, device=x.device)) / self.channel_stds[None, :, None, None].to(dtype=x.dtype, device=x.device)
         
         # Add bias channel
         x = torch.cat([x, torch.ones_like(x[:, :1])], dim=1)

@@ -33,16 +33,17 @@ def laplacian_encode(x, downsample_size, sigma, interp_mode=TF.InterpolationMode
 def laplacian_decode(residual, lowres, interp_mode=TF.InterpolationMode.BILINEAR):
     is_numpy = isinstance(residual, np.ndarray)
     
+    # Convert to torch first if numpy
+    if is_numpy:
+        residual = torch.from_numpy(residual)
+        lowres = torch.from_numpy(lowres)
+    
     # Unsqueeze to 4 dimensions if needed
     squeeze_count = 0
     while residual.ndim < 4:
         residual = residual.unsqueeze(0)
         lowres = lowres.unsqueeze(0)
         squeeze_count += 1
-        
-    if is_numpy:
-        residual = torch.from_numpy(residual)
-        lowres = torch.from_numpy(lowres)
     lowres_up = TF.resize(lowres, residual.shape[-2:], interpolation=interp_mode)
     
     # Squeeze back to original dimensions
@@ -53,6 +54,7 @@ def laplacian_decode(residual, lowres, interp_mode=TF.InterpolationMode.BILINEAR
         squeeze_count -= 1
         
     if is_numpy:
+        residual = residual.numpy()
         lowres_up = lowres_up.numpy()
     return residual + lowres_up
 

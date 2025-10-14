@@ -1,5 +1,6 @@
 import catalogue
 from confection import registry
+from terrain_diffusion.training.autoencoder.resnet_autoencoder import ResNetAutoencoder
 from terrain_diffusion.training.datasets.datasets import *
 from terrain_diffusion.data.laplacian_encoder import *
 from terrain_diffusion.training.gan.discriminator import MPDiscriminator
@@ -15,7 +16,8 @@ def build_registry():
 
     registry.model = catalogue.create("confection", "models", entry_points=False)
     registry.model.register("unet", func=EDMUnet2D)
-    registry.model.register("autoencoder", func=EDMAutoencoder)
+    registry.model.register("edm_autoencoder", func=EDMAutoencoder)
+    registry.model.register("resnet_autoencoder", func=ResNetAutoencoder)
     registry.model.register("generator", func=MPGenerator)
     registry.model.register("discriminator", func=MPDiscriminator)
     registry.model.register("discriminator_basic", func=PatchDiscriminator)

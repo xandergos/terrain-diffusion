@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Visualization script for autoencoder reconstructions.
+Visualization script for decoder reconstructions.
 
 This script loads a trained autoencoder model and visualizes real images alongside their reconstructions.
 It provides an interactive matplotlib interface with navigation buttons to scroll through images.
 
 Usage:
-    python visualize_autoencoder.py --model-path /path/to/model/checkpoint --config /path/to/config.yaml
+    python visualize_decoder.py --model-path /path/to/model/checkpoint --config /path/to/config.yaml
 """
 
 import click
@@ -19,15 +19,16 @@ import yaml
 from confection import Config, registry
 from torch.utils.data import DataLoader
 from terrain_diffusion.training.datasets.datasets import LongDataset
-from terrain_diffusion.training.unet import EDMAutoencoder
+from terrain_diffusion.training.unet import EDMAutoencoder, EDMUnet2D
 from terrain_diffusion.training.registry import build_registry
 from terrain_diffusion.training.utils import recursive_to
 
 
-class AutoencoderVisualizer:
-    def __init__(self, model, dataloader, device='cuda', headless=False):
+class DecoderVisualizer:
+    def __init__(self, model, dataloader, scheduler, device='cuda', headless=False):
         self.model = model
         self.dataloader = dataloader
+        self.scheduler = scheduler
         self.device = device
         self.headless = headless
         self.data_iter = iter(dataloader)
@@ -37,7 +38,7 @@ class AutoencoderVisualizer:
         
         # Setup matplotlib figure - hardcoded for 2 channels (residual + water)
         self.fig, self.axes = plt.subplots(2, 2, figsize=(12, 8))
-        self.fig.suptitle('Autoencoder Reconstruction Comparison (Residual + Water)', fontsize=16)
+        self.fig.suptitle('Decoder Reconstruction Comparison (Residual + Water)', fontsize=16)
         
         # Add navigation buttons only in interactive mode
         if not headless:
@@ -94,10 +95,23 @@ class AutoencoderVisualizer:
                 scaled_clean_images = torch.cat([scaled_clean_images, cond_img], dim=1)
             
             # Encode and decode
-            z_means, z_logvars = self.model.preencode(scaled_clean_images, conditional_inputs)
-            z = self.model.postencode(z_means, z_logvars)
-            self.reconstructions = self.model.decode(z)
+            samples = torch.zeros_like(images)
             
+            for t in [np.arctan(self.scheduler.sigmas[0] / self.scheduler.config.sigma_data), 
+                      1.1]:
+                t = torch.tensor([t], device=images.device).view(1, 1, 1, 1).expand(images.shape[0], 1, 1, 1)
+                z = torch.randn_like(images) * self.scheduler.config.sigma_data
+                x_t = torch.cos(t) * samples + torch.sin(t) * z
+                
+                if cond_img is not None:
+                    model_input = torch.cat([x_t / self.scheduler.config.sigma_data, cond_img], dim=1)
+                else:
+                    model_input = x_t / self.scheduler.config.sigma_data
+                pred = -self.model(model_input, noise_labels=t.flatten(), conditional_inputs=conditional_inputs)
+                
+                samples = torch.cos(t) * x_t - torch.sin(t) * self.scheduler.config.sigma_data * pred
+        
+        self.reconstructions = samples / self.scheduler.config.sigma_data
         self.current_idx = 0
         self.batch_idx += 1
         
@@ -158,7 +172,7 @@ class AutoencoderVisualizer:
             self.axes[1, i].axis('off')
             
         # Update title with current position
-        self.fig.suptitle(f'Autoencoder Reconstruction - Batch {self.batch_idx}, Image {self.current_idx + 1}/{batch_size}', fontsize=16)
+        self.fig.suptitle(f'Decoder Reconstruction - Batch {self.batch_idx}, Image {self.current_idx + 1}/{batch_size}', fontsize=16)
         
         # Calculate and display reconstruction error
         with torch.no_grad():
@@ -201,11 +215,11 @@ class AutoencoderVisualizer:
     def save_current(self, event):
         """Save current comparison to file"""
         if self.current_batch is not None:
-            filename = f'autoencoder_comparison_batch{self.batch_idx}_img{self.current_idx + 1}.png'
+            filename = f'decoder_comparison_batch{self.batch_idx}_img{self.current_idx + 1}.png'
             self.fig.savefig(filename, dpi=150, bbox_inches='tight')
             print(f'Saved comparison to {filename}')
     
-    def save_samples(self, num_samples, output_dir='autoencoder_viz_output'):
+    def save_samples(self, num_samples, output_dir='decoder_viz_output'):
         """Save multiple samples to disk (for headless mode)"""
         import os
         os.makedirs(output_dir, exist_ok=True)
@@ -243,7 +257,7 @@ class AutoencoderVisualizer:
 
 @click.command()
 @click.option('--model-path', type=click.Path(exists=True), required=True, 
-              help='Path to the saved autoencoder model checkpoint directory')
+              help='Path to the saved decoder model checkpoint directory')
 @click.option('--config', type=click.Path(exists=True), required=True,
               help='Path to the training config file')
 @click.option('--batch-size', type=int, default=8, 
@@ -256,10 +270,10 @@ class AutoencoderVisualizer:
               help='Run in headless mode (no display, save to disk)')
 @click.option('--num-samples', type=int, default=10,
               help='Number of samples to save in headless mode (default: 10)')
-@click.option('--output-dir', type=str, default='autoencoder_viz_output',
-              help='Output directory for saved visualizations (default: autoencoder_viz_output)')
+@click.option('--output-dir', type=str, default='decoder_viz_output',
+              help='Output directory for saved visualizations (default: decoder_viz_output)')
 def main(model_path, config, batch_size, device, num_workers, headless, num_samples, output_dir):
-    """Visualize autoencoder reconstructions interactively."""
+    """Visualize decoder reconstructions interactively."""
     
     # Set matplotlib backend for headless mode
     if headless:
@@ -268,8 +282,8 @@ def main(model_path, config, batch_size, device, num_workers, headless, num_samp
     build_registry()
     
     # Load model
-    print(f"Loading autoencoder from {model_path}...")
-    model = EDMAutoencoder.from_pretrained(model_path)
+    print(f"Loading decoder from {model_path}...")
+    model = EDMUnet2D.from_pretrained(model_path)
     print("Loaded model using from_pretrained")
     
     model = model.to(device)
@@ -285,13 +299,15 @@ def main(model_path, config, batch_size, device, num_workers, headless, num_samp
         with open(config, 'r') as f:
             config_dict = json.load(f)
         config_obj = Config(config_dict)
-    else:
+    elif config.endswith('.yaml'):
         with open(config, 'r') as f:
             config_dict = yaml.safe_load(f)
         config_obj = Config(config_dict)
+    else:
+        config_obj = Config().from_disk(config)
     
     for key in list(config_obj.keys()):
-        if not key.endswith('_dataset'):
+        if not (key.endswith('_dataset') or key == 'scheduler'):
             del config_obj[key]
     resolved = registry.resolve(config_obj, validate=False)
     
@@ -307,6 +323,8 @@ def main(model_path, config, batch_size, device, num_workers, headless, num_samp
             print("No dataset found in config. Please check your config file.")
             return
     
+    scheduler = resolved['scheduler']
+    
     # Create dataloader
     dataloader_kwargs = resolved.get('dataloader_kwargs', {})
     dataloader_kwargs['num_workers'] = num_workers
@@ -321,7 +339,7 @@ def main(model_path, config, batch_size, device, num_workers, headless, num_samp
     print(f"Created dataloader with batch size {batch_size}")
     
     # Create visualizer
-    visualizer = AutoencoderVisualizer(model, dataloader, device, headless=headless)
+    visualizer = DecoderVisualizer(model, dataloader, scheduler, device, headless=headless)
     
     if headless:
         # Headless mode: save samples to disk

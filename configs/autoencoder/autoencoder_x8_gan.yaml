@@ -1,6 +1,6 @@
 # TRAINING
 logging:
-  save_dir: "checkpoints/autoencoder_x8_mini"
+  save_dir: "checkpoints/autoencoder_x8_gan"
   allow_overwrite: false
   plot_epochs: 50
   save_epochs: 5
@@ -8,15 +8,14 @@ logging:
   seed: 74
 
 training:
-  train_batch_size: 64
+  train_batch_size: 32
   gradient_accumulation_steps: 1
   gradient_clip_val: 5
   mixed_precision: "fp16"
   epochs: 150
   epoch_steps: 1024
   seed: 74
-  kl_weight: 0.05
-  warmup_steps: 1024
+  kl_weight: 0.005
   tasks:
     - name: residual
       channels: 1
@@ -25,19 +24,21 @@ training:
       task_weight: 0.5
     - name: watercover
       channels: 1
-      losses: ["bce"]
+      losses: ["mse"]
       weights: [1]
-      task_weight: 1
-  encoder_only: false
-  discriminator_weight: 1.0
-  r_gamma: 0.005
+      task_weight: 0.5
+  decoder_only: false
+  discriminator_weight: 0.5
+  r_gamma: 1.0
   r_interval: 1
-  disc_lr_mult: 1
+  disc_lr_mult: 1.0
   burnin_steps: 5120
   r_warmup_factor: 10
   lr_warmup_factor: 4
+  task_weight_warmup_factor: 1
   disc_lr_warmup_factor: 1
-  sigmoid_channels: [1]
+  disc_weight_warmup_factor: 0
+  sigmoid_channels: []
 
 evaluation:
   validate_epochs: 5
@@ -52,6 +53,11 @@ optimizer:
   kwargs:
     betas: [0.0, 0.99]
 
+optimizer_d:
+  type: "adam"
+  kwargs:
+    betas: [0.0, 0.99]
+
 ema:
   sigma_rels: [0.05, 0.1]
   update_every: 1
@@ -59,16 +65,16 @@ ema:
 
 wandb:
   project: "generative_land"
-  tags: ["64x64->512x512", "autoencoder"]
+  tags: ["64x64->512x512", "autoencoder", "gan"]
   mode: "online"
   save_code: true
 
 model:
-  "@model": "autoencoder"
+  "@model": "edm_autoencoder"
   image_size: 512
   in_channels: 2
   out_channels: 2
-  model_channels: 16
+  model_channels: 64
   model_channel_mults: [1, 2, 4, 4]
   layers_per_block: 2
   emb_channels: null
@@ -81,38 +87,44 @@ model:
   conditional_inputs: []
   direct_skips: []
 
+
 discriminator:
   "@model": discriminator
   in_channels: 2
-  additional_vars: 0
-  additional_vars_hidden: 0
-  model_channels: 16
-  channel_mults: [1, 2, 4, 4]
+  model_channels: 64
+  channel_mults: [1, 2, 4, 4, 4]
   layers_per_block: 2
   dropout: 0.0
   noise_level: 0.0
+  channel_means: [0.0, 0.5]
+  channel_stds: [1.0, 0.5]
 
 lr_sched:
   "@lr_sched": "constant"
-  lr: 0.00005
+  lr: 0.0005
+  # 0.0025 might work even better
 
 train_dataset:
-  "@dataset": "h5_autoencoder"
-  h5_file: "data/dataset.h5"
-  crop_size: 64
-  pct_land_ranges: [[0, 0.01],[0.01, 1]]
-  subset_resolutions: [90, 90]
-  subset_weights: [0.01, 1]
-  split: "train"
-
-val_dataset:
   "@dataset": "h5_autoencoder"
   h5_file: "data/dataset.h5"
   crop_size: 64
   pct_land_ranges: [[0, 0.01], [0.01, 1]]
   subset_resolutions: [90, 90]
   subset_weights: [0.01, 1]
+  split: "train"
+  channel_means: [0.00216, 0.08018]
+  channel_stds: [1.1678, 0.26459]
+
+val_dataset:
+  "@dataset": "h5_autoencoder"
+  h5_file: "data/dataset.h5"
+  crop_size: 128
+  pct_land_ranges: [[0, 0.01], [0.01, 1]]
+  subset_resolutions: [90, 90]
+  subset_weights: [0.01, 1]
   split: "val"
+  channel_means: [0.00216, 0.08018]
+  channel_stds: [1.1678, 0.26459]
 
 dataloader_kwargs:
   num_workers: 15

@@ -584,6 +584,7 @@ class EDMAutoencoder(ModelMixin, ConfigMixin):
         model_channels=128,
         model_channel_mults=None,
         layers_per_block=3,
+        layers_per_block_decoder=None,
         attn_resolutions=None,
         midblock_attention=True,
         logvar_channels=128,
@@ -603,6 +604,7 @@ class EDMAutoencoder(ModelMixin, ConfigMixin):
             model_channels (int, optional): The dimension of the model. Default is 128.
             model_channel_mults (list, optional): The channel multipliers for each block. Default is [1, 2, 3, 4].
             layers_per_block (int, optional): The number of layers per block. Default is 2.
+            layers_per_block_decoder (int, optional): The number of layers per block for the decoder. Default is layers_per_block.
             attn_resolutions (list, optional): The resolutions at which attention is applied. Default is None.
             midblock_attention (bool, optional): Whether to apply attention in the midblock. Default is True.
             logvar_channels (int, optional): The number of channels for uncertainty estimation. Default is 128.
@@ -620,7 +622,9 @@ class EDMAutoencoder(ModelMixin, ConfigMixin):
         out_channels = out_channels or in_channels
         if isinstance(layers_per_block, int):
             layers_per_block = [layers_per_block] * len(model_channel_mults)
-        
+        layers_per_block_decoder = layers_per_block_decoder or layers_per_block
+        if isinstance(layers_per_block_decoder, int):
+            layers_per_block_decoder = [layers_per_block_decoder] * len(model_channel_mults)
         assert latent_channels is not None, "latent_channels must be specified"
         
         # Encoder (EDMUnet2D)
@@ -648,7 +652,7 @@ class EDMAutoencoder(ModelMixin, ConfigMixin):
         self.decoder = nn.ModuleList()
         self.decoder_conv = MPConv(latent_channels + len(direct_skips) + 1, model_channels * model_channel_mults[-1], kernel=[1, 1])
         cout = model_channels * model_channel_mults[-1]  # +1 because we add a ones channel to simulate a bias
-        for level, (channels, nb) in reversed(list(enumerate(zip(block_channels, layers_per_block)))):
+        for level, (channels, nb) in reversed(list(enumerate(zip(block_channels, layers_per_block_decoder)))):
             res = image_size // 2**level
             if level == len(block_channels) - 1:
                 self.decoder.append(UNetBlock(cout, cout, 0, mode='dec', attention=midblock_attention, **block_kwargs))
@@ -734,3 +738,4 @@ class Logvar(nn.Module):
 
     def forward(self, x):
         return self.logvar_linear(self.logvar_fourier(x))
+

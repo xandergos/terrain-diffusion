@@ -21,7 +21,11 @@ import torch.nn.functional as F
 @click.option('--compile-model', is_flag=True, help='Compile the model', default=False)
 @click.option('--overwrite', is_flag=True, help='Overwrite existing datasets', default=False)
 @click.option('--min-pct-land', type=float, help='Minimum percentage of land in the chunk (0-1)', default=0.0)
-def process_encoded_dataset(dataset, resolution, encoder_model_path, use_fp16, compile_model, overwrite, min_pct_land):
+@click.option('--residual-mean', type=float, default=0.00216, show_default=True, help='Mean used to normalize residual channel')
+@click.option('--residual-std', type=float, default=1.1678, show_default=True, help='Std used to normalize residual channel')
+@click.option('--water-mean', type=float, default=0.08018, show_default=True, help='Mean used to normalize watercover channel (after dividing by 100)')
+@click.option('--water-std', type=float, default=0.26459, show_default=True, help='Std used to normalize watercover channel (after dividing by 100)')
+def process_encoded_dataset(dataset, resolution, encoder_model_path, use_fp16, compile_model, overwrite, min_pct_land, residual_mean, residual_std, water_mean, water_std):
     """
     Add latent encodings to an existing HDF5 dataset containing high/low frequency components.
     
@@ -37,6 +41,9 @@ def process_encoded_dataset(dataset, resolution, encoder_model_path, use_fp16, c
 
     if compile_model:
         model = torch.compile(model)
+
+    print(f"Normalizing watercover data with mean {water_mean} and std {water_std}")
+    print(f"Normalizing residual with mean {residual_mean} and std {residual_std}")
 
     # Define which climate channels to use (same as in H5AutoencoderDataset)
     climate_channels = [0, 3, 11, 14]  # temp, temp seasonality, precip, precip seasonality
@@ -70,7 +77,7 @@ def process_encoded_dataset(dataset, resolution, encoder_model_path, use_fp16, c
 
                 # Process residual data (full resolution)
                 residual = torch.from_numpy(subchunk_group['residual'][:])[None]
-                residual = (residual - res_group.attrs['residual_mean']) / res_group.attrs['residual_std']
+                residual = (residual - residual_mean) / residual_std
                 full_shape = residual.shape[-2:]
 
                 # Get lowres data (1/8 resolution) and upsample
@@ -106,7 +113,7 @@ def process_encoded_dataset(dataset, resolution, encoder_model_path, use_fp16, c
 
                 # Process watercover data
                 if 'watercover' in subchunk_group:
-                    water_data = torch.from_numpy(subchunk_group['watercover'][:])[None] / 100
+                    water_data = (torch.from_numpy(subchunk_group['watercover'][:])[None] / 100 - water_mean) / water_std
                 else:
                     water_data = torch.zeros((1, *full_shape))
 
@@ -135,6 +142,7 @@ def process_encoded_dataset(dataset, resolution, encoder_model_path, use_fp16, c
                                 latent_residual_means, latent_residual_logvars = model.preencode(model_input, conditional_inputs=[])
                                 latent_residual = torch.cat([latent_residual_means, latent_residual_logvars], dim=1)[0].cpu()
                         if not printed_latent_shape:
+                            print(f"Autoencoder input shape: {model_input.shape}")
                             print(f"Latent shape: {latent_residual.shape}")
                             printed_latent_shape = True
                         transformed_latent.append(latent_residual.numpy())

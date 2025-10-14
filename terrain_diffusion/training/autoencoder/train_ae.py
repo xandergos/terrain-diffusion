@@ -10,6 +10,7 @@ from accelerate import Accelerator
 from confection import Config, registry
 from ema_pytorch import PostHocEMA
 import yaml
+from terrain_diffusion.training.autoencoder.resnet_autoencoder import ResNetAutoencoder
 from terrain_diffusion.training.datasets.datasets import LongDataset
 from terrain_diffusion.data.laplacian_encoder import *
 from terrain_diffusion.training.registry import build_registry
@@ -22,15 +23,15 @@ from terrain_diffusion.training.utils import *
 from terrain_diffusion.training.utils import SerializableEasyDict as EasyDict
 from torchmetrics.image.fid import FrechetInceptionDistance
 
-def get_optimizer(model, config):
+def get_optimizer(model, config, optimizer_key='optimizer'):
     """Get optimizer based on config settings."""
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     if len(trainable_params) == 0:
         raise ValueError("No trainable parameters found for optimizer. Check freezing settings.")
-    if config['optimizer']['type'] == 'adam':
-        optimizer = torch.optim.Adam(trainable_params, **config['optimizer']['kwargs'])
+    if config[optimizer_key]['type'] == 'adam':
+        optimizer = torch.optim.Adam(trainable_params, **config[optimizer_key]['kwargs'])
     else:
-        raise ValueError(f"Unknown optimizer type: {config['optimizer']['type']}")
+        raise ValueError(f"Unknown optimizer type: {config[optimizer_key]['type']}")
     return optimizer
 
 def linear_warmup(start_value, end_value, current_step, total_steps):
@@ -69,8 +70,9 @@ def variance_adjusted_loss(reconstruction, reference, eps=0.25):
 @click.option("--debug-run", "debug_run", is_flag=True, default=False, help="Run in debug mode which disables wandb and all file saving")
 @click.option("--resume", "resume_id", type=str, required=False, help="Wandb run ID to resume")
 @click.option("--override", "-o", multiple=True, help="Override config values (format: key.subkey=value)")
+@click.option("--donot-resume-wandb", "donot_resume_wandb", is_flag=True, default=False, help="Don't resume W&B run")
 @click.pass_context
-def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, override):
+def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, override, donot_resume_wandb):
     build_registry()
     
     with open(config_path, 'r') as f:
@@ -106,7 +108,7 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
     if debug_run:
         config['wandb']['mode'] = 'disabled'
     # Auto-resume W&B run from checkpoint metadata if available (unless explicitly provided)
-    if ckpt_path and not resume_id and not debug_run:
+    if ckpt_path and not resume_id and not debug_run and not donot_resume_wandb:
         try:
             with open(os.path.join(ckpt_path, 'wandb_run.json'), 'r') as f:
                 run_meta = json.load(f)
@@ -129,20 +131,20 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
 
     # Load anything that needs to be used for training.
     model = resolved['model']
-    assert isinstance(model, EDMAutoencoder), "Currently only EDMAutoencoder is supported for autoencoder training."
+    assert isinstance(model, EDMAutoencoder) or isinstance(model, ResNetAutoencoder), "Currently only EDMAutoencoder and ResNetAutoencoder are supported for autoencoder training."
     lr_scheduler = resolved['lr_sched']
-    # Optionally train encoder only (freeze decoder and output layers)
-    if config['training'].get('encoder_only', False):
+    # Optionally train encoder only (freeze encoder layers)
+    if config['training'].get('decoder_only', False):
         for name, param in model.encoder.named_parameters():
             param.requires_grad = False
         num_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
         num_total = sum(p.numel() for p in model.parameters())
-        print(f"Encoder-only mode: {num_trainable}/{num_total} parameters trainable.")
+        print(f"Decoder-only mode: {num_trainable}/{num_total} parameters trainable.")
     
     train_dataset = resolved['train_dataset']
     val_dataset = resolved['val_dataset']
     
-    optimizer = get_optimizer(model, config)
+    optimizer = get_optimizer(model, config, optimizer_key='optimizer')
     resolved['ema']['checkpoint_folder'] = os.path.join(resolved['logging']['save_dir'], 'phema')
     ema = PostHocEMA(model, **resolved['ema'])
     state = EasyDict({'epoch': 0, 'step': 0, 'seen': 0})
@@ -156,7 +158,7 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
     d_optimizer = None
     if config['training']['discriminator_weight'] > 0:
         discriminator = resolved['discriminator']
-        d_optimizer = get_optimizer(discriminator, config)
+        d_optimizer = get_optimizer(discriminator, config, optimizer_key='optimizer_d')
     
     if model_ckpt_path:
         temp_model_statedict = type(model).from_pretrained(model_ckpt_path).state_dict()
@@ -241,7 +243,7 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
                     scaled_clean_images = torch.cat([scaled_clean_images, cond_img], dim=1)
                 
                 # Encode and decode
-                if config['training']['encoder_only']:
+                if config['training']['decoder_only']:
                     with torch.no_grad():
                         z_means, z_logvars = model.preencode(scaled_clean_images, conditional_inputs)
                         z = model.postencode(z_means, z_logvars)
@@ -270,11 +272,8 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
                         elif loss_type == 'percep':
                             task_loss = task_loss + percep_loss_fn(pred, target) * loss_weight
                         elif loss_type == 'bce':
-                            task_loss = task_loss + torch.nn.functional.binary_cross_entropy_with_logits(pred, target) * loss_weight
-                        elif loss_type == 'categorical':
-                            task_loss = task_loss + torch.nn.functional.cross_entropy(pred, target) * loss_weight
-                        elif loss_type == 'sigmoid_mse':
-                            task_loss = task_loss + torch.nn.functional.mse_loss(torch.sigmoid(pred), target) * loss_weight
+                            unnormalized_target = target * task['data_std'] + task['data_mean']
+                            task_loss = task_loss + torch.nn.functional.binary_cross_entropy_with_logits(pred, unnormalized_target) * loss_weight
                         else:
                             raise ValueError(f"Unknown loss type: {loss_type}")
                         validation_stats[f"{task['name']}_{loss_type}"].append(task_loss.item() / loss_weight)
@@ -451,8 +450,14 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
                     d_optimizer.zero_grad()
                     accelerator.backward(total_d_loss)
                     if accelerator.sync_gradients:
-                        discriminator_grad_norm = accelerator.clip_grad_norm_(discriminator.parameters(), 100.0)
+                        discriminator_grad_norm = accelerator.clip_grad_norm_(discriminator.parameters(), config['training'].get('grad_clip_val', 10.0))
                     d_optimizer.step()
+                        
+                    # Print gradient norms for each discriminator parameter
+                    #for name, param in discriminator.named_parameters():
+                    #    if param.grad is not None:
+                    #        grad_norm = param.grad.norm().item()
+                    #        print(f"{name}: {grad_norm:.6f}")
                     
                     stats_hist['d_loss'].append(d_loss.item())
                     stats_hist['r_loss'].append((r_reg.item() / current_r_gamma) if current_r_gamma > 0 else 0)
@@ -503,17 +508,21 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
                             elif loss_type == 'percep':
                                 task_loss = task_loss + percep_loss_fn(pred, target) * loss_weight
                             elif loss_type == 'bce':
-                                task_loss = task_loss + torch.nn.functional.binary_cross_entropy_with_logits(pred, target) * loss_weight
-                            elif loss_type == 'categorical':
-                                task_loss = task_loss + torch.nn.functional.cross_entropy(pred, target) * loss_weight
-                            elif loss_type == 'sigmoid_mse':
-                                task_loss = task_loss + torch.nn.functional.mse_loss(torch.sigmoid(pred), target) * loss_weight
+                                unnormalized_target = target * task['data_std'] + task['data_mean']
+                                task_loss = task_loss + torch.nn.functional.binary_cross_entropy_with_logits(pred, unnormalized_target) * loss_weight
                             else:
                                 raise ValueError(f"Unknown loss type: {loss_type}")
                             stats_hist[f"{task['name']}_{loss_type}"].append(task_loss.item() / loss_weight)
                         cidx += channels
                         task_loss = task_loss * task['task_weight']
                         loss = loss + task_loss
+                    
+                    loss = loss * linear_warmup(
+                        config['training'].get('task_weight_warmup_factor', 1.0), 
+                        1.0, 
+                        state['step'], 
+                        config['training'].get('burnin_steps', 1)
+                    )
                     
                     # KL loss
                     ndz_logvars = z_logvars[:, :model.config.latent_channels]
@@ -542,14 +551,19 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
                         
                         fake_pred = discriminator(sigmoided_decoded_x)
                         adv_loss = torch.nn.functional.softplus(real_pred.detach() - fake_pred).mean()
-                        loss = loss + adv_loss * config['training']['discriminator_weight']
+                        loss = loss + adv_loss * config['training']['discriminator_weight'] * linear_warmup(
+                            config['training'].get('disc_weight_warmup_factor', 1.0), 
+                            1.0, 
+                            state['step'], 
+                            config['training'].get('burnin_steps', 1)
+                        )
                         stats_hist['adv_loss'].append(adv_loss.item())
                 
                 #loss = loss * 0
                 optimizer.zero_grad()
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
-                    generator_grad_norm = accelerator.clip_grad_norm_(model.parameters(), 10.0)
+                    generator_grad_norm = accelerator.clip_grad_norm_(model.parameters(), config['training'].get('grad_clip_val', 10.0))
                 optimizer.step()
 
             if accelerator.is_main_process:

@@ -16,7 +16,7 @@ from terrain_diffusion.inference.scheduler.functional_dpmsolver import multistep
 from matplotlib.widgets import Slider
 from infinite_tensor import MemoryTileStore, TensorWindow
 
-def create_unbounded_pipe(sigmas: list[int] = None, cond_input_scaling: float = 1.0):
+def create_unbounded_pipe(sigmas: list[int] = None, cond_input_scaling: float = 1.0, use_consistency_decoder: bool = False):
     if sigmas is None:
         sigmas = [80, 10, 1]
     
@@ -64,26 +64,22 @@ def create_unbounded_pipe(sigmas: list[int] = None, cond_input_scaling: float = 
         x_t_window = x_t_tensor.to(device)
         cond_window = cond_inputs_tensor.to(device)
         
-        # Extract conditional features from the window
-        thresholded = (torch.amax(cond_window[5], dim=[-1, -2]) < -3).long()
+        best_pixel = torch.argmax(cond_window[0])
         
-        weighted_cond_inputs = torch.sum(cond_window * torch.sigmoid(cond_window[5:]), dim=[-1, -2]) \
-            / (torch.sum(torch.sigmoid(cond_window[5:]), dim=[-1, -2]) + 1e-8)
-        mean_elev = cond_window[0] * 2435 - 2607
-        mean_elev = (torch.sign(mean_elev) * torch.sqrt(torch.abs(mean_elev)) + 31.4) / 38.6
-        mean_elev = torch.quantile(torch.flatten(mean_elev), q=0.99)
-        mean_temp = weighted_cond_inputs[1] * (1 - thresholded.float())
-        std_temp = weighted_cond_inputs[2] * (1 - thresholded.float())
-        mean_prec = weighted_cond_inputs[3] * (1 - thresholded.float())
-        std_prec = weighted_cond_inputs[4] * (1 - thresholded.float())
-        all_water = thresholded
+        best_elev = torch.flatten(cond_window[0])[best_pixel] * 2435 - 2607
+        best_elev = (torch.sign(best_elev) * torch.sqrt(torch.abs(best_elev)) + 31.4) / 38.6
+        mean_temp = torch.flatten(cond_window[1])[best_pixel]
+        std_temp = torch.flatten(cond_window[2])[best_pixel]
+        mean_prec = torch.flatten(cond_window[3])[best_pixel]
+        std_prec = torch.flatten(cond_window[4])[best_pixel]
+        all_water = (torch.flatten(cond_window[5])[best_pixel] < -3).long()
         
         # Run model
         with torch.no_grad():
             model_output = model(x_t_window / sigma_data,
                                 noise_labels=cnoise_val.to(device).expand(x_t_window.shape[0]),
                                 conditional_inputs=[
-                                    mean_elev.to(device).view(1).expand(x_t_window.shape[0]),
+                                    best_elev.to(device).view(1).expand(x_t_window.shape[0]),
                                     mean_temp.to(device).view(1).expand(x_t_window.shape[0]),
                                     std_temp.to(device).view(1).expand(x_t_window.shape[0]),
                                     mean_prec.to(device).view(1).expand(x_t_window.shape[0]),
@@ -99,15 +95,30 @@ def create_unbounded_pipe(sigmas: list[int] = None, cond_input_scaling: float = 
     device = 'cuda'
     torch.no_grad().__enter__()
     gan = get_model(MPGenerator, 'checkpoints/gan/latest_checkpoint', sigma_rel=0.2, device=device)
-    model = get_model(EDMUnet2D, 'checkpoints/consistency_base-192x3/latest_checkpoint', sigma_rel=0.05, device=device)
-    autoencoder = EDMAutoencoder.from_pretrained('checkpoints/models/autoencoder').to(device)
+    model = get_model(EDMUnet2D, 'checkpoints/consistency_base-128x3/409kimg_checkpoint', sigma_rel=0.05, device=device)
+    autoencoder = EDMAutoencoder.from_pretrained('checkpoints/models/autoencoder_x8').to(device)
+
+    # Optional consistency decoder (reconstruct residual+water from latent cond image)
+    consistency_decoder = None
+    if use_consistency_decoder:
+        try:
+            consistency_decoder = EDMUnet2D.from_pretrained('checkpoints/models/early_decoder_ckpt').to(device)
+            consistency_decoder.eval()
+            print(f"Loaded consistency decoder from checkpoints/models/early_decoder_ckpt")
+        except Exception as e:
+            print(f"Failed to load consistency decoder at checkpoints/models/early_decoder_ckpt: {e}")
+            consistency_decoder = None
 
     dataset = H5LatentsDataset('data/dataset.h5', 64, [[0.1, 1.0]], [90], [1], eval_dataset=False,
                             latents_mean=[0, 0, 0, 0],
                             latents_std=[1, 1, 1, 1],
                             sigma_data=0.5,
                             split="train",
-                            beauty_dist=[[1, 1, 1, 1, 1]])
+                            beauty_dist=[[1, 1, 1, 1, 1]],
+                            residual_mean=0.00216,
+                            residual_std=1.1678,
+                            watercover_mean=0.08018,
+                            watercover_std=0.26459)
 
     sigma_data = 0.5
 
@@ -225,19 +236,45 @@ def create_unbounded_pipe(sigmas: list[int] = None, cond_input_scaling: float = 
         samples = (pred_tensor * 2).to(device)
         latent = samples[:, :4]
         lowfreq = samples[:, 4:5]
-        with torch.no_grad():
-            decoded = autoencoder.decode(latent)
-        residual, watercover = decoded[:, :1], decoded[:, 1:2]
-        watercover = torch.sigmoid(watercover)
-        residual = dataset.denormalize_residual(residual, 90)
-        lowfreq = dataset.denormalize_lowfreq(lowfreq, 90)
+
+        # Choose decoding path
+        if consistency_decoder is not None:
+            # Build cond_img by upsampling latent to 128x128 (as in H5DecoderTerrainDataset)
+            cond_img = torch.nn.functional.interpolate(latent, size=(128, 128), mode='nearest')
+
+            # Initialize samples for residual+water (2 channels)
+            rw = torch.zeros((cond_img.shape[0], 2, 128, 128), device=device)
+
+            # Two-step consistency update (mirrors visualize_consistency_decoder)
+            sigma_data_local = sigma_data
+            t_list = [torch.atan(torch.tensor(sigmas[0], dtype=torch.float32, device=device) / sigma_data_local),
+                      torch.tensor(1.1, dtype=torch.float32, device=device)]
+            for tval in t_list:
+                t = tval.view(1, 1, 1, 1).expand(rw.shape[0], 1, 1, 1)
+                z = torch.randn_like(rw) * sigma_data_local
+                x_t = torch.cos(t) * rw + torch.sin(t) * z
+                model_input = torch.cat([x_t / sigma_data_local, cond_img], dim=1)
+                pred = -consistency_decoder(model_input, noise_labels=t.flatten(), conditional_inputs=[])
+                rw = torch.cos(t) * x_t - torch.sin(t) * sigma_data_local * pred
+
+            decoded = rw / sigma_data_local
+            residual, watercover = decoded[:, :1], decoded[:, 1:2]
+        else:
+            with torch.no_grad():
+                decoded = autoencoder.decode(latent)
+            residual, watercover = decoded[:, :1], decoded[:, 1:2]
+
+        # Denormalize and compose terrain
+        watercover = torch.clip(dataset.denormalize_watercover(watercover), 0, 1)
+        residual = dataset.denormalize_residual(residual)
+        lowfreq = dataset.denormalize_lowfreq(lowfreq)
         residual, lowfreq = laplacian_denoise(residual, lowfreq, 5.0)
         decoded_terrain = laplacian_decode(residual, lowfreq)
-        
+
         climate = samples[:, 5:9]
         climate = torch.nn.functional.interpolate(climate, size=decoded_terrain.shape[-2:], mode='nearest').cpu()
         climate = dataset.denormalize_climate(climate, 90)
-        
+
         decoded_terrain = torch.cat([decoded_terrain.cpu() * weights512, watercover.cpu() * weights512, climate * weights512, weights512], dim=1)
         return decoded_terrain
 
