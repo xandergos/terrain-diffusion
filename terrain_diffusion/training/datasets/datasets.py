@@ -51,7 +51,9 @@ class H5AutoencoderDataset(Dataset):
                  subset_weights=None,
                  subset_class_labels=None,
                  eval_dataset=False,
-                 split=None):
+                 split=None,
+                 residual_mean=None,
+                 residual_std=None):
         """
         Args:
             h5_file (str): Path to the HDF5 file containing the dataset.
@@ -73,10 +75,6 @@ class H5AutoencoderDataset(Dataset):
         self.subset_weights = subset_weights
         self.subset_class_labels = subset_class_labels
         self.eval_dataset = eval_dataset
-        
-        # Define which climate channels to use and number of landcover classes
-        self.climate_channels = [0, 3, 11, 14]
-        self.num_landcover_classes = 23
         
         # Initialize keys
         num_subsets = len(subset_weights)
@@ -109,6 +107,64 @@ class H5AutoencoderDataset(Dataset):
                         if pct_land_valid and split_valid:
                             self.keys[i].add((chunk_id, res, subchunk_id))
         self.keys = [list(keys) for keys in self.keys]
+        
+        self.residual_mean = residual_mean
+        self.residual_std = residual_std
+        if self.residual_mean is None or self.residual_std is None:
+            self.calculate_stats()
+        
+        
+    def calculate_stats(self, num_samples=10000):
+        """Compute per-channel mean and std using a streaming Welford algorithm.
+
+        This avoids stacking samples in memory and works for any number of channels
+        returned by __getitem__ under key 'image' with shape [C, H, W].
+        """
+        torch.set_grad_enabled(False)
+
+        running_count = None
+        running_mean = None
+        running_m2 = None
+
+        for _ in tqdm(range(num_samples), desc="Calculating stats"):
+            sample = self.__getitem__(random.randrange(len(self)))
+            x = sample['image']
+            if not torch.is_tensor(x):
+                x = torch.as_tensor(x)
+                
+            c, h, w = x.shape
+            x_flat = x.reshape(c, -1)
+            batch_count = x_flat.shape[1]
+
+            # Per-channel batch stats
+            batch_mean = x_flat.mean(dim=1)
+            batch_m2 = x_flat.var(dim=1, unbiased=False) * batch_count
+
+            if running_count is None:
+                running_count = torch.full_like(batch_mean, fill_value=batch_count, dtype=torch.float32)
+                running_mean = batch_mean.clone().to(torch.float32)
+                running_m2 = batch_m2.clone().to(torch.float32)
+                continue
+
+            # Combine current running aggregates with this batch (per-channel)
+            total_count = running_count + batch_count
+            delta = batch_mean - running_mean
+            running_mean = running_mean + delta * (batch_count / total_count)
+            running_m2 = running_m2 + batch_m2 + (delta.pow(2) * running_count * batch_count / total_count)
+            running_count = total_count
+
+        # Finalize
+        variance = running_m2 / running_count
+        std = variance.sqrt()
+
+        # Print concise results per channel
+        for ch, (m, s) in enumerate(zip(running_mean.tolist(), std.tolist())):
+            print(f"Channel {ch}: mean={m:.6f}, std={s:.6f}")
+        
+        self.channel_means = running_mean
+        self.channel_stds = std
+
+        torch.set_grad_enabled(True)
 
     def __len__(self):
         return max(len(keys) for keys in self.keys)
@@ -139,68 +195,11 @@ class H5AutoencoderDataset(Dataset):
                 j = ((data_shape[-1] - self.crop_size) // 16) * 8
             h, w = self.crop_size, self.crop_size
             
-            # Calculate scaled indices for 1/8 resolution data
-            # i_low = i // 8
-            # j_low = j // 8
-            # h_low = h // 8
-            # w_low = w // 8
-            
-            # Load residual data (always available, full res)
+            # Load residual data (elevation)
             residual_data = torch.from_numpy(dset[i:i+h, j:j+w])[None]
-            residual_data = (residual_data - res_group.attrs['residual_mean']) / res_group.attrs['residual_std']
+            residual_data = (residual_data - self.residual_mean) / self.residual_std
             
-            # Load lowres data (always available, 1/8 res)
-            #lowres_data = torch.from_numpy(f[f"{group_path}/lowfreq"][i_low:i_low+h_low, j_low:j_low+w_low])[None]
-            #lowres_data = F.interpolate(lowres_data[None], size=(h, w), mode='nearest')[0]
-            #lowres_data = (lowres_data - LOWFREQ_MEAN) / LOWFREQ_STD
-            #
-            ## Load and upsample climate data with backup
-            #try:
-            #    climate_data = torch.from_numpy(f[f"{group_path}/climate"][:, i_low:i_low+h_low, j_low:j_low+w_low])
-            #    climate_data = climate_data[self.climate_channels]
-            #    climate_data = (climate_data - res_group.attrs['climate_mean'][self.climate_channels, None, None]) /\
-            #        res_group.attrs['climate_std'][self.climate_channels, None, None]
-            #    climate_data = F.interpolate(climate_data[None], size=(h, w), mode='nearest')[0]
-            #    # Create climate mask and handle NaNs
-            #    climate_mask = ~torch.isnan(climate_data[0:1])
-            #    climate_data = torch.nan_to_num(climate_data, 0.0)
-            #except KeyError:
-            #    climate_data = torch.zeros((4, h, w))
-            #    climate_mask = torch.zeros((1, h, w))
-            #
-            ## Load and one-hot encode landcover data with backup
-            #landcover_classes = [0, 20, 30, 40, 50, 60, 70, 80, 90, 100, 111, 112, 113, 114, 115, 116, 121, 122, 123, 124, 125, 126, 200]
-            #
-            #try:
-            #    landcover_data = torch.from_numpy(f[f"{group_path}/landcover"][i:i+h, j:j+w]).long()
-            #except KeyError:
-            #    landcover_data = torch.full((h, w), 200, dtype=torch.long)
-            #    
-            ## Create lookup table for class indices
-            #max_class = landcover_classes[-1]
-            #lookup = torch.full((max_class + 1,), len(landcover_classes) - 1, dtype=torch.long)
-            #for idx, class_val in enumerate(landcover_classes):
-            #    lookup[class_val] = idx
-            #landcover_indices = lookup[landcover_data]
-            #
-            #landcover_onehot = F.one_hot(landcover_indices, num_classes=len(landcover_classes))
-            #landcover_onehot = landcover_onehot.permute(2, 0, 1)  # [C, H, W] format
-            
-            # Load watercover data with backup
-            try:
-                water_data = torch.from_numpy(f[f"{group_path}/watercover"][i:i+h, j:j+w])[None] / 100
-            except KeyError:
-                water_data = torch.zeros((1, h, w))
-            
-            # Concatenate all channels
-            data = torch.cat([
-                residual_data,      # 1 channel
-                #lowres_data,        # 1 channel
-                #climate_data,       # 4 channels
-                #climate_mask,       # 1 channel
-                #landcover_onehot,   # 23 channels
-                water_data,         # 1 channel
-            ], dim=0).float()
+            data = residual_data.float()
             
         # Apply transforms
         transform_idx = random.randrange(8) if not self.eval_dataset else 0
@@ -221,11 +220,6 @@ class H5AutoencoderDataset(Dataset):
         with h5py.File(self.h5_file, 'r') as f:
             res_group = f[str(resolution)]
             return residual * res_group.attrs['residual_std'] + res_group.attrs['residual_mean']
-    
-    def denormalize_lowfreq(self, lowfreq, resolution=None):
-        LOWFREQ_MEAN = -31.4
-        LOWFREQ_STD = 38.6
-        return lowfreq * LOWFREQ_STD + LOWFREQ_MEAN
 
 class H5DecoderTerrainDataset(Dataset):
     """Dataset for reading terrain data from an HDF5 file with an encoding."""
