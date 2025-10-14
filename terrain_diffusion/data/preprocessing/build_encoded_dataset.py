@@ -10,7 +10,7 @@ import torch
 import h5py
 from tqdm import tqdm
 import click
-from terrain_diffusion.training.unet import EDMAutoencoder
+from terrain_diffusion.models.edm_autoencoder import EDMAutoencoder
 import torch.nn.functional as F
 
 @click.command()

@@ -4,9 +4,9 @@ import click
 from confection import Config
 import torch
 from tqdm import tqdm
-from terrain_diffusion.training.autoencoder.resnet_autoencoder import ResNetAutoencoder
-from terrain_diffusion.training.unet import EDMAutoencoder, EDMUnet2D
-from terrain_diffusion.training.gan.generator import MPGenerator
+from terrain_diffusion.models.edm_autoencoder import EDMAutoencoder
+from terrain_diffusion.models.edm_unet import EDMUnet2D
+from terrain_diffusion.models.mp_generator import MPGenerator
 from safetensors.torch import load_model
 from ema_pytorch import PostHocEMA
 from diffusers.configuration_utils import ConfigMixin
@@ -33,8 +33,6 @@ def load_model_from_checkpoint(checkpoint_path, ema_step=None, sigma_rel=None):
         model = EDMAutoencoder.from_config(EDMAutoencoder.load_config(config_path))
     elif config['_class_name'] == 'MPGenerator':
         model = MPGenerator.from_config(MPGenerator.load_config(config_path))
-    elif config['_class_name'] == 'ResNetAutoencoder':
-        model = ResNetAutoencoder.from_config(ResNetAutoencoder.load_config(config_path))
     else:
         raise ValueError(f'Unknown model class: {config["_class_name"]}')
 

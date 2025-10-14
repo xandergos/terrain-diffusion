@@ -7,11 +7,12 @@ from terrain_diffusion.common.model_utils import get_model
 from terrain_diffusion.data.laplacian_encoder import laplacian_decode, laplacian_denoise
 from terrain_diffusion.inference.scheduler.dpmsolver import EDMDPMSolverMultistepScheduler
 from terrain_diffusion.training.datasets.datasets import H5LatentsDataset, H5LatentsSimpleDataset
-from terrain_diffusion.training.gan.generator import MPGenerator
+from terrain_diffusion.models.mp_generator import MPGenerator
 from ema_pytorch import PostHocEMA
 from safetensors.torch import load_model
 import matplotlib.pyplot as plt
-from terrain_diffusion.training.unet import EDMAutoencoder, EDMUnet2D
+from terrain_diffusion.models.edm_autoencoder import EDMAutoencoder
+from terrain_diffusion.models.edm_unet import EDMUnet2D
 from terrain_diffusion.inference.scheduler.functional_dpmsolver import multistep_dpm_solver_second_order_update, dpm_solver_first_order_update, precondition_outputs
 from matplotlib.widgets import Slider
 from infinite_tensor import MemoryTileStore, TensorWindow

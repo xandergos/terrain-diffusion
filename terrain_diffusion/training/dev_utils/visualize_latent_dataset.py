@@ -22,7 +22,7 @@ import yaml
 from confection import Config, registry
 from torch.utils.data import DataLoader
 from terrain_diffusion.training.datasets.datasets import H5LatentsDataset, LongDataset
-from terrain_diffusion.training.unet import EDMAutoencoder
+from terrain_diffusion.models.edm_autoencoder import EDMAutoencoder
 from terrain_diffusion.training.registry import build_registry
 from terrain_diffusion.training.utils import recursive_to
 from terrain_diffusion.data.laplacian_encoder import laplacian_decode, laplacian_denoise

@@ -4,8 +4,8 @@ import torch.nn as nn
 from diffusers.models.modeling_utils import ModelMixin
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 
-from terrain_diffusion.training.unet import MPConv, UNetBlock, mp_silu, mp_concat, normalize, resample, mp_sum, MPConvResample
-from terrain_diffusion.training.gan.discriminator_basic import ResBlock
+from terrain_diffusion.models.mp_layers import MPConv, mp_silu, mp_concat, normalize, resample, mp_sum, MPConvResample
+from terrain_diffusion.models.unet_block import UNetBlock
 
 class MPGenerator(ModelMixin, ConfigMixin):
     """
@@ -140,48 +140,8 @@ class MPGenerator(ModelMixin, ConfigMixin):
             if module != self and hasattr(module, 'norm_weights'):
                 module.norm_weights()
 
-class GBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, upsample=False):
-        super().__init__()
-        self.upsample = upsample
-        self.pixel_conv = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1)
-        self.block1 = ResBlock(out_channels)
-        self.block2 = ResBlock(out_channels)
-        
-    def forward(self, x):
-        x = self.pixel_conv(x)
-        if self.upsample:
-            x = nn.functional.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)
-        x = self.block1(x)
-        x = self.block2(x)
-        return x
-
-
-class ResNetGenerator(nn.Module):
-    def __init__(self, latent_channels=256, out_channels=2, model_channels=64, n_layers=3):
-        super().__init__()
-        
-        # Stem
-        self.stem = nn.Sequential(nn.Conv2d(latent_channels, model_channels, kernel_size=1, stride=1))
-
-        # Residual stages
-        blocks = []
-        cur_channels = model_channels
-        for _ in range(max(n_layers - 1, 0)):
-            out_channels_block = min(cur_channels * 2, 512)
-            blocks.append(GBlock(cur_channels, out_channels_block, upsample=True))
-            cur_channels = out_channels_block
-        blocks.append(GBlock(cur_channels, cur_channels, upsample=False))
-        self.blocks = nn.Sequential(*blocks)
-
-        # Final 1-channel conv
-        self.final = nn.Conv2d(cur_channels, out_channels, kernel_size=1, stride=1)
-        
-    def forward(self, z):
-        x = self.stem(z)
-        x = self.blocks(x)
-        x = self.final(x)
-        return x
+# Note: GBlock and ResNetGenerator classes were removed as they depended on 
+# ResBlock from the deleted discriminator_basic module and were not used anywhere.
 
 
 if __name__ == "__main__":

@@ -19,7 +19,8 @@ import yaml
 from confection import Config, registry
 from torch.utils.data import DataLoader
 from terrain_diffusion.training.datasets.datasets import LongDataset
-from terrain_diffusion.training.unet import EDMAutoencoder, EDMUnet2D
+from terrain_diffusion.models.edm_autoencoder import EDMAutoencoder
+from terrain_diffusion.models.edm_unet import EDMUnet2D
 from terrain_diffusion.training.registry import build_registry
 from terrain_diffusion.training.utils import recursive_to
 

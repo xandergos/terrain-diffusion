@@ -5,7 +5,7 @@ import torch
 import matplotlib.pyplot as plt
 
 from terrain_diffusion.common.model_utils import get_model
-from terrain_diffusion.training.gan.generator import MPGenerator
+from terrain_diffusion.models.mp_generator import MPGenerator
 
 
 @click.command(context_settings=dict(ignore_unknown_options=True, allow_extra_args=True))

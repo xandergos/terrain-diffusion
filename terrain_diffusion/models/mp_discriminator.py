@@ -1,7 +1,8 @@
 import numpy as np
 import torch
 import torch.nn as nn
-from terrain_diffusion.training.unet import MPConv, UNetBlock, mp_leaky_relu, mp_silu, normalize, resample, mp_sum
+from terrain_diffusion.models.mp_layers import MPConv, mp_leaky_relu, mp_silu, normalize, resample, mp_sum
+from terrain_diffusion.models.unet_block import UNetBlock
 
 class MPDiscriminator(nn.Module):
     """

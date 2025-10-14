@@ -5,7 +5,7 @@ from torch.utils.data import DataLoader
 from terrain_diffusion.training.datasets.datasets import LongDataset
 from ema_pytorch import PostHocEMA
 
-from terrain_diffusion.training.unet import EDMUnet2D
+from terrain_diffusion.models.edm_unet import EDMUnet2D
 
 def get_dataloader(main_resolved_cfg, batch_size):
     val_dataset = main_resolved_cfg['val_dataset']
