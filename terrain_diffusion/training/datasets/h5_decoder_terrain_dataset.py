@@ -16,11 +16,10 @@ class H5DecoderTerrainDataset(Dataset):
                  subset_weights=None,
                  subset_class_labels=None,
                  eval_dataset=False,
-                 sigma_data=0.5,
                  clip_edges=True,
                  split=None,
-                 channel_means=None,
-                 channel_stds=None):
+                 residual_mean=None,
+                 residual_std=None):
         """
         Args:
             h5_file (str): Path to the HDF5 file containing the dataset.
@@ -30,10 +29,10 @@ class H5DecoderTerrainDataset(Dataset):
             subset_weights (list): Weights for each subset. Default is None (uniform sampling).
             subset_class_labels (list): Class labels for each subset. Defaults to None.
             eval_dataset (bool): Whether to use deterministic transforms. Defaults to False.
-            sigma_data (float): Data standard deviation scaling. Defaults to 0.5.
+            clip_edges (bool): Whether to clip edges when cropping. Defaults to True.
             split (str): Split to use. Defaults to None (all splits).
-            channel_means (torch.Tensor): Channel means for normalization. Defaults to None (will compute).
-            channel_stds (torch.Tensor): Channel stds for normalization. Defaults to None (will compute).
+            residual_mean (float): Mean for residual normalization. Defaults to None (will compute).
+            residual_std (float): Std for residual normalization. Defaults to None (will compute).
         """
         if subset_weights is None:
             subset_weights = [1] * len(pct_land_ranges)
@@ -44,12 +43,7 @@ class H5DecoderTerrainDataset(Dataset):
         self.subset_weights = subset_weights
         self.subset_class_labels = subset_class_labels
         self.eval_dataset = eval_dataset
-        self.sigma_data = sigma_data
         self.clip_edges = clip_edges
-        
-        # Define which climate channels to use and number of landcover classes
-        self.climate_channels = [0, 3, 11, 14]
-        self.num_landcover_classes = 23
         
         # Initialize keys
         num_subsets = len(subset_weights)
@@ -83,13 +77,10 @@ class H5DecoderTerrainDataset(Dataset):
                             self.keys[i].add((chunk_id, res, subchunk_id))
         self.keys = [list(keys) for keys in self.keys]
         
-        if channel_means is None:
-            self.channel_means = torch.zeros(2)
-            self.channel_stds = torch.ones(2)
+        self.residual_mean = residual_mean
+        self.residual_std = residual_std
+        if self.residual_mean is None or self.residual_std is None:
             self.calculate_stats()
-        else:
-            self.channel_means = channel_means
-            self.channel_stds = channel_stds
         
     def calculate_stats(self, num_samples=10000):
         """Compute per-channel mean and std using a streaming Welford algorithm.
@@ -138,8 +129,10 @@ class H5DecoderTerrainDataset(Dataset):
         for ch, (m, s) in enumerate(zip(running_mean.tolist(), std.tolist())):
             print(f"Channel {ch}: mean={m:.6f}, std={s:.6f}")
         
-        self.channel_means = running_mean
-        self.channel_stds = std
+        self.residual_mean = running_mean[0]
+        self.residual_std = std[0]
+
+        torch.set_grad_enabled(True)
 
     def __len__(self):
         return max(len(keys) for keys in self.keys)
@@ -199,31 +192,16 @@ class H5DecoderTerrainDataset(Dataset):
             
             # Load residual data
             data_residual = torch.from_numpy(f[f"{group_path}/residual"][li:li+lh, lj:lj+lw])[None]
-            data_residual = (data_residual - self.channel_means[0]) / self.channel_stds[0] * self.sigma_data
+            data_residual = (data_residual - self.residual_mean) / self.residual_std
             if flip:
                 data_residual = torch.flip(data_residual, dims=[-1])
             if rotate_k != 0:
                 data_residual = torch.rot90(data_residual, k=rotate_k, dims=[-2, -1])
-            
-            # Load watercover data
-            try:
-                data_watercover = torch.from_numpy(f[f"{group_path}/watercover"][li:li+lh, lj:lj+lw])[None] / 100
-                data_watercover = (data_watercover - self.channel_means[1]) / self.channel_stds[1] * self.sigma_data
-                if flip:
-                    data_watercover = torch.flip(data_watercover, dims=[-1])
-                if rotate_k != 0:
-                    data_watercover = torch.rot90(data_watercover, k=rotate_k, dims=[-2, -1])
-            except KeyError:
-                data_watercover = torch.zeros((1, lh, lw))
                 
-        image = torch.cat([
-            data_residual,
-            data_watercover
-        ], dim=0)
+        image = data_residual
         
         cond_image = F.interpolate(sampled_latent[None], size=(self.crop_size, self.crop_size), mode='nearest')[0]
         
-        # Only include sampled_latent in img tensor instead of concatenating with other data
         if class_label is not None:
             cond_inputs = [torch.tensor(class_label)]
         else:
@@ -232,8 +210,5 @@ class H5DecoderTerrainDataset(Dataset):
         return {'image': image.float(), 'cond_img': cond_image, 'cond_inputs': cond_inputs, 'path': group_path}
         
     def denormalize_residual(self, residual):
-        return (residual / self.sigma_data) * self.channel_stds[0] + self.channel_means[0]
-        
-    def denormalize_watercover(self, watercover):
-        return (watercover / self.sigma_data) * self.channel_stds[1] + self.channel_means[1]
+        return (residual * self.residual_std) + self.residual_mean
 

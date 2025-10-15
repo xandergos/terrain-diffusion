@@ -22,9 +22,7 @@ class H5LatentsDataset(Dataset):
                  split=None,
                  beauty_dist=None,
                  residual_mean=None,
-                 residual_std=None,
-                 watercover_mean=None,
-                 watercover_std=None):
+                 residual_std=None):
         """
         Args:
             h5_file (str): Path to the HDF5 file containing the dataset.
@@ -102,54 +100,10 @@ class H5LatentsDataset(Dataset):
         
         self.residual_mean = residual_mean
         self.residual_std = residual_std
-        self.watercover_mean = watercover_mean
-        self.watercover_std = watercover_std
 
     def __len__(self):
         return 100000
 
-    def augment_onehot(self, onehot):
-        """Augments onehot in place by randomly adding classes to pixels."""
-        # Get indices of present classes
-        present_indices = torch.where(onehot.sum(dim=(-2,-1)) > 0)[0]
-        
-        # Randomly choose number of partitions (k)
-        k = random.randint(1, len(present_indices))
-        
-        # Randomly shuffle and split present indices into k groups
-        shuffled_indices = present_indices[torch.randperm(len(present_indices))]
-        
-        # Create random split sizes that sum to total length
-        split_points = np.sort(np.random.choice(len(present_indices)-1, k-1, replace=False) + 1)
-        split_sizes = np.diff(np.concatenate([[0], split_points, [len(present_indices)]]))
-        
-        # Create groups based on random split sizes
-        start = 0
-        index_groups = []
-        for size in split_sizes:
-            index_groups.append(shuffled_indices[start:start+size])
-            start += size
-        
-        # For each group, perform separate augmentation
-        for group_indices in index_groups:
-            # Create mask for pixels belonging to any class in this group
-            group_mask = onehot[group_indices].sum(dim=0) > 0
-            
-            # Set all classes in this group to 1 where group mask is True
-            for idx in range(len(group_indices)):
-                onehot[group_indices[idx]][group_mask] = 1
-            
-            # For classes in this group that aren't present in these pixels,
-            # randomly decide whether to include additional ones
-            zero_indices = torch.where(onehot[:].sum(dim=(-2,-1)) == 0)[0]
-            if len(zero_indices) > 0:
-                num_to_set = random.randint(0, len(zero_indices))
-                indices_to_set = zero_indices[torch.randperm(len(zero_indices))[:num_to_set]]
-                
-                # Set selected classes to 1 where group mask is True
-                for idx in indices_to_set:
-                    onehot[idx][group_mask] = 1
-                        
     def __getitem__(self, idx):
         LOWFREQ_MEAN = -31.4
         LOWFREQ_STD = 38.6
@@ -168,14 +122,11 @@ class H5LatentsDataset(Dataset):
         
         with h5py.File(self.h5_file, 'r') as f:
             group_path = f"{res}/{chunk_id}/{subchunk_id}"
-            res_group = f[str(res)]
             data_latent = f[f"{group_path}/latent"]
             data_lowfreq = f[f"{group_path}/lowfreq"]
-            data_climate = f[f"{group_path}/climate"]
             
             shape = data_latent.shape
             assert data_lowfreq.shape == shape[2:]
-            assert data_climate.shape[1:] == shape[2:]
             
             if self.clip_edges:
                 assert shape[2] >= self.crop_size + 2, f"Crop size is larger than image size + 2. Crop size: {self.crop_size}, Image size: {shape[2]}"
@@ -224,62 +175,21 @@ class H5LatentsDataset(Dataset):
             data_lowfreq = (data_lowfreq - LOWFREQ_MEAN) / LOWFREQ_STD * self.sigma_data
             lowfreq_mean = torch.mean(data_lowfreq) / self.sigma_data
             
-            # Load climate data
-            # (0=temp, 3=temp seasonality, 11=precip, 14=precip seasonality)
-            if f"{group_path}/climate" in f:
-                climate_data = f[f"{group_path}/climate"][[0, 3, 11, 14]][:, li:li+lh, lj:lj+lw]
-                climate_data = (climate_data - res_group.attrs['climate_mean'][[0, 3, 11, 14], None, None]) / res_group.attrs['climate_std'][[0, 3, 11, 14], None, None] * self.sigma_data
-                climate_data = torch.from_numpy(climate_data).float()
-                if flip:
-                    climate_data = torch.flip(climate_data, dims=[-1])
-                if rotate_k != 0:
-                    climate_data = torch.rot90(climate_data, k=rotate_k, dims=[-2, -1])
-                any_nan_climate = torch.isnan(climate_data).all(dim=(-2, -1)).any().item()
-                if any_nan_climate:
-                    climate_nanmean = torch.zeros(4)
-                else:
-                    climate_nanmean = torch.nanmean(climate_data, dim=(-2, -1))
-                climate_data_mask = torch.isnan(climate_data).any(dim=0).float().unsqueeze(0) * np.sqrt(2) * self.sigma_data
-                climate_data = torch.nan_to_num(climate_data, nan=0.0)
-            else:
-                climate_data = torch.zeros(4, lh, lw)
-                climate_data_mask = torch.zeros(1, lh, lw)
-                climate_data_mask[0] = np.sqrt(2) * self.sigma_data
-                climate_nanmean = torch.zeros(4)
-                any_nan_climate = True
-            
         image = torch.cat([
             sampled_latent,
-            data_lowfreq,
-            climate_data,
-            climate_data_mask
+            data_lowfreq
         ], dim=0)
         
-        # Only include sampled_latent in img tensor instead of concatenating with other data
-        cond_inputs = [lowfreq_mean.reshape([]).float(),
-                       climate_nanmean[0].float().reshape([]),
-                       climate_nanmean[1].float().reshape([]),
-                       climate_nanmean[2].float().reshape([]),
-                       climate_nanmean[3].float().reshape([]),
-                       torch.tensor(1 if any_nan_climate else 0, dtype=torch.int64).reshape([])]
+        cond_inputs = [lowfreq_mean.reshape([]).float()]
         if class_label is not None:
             cond_inputs += [torch.tensor(class_label)]
             
         return {'image': image.float(), 'cond_inputs': cond_inputs, 'path': group_path}
 
-    def denormalize_climate(self, climate, resolution):
-        """Denormalize climate data to original scale. Climate data should have shape [B, 4, H, W]"""
-        with h5py.File(self.h5_file, 'r') as f:
-            res_group = f[str(resolution)]
-            return climate * res_group.attrs['climate_std'][None, [0, 3, 11, 14], None, None] + res_group.attrs['climate_mean'][None, [0, 3, 11, 14], None, None]
-
     def denormalize_residual(self, residual):
         return residual * self.residual_std + self.residual_mean
-
-    def denormalize_watercover(self, watercover):
-        return watercover * self.watercover_std + self.watercover_mean
     
-    def denormalize_lowfreq(self, lowfreq, resolution=None):
+    def denormalize_lowfreq(self, lowfreq):
         LOWFREQ_MEAN = -31.4
         LOWFREQ_STD = 38.6
         return lowfreq * LOWFREQ_STD + LOWFREQ_MEAN
