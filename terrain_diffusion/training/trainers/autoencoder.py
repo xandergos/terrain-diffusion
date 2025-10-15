@@ -203,21 +203,22 @@ class AutoencoderTrainer(Trainer):
         pbar = tqdm(total=self.config['evaluation']['validation_steps'], desc="Validation")
         val_dataloader_iter = iter(self.val_dataloader)
         
-        while pbar.n < pbar.total:
-            batch = next(val_dataloader_iter)
-            images = batch['image']
-            cond_img = batch.get('cond_img')
-            conditional_inputs = batch.get('cond_inputs')
-            
-            self.model.eval()
-            with torch.no_grad(), self.accelerator.autocast(), temporary_ema_to_model(self.ema.ema_models[0]):
+        
+        with torch.no_grad(), self.accelerator.autocast(), temporary_ema_to_model(self.ema.ema_models[0]):
+            while pbar.n < pbar.total:
+                batch = next(val_dataloader_iter)
+                images = batch['image']
+                cond_img = batch.get('cond_img')
+                conditional_inputs = batch.get('cond_inputs')
+                
+                self.model.eval()
                 scaled_clean_images = images
                 if cond_img is not None:
                     scaled_clean_images = torch.cat([scaled_clean_images, cond_img], dim=1)
                 
                 z_means, z_logvars = self.model.preencode(scaled_clean_images, conditional_inputs)
                 z = self.model.postencode(z_means, z_logvars)
-                decoded_x, logvar = self.model.decode(z, include_logvar=True)
+                decoded_x = self.model.decode(z)
 
                 # Calculate reconstruction losses
                 recon_loss, mse_loss, perceptual_loss = self._calculate_loss(decoded_x, scaled_clean_images)
@@ -227,14 +228,14 @@ class AutoencoderTrainer(Trainer):
                 kl_loss = -0.5 * torch.mean(1 + ndz_logvars - ndz_means**2 - ndz_logvars.exp())
                 total_loss = recon_loss + kl_loss * self.config['training']['kl_weight']
 
-            validation_stats['loss'].append(total_loss.item())
-            validation_stats['recon_loss'].append(recon_loss.item())
-            validation_stats['mse_loss'].append(mse_loss.item())
-            validation_stats['perceptual_loss'].append(perceptual_loss.item())
-            validation_stats['kl_loss'].append(kl_loss.item())
-            
-            pbar.update(images.shape[0])
-            pbar.set_postfix({k: f"{np.nanmean(v):.3f}" for k, v in validation_stats.items()})
+                validation_stats['loss'].append(total_loss.item())
+                validation_stats['recon_loss'].append(recon_loss.item())
+                validation_stats['mse_loss'].append(mse_loss.item())
+                validation_stats['perceptual_loss'].append(perceptual_loss.item())
+                validation_stats['kl_loss'].append(kl_loss.item())
+                
+                pbar.update(images.shape[0])
+                pbar.set_postfix({k: f"{np.nanmean(v):.3f}" for k, v in validation_stats.items()})
         
         out_stats = {f'val/{k}': np.nanmean(v) for k, v in validation_stats.items()}
         

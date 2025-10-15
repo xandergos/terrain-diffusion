@@ -9,15 +9,15 @@ Usage:
     python visualize_autoencoder.py --model-path /path/to/model/checkpoint --config /path/to/config.yaml
 """
 
+import yaml
 import click
-import matplotlib
 import torch
-import numpy as np
+import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Button
-import yaml
 from confection import Config, registry
 from torch.utils.data import DataLoader
+
 from terrain_diffusion.training.datasets import LongDataset
 from terrain_diffusion.models.edm_autoencoder import EDMAutoencoder
 from terrain_diffusion.training.registry import build_registry
@@ -35,9 +35,9 @@ class AutoencoderVisualizer:
         self.current_idx = 0
         self.batch_idx = 0
         
-        # Setup matplotlib figure - hardcoded for 2 channels (residual + water)
-        self.fig, self.axes = plt.subplots(2, 2, figsize=(12, 8))
-        self.fig.suptitle('Autoencoder Reconstruction Comparison (Residual + Water)', fontsize=16)
+        # Setup matplotlib figure - single channel (residual only)
+        self.fig, self.axes = plt.subplots(1, 2, figsize=(12, 6))
+        self.fig.suptitle('Autoencoder Reconstruction Comparison (Residual)', fontsize=16)
         
         # Add navigation buttons only in interactive mode
         if not headless:
@@ -101,24 +101,6 @@ class AutoencoderVisualizer:
         self.current_idx = 0
         self.batch_idx += 1
         
-    def normalize_for_display(self, tensor, channel_type='residual'):
-        """Normalize tensor for display based on channel type"""
-        # Convert to numpy
-        if isinstance(tensor, torch.Tensor):
-            tensor = tensor.cpu().numpy()
-        
-        if channel_type == 'residual':
-            tensor = tensor
-        elif channel_type == 'water_real':
-            # For water coverage real data: already 0-1, just clamp
-            tensor = np.clip(tensor, 0, 1)
-        elif channel_type == 'water_logits':
-            # For water coverage logits: apply sigmoid to convert to probabilities
-            tensor = 1 / (1 + np.exp(-tensor))  # sigmoid
-            tensor = np.clip(tensor, 0, 1)
-            
-        return tensor
-        
     def update_display(self):
         """Update the display with current images"""
         if self.current_batch is None:
@@ -133,29 +115,18 @@ class AutoencoderVisualizer:
         recon_img = self.reconstructions[self.current_idx]
         
         # Clear all axes
-        for ax in self.axes.flat:
+        for ax in self.axes:
             ax.clear()
             
-        # Hardcoded for exactly 2 channels: residual (0) and water (1)
-        channel_names = ['Residual', 'Water Coverage']
-        channel_types = ['residual', 'water_real']  # For real images
-        recon_channel_types = ['residual', 'water_real']  # For reconstructions
+        # Real image (left)
+        self.axes[0].imshow(real_img[0].cpu().numpy(), cmap='viridis')
+        self.axes[0].set_title('Real - Residual')
+        self.axes[0].axis('off')
         
-        for i in range(2):  # Exactly 2 channels
-            # Set vmin/vmax for water coverage channels
-            vmin, vmax = (0, 1) if i == 1 else (None, None)  # Water channel uses 0-1 range
-            
-            # Real image
-            real_channel = self.normalize_for_display(real_img[i], channel_types[i])
-            self.axes[0, i].imshow(real_channel, cmap='viridis', vmin=vmin, vmax=vmax)
-            self.axes[0, i].set_title(f'Real - {channel_names[i]}')
-            self.axes[0, i].axis('off')
-            
-            # Reconstructed image
-            recon_channel = self.normalize_for_display(recon_img[i], recon_channel_types[i])
-            self.axes[1, i].imshow(recon_channel, cmap='viridis', vmin=vmin, vmax=vmax)
-            self.axes[1, i].set_title(f'Reconstruction - {channel_names[i]}')
-            self.axes[1, i].axis('off')
+        # Reconstructed image (right)
+        self.axes[1].imshow(recon_img[0].cpu().numpy(), cmap='viridis')
+        self.axes[1].set_title('Reconstruction - Residual')
+        self.axes[1].axis('off')
             
         # Update title with current position
         self.fig.suptitle(f'Autoencoder Reconstruction - Batch {self.batch_idx}, Image {self.current_idx + 1}/{batch_size}', fontsize=16)
@@ -211,7 +182,6 @@ class AutoencoderVisualizer:
         os.makedirs(output_dir, exist_ok=True)
         
         saved_count = 0
-        batch_count = 0
         
         while saved_count < num_samples:
             batch_size = self.current_batch['image'].shape[0]
@@ -232,7 +202,6 @@ class AutoencoderVisualizer:
             # Load next batch if we need more samples
             if saved_count < num_samples:
                 self.load_next_batch()
-                batch_count += 1
         
         print(f'\nSaved {saved_count} samples to {output_dir}/')
             
@@ -285,10 +254,12 @@ def main(model_path, config, batch_size, device, num_workers, headless, num_samp
         with open(config, 'r') as f:
             config_dict = json.load(f)
         config_obj = Config(config_dict)
-    else:
+    elif config.endswith('.yaml'):
         with open(config, 'r') as f:
             config_dict = yaml.safe_load(f)
         config_obj = Config(config_dict)
+    else:
+        config_obj = Config().from_disk(config)
     
     for key in list(config_obj.keys()):
         if not key.endswith('_dataset'):

@@ -95,8 +95,7 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
         log_with=None
     )
     
-    # Initialize trainer (trainer handles EMA initialization internally)
-    trainer_class = resolved['trainer_class']
+    trainer_class = resolved['trainer']
     trainer = trainer_class(config, resolved, accelerator, state)
     
     # Load model checkpoint if provided (before accelerator.prepare)
