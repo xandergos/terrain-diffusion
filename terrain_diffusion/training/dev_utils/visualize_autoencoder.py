@@ -34,6 +34,7 @@ class AutoencoderVisualizer:
         self.current_batch = None
         self.current_idx = 0
         self.batch_idx = 0
+        self.error_text = None
         
         # Setup matplotlib figure - single channel (residual only)
         self.fig, self.axes = plt.subplots(1, 2, figsize=(12, 6))
@@ -136,12 +137,16 @@ class AutoencoderVisualizer:
             mse_loss = torch.nn.functional.mse_loss(recon_img, real_img).item()
             mae_loss = torch.nn.functional.l1_loss(recon_img, real_img).item()
             
+        # Remove old error text if it exists
+        if self.error_text is not None:
+            self.error_text.remove()
+        
         # Add error text
-        error_text = f'MSE: {mse_loss:.4f}, MAE: {mae_loss:.4f}'
-        self.fig.text(0.5, 0.95, error_text, ha='center', fontsize=12)
+        error_text_str = f'MSE: {mse_loss:.4f}, MAE: {mae_loss:.4f}'
+        self.error_text = self.fig.text(0.5, 0.91, error_text_str, ha='center', fontsize=11)
         
         plt.tight_layout()
-        plt.subplots_adjust(bottom=0.1, top=0.9)
+        plt.subplots_adjust(bottom=0.1, top=0.88)
         self.fig.canvas.draw()
         
     def prev_image(self, event):

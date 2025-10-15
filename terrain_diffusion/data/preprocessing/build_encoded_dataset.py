@@ -23,7 +23,7 @@ import torch.nn.functional as F
 @click.option('--min-pct-land', type=float, help='Minimum percentage of land in the chunk (0-1)', default=0.0)
 @click.option('--residual-mean', type=float, default=0.0, show_default=True, help='Mean used to normalize residual channel')
 @click.option('--residual-std', type=float, default=1.1678, show_default=True, help='Std used to normalize residual channel')
-def process_encoded_dataset(dataset, resolution, encoder_model_path, use_fp16, compile_model, overwrite, min_pct_land, residual_mean, residual_std, water_mean, water_std):
+def process_encoded_dataset(dataset, resolution, encoder_model_path, use_fp16, compile_model, overwrite, min_pct_land, residual_mean, residual_std):
     """
     Add latent encodings to an existing HDF5 dataset containing high/low frequency components.
     
