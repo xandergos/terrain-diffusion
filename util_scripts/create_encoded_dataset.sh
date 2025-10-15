@@ -14,8 +14,6 @@ python3.11 ./terrain_diffusion/data/preprocessing/build_encoded_dataset.py  \
     --encoder ./checkpoints/models/autoencoder_x8 \
     --use-fp16 \
     --compile-model \
-    --residual-mean 0.00216 \
+    --residual-mean 0.0 \
     --residual-std 1.1678 \
-    --water-mean 0.08018 \
-    --water-std 0.26459 \
     --overwrite;
