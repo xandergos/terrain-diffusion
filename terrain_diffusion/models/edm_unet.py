@@ -27,13 +27,9 @@ class EDMUnet2D(ModelMixin, ConfigMixin):
         attn_resolutions=None,
         midblock_attention=True,
         concat_balance=0.3,
-        logvar_channels=128,
         block_kwargs=None,
         conditional_inputs=[],
-        encode_only=False,
-        disable_out_gain=False,
-        fourier_scale=1,
-        n_logvar=1
+        fourier_scale=1
     ):
         """
         Parameters:
@@ -41,7 +37,6 @@ class EDMUnet2D(ModelMixin, ConfigMixin):
             in_channels (int): The number of channels in the input image. 
                 Usually the same as out_channels, unless some channels are used for conditioning.
             out_channels (int): The number of channels in the output image. Default is in_channels.
-            label_dim (int, optional): The number of labels. Defaults to 0.
             model_channels (int, optional): The dimension of the model. Default is 128.
             model_channel_mults (list, optional): The channel multipliers for each block. Default is [1, 2, 3, 4].
             layers_per_block (int, optional): The number of layers per block. Default is 2.
@@ -50,7 +45,7 @@ class EDMUnet2D(ModelMixin, ConfigMixin):
             attn_resolutions (list, optional): The resolutions at which attention is applied. Default is None.
             midblock_attention (bool, optional): Whether to apply attention in the midblock. Default is True.
             concat_balance (float, optional): Balance factor for concatenation. Default is 0.3.
-            logvar_channels (int, optional): The number of channels for uncertainty estimation. Default is 128.
+            block_kwargs (dict, optional): Additional keyword arguments for UNetBlock. Default is None.
             conditional_inputs (list, optional): A list of tuples describing additional inputs to the model.
                 Each tuple should be in the form (type, x, weight), where type is either 'float' or 'embedding'. 
                 x depends on the type:
@@ -59,9 +54,7 @@ class EDMUnet2D(ModelMixin, ConfigMixin):
                 'embedding' indicates the conditional input is an embedding of an integer id, and in this case 'x' is the number of possible ids.
                 In all cases, 'weight' is a float that describes the weight of the conditional input relative to the other inputs.
                 The 'weight' of the noise input is fixed at 1.
-            encode_only (bool, optional): Whether to only encode the input and not decode it. Default is False.
             fourier_scale (float, optional): The scale factor for the Fourier embedding. Default is 1. Can also use 'pos' to use a positional embedding.
-            n_logvar (int, optional): The number of logvar channels. Default is 1.
         """
         super().__init__()        
         self.concat_balance = concat_balance
@@ -99,10 +92,7 @@ class EDMUnet2D(ModelMixin, ConfigMixin):
                 self.conditional_layers.append(MPEmbedding(x, emb_channels))
             self.conditional_weights.append(weight)
 
-        if not disable_out_gain:
-            self.out_gain = nn.Parameter(torch.zeros([]))
-        else:
-            self.out_gain = 1.0
+        self.out_gain = nn.Parameter(torch.zeros([]))
 
         # Encoder.
         self.enc = nn.ModuleDict()
@@ -125,8 +115,6 @@ class EDMUnet2D(ModelMixin, ConfigMixin):
         skips = [block.out_channels for block in self.enc.values()]
         for level, (channels, nb) in reversed(list(enumerate(zip(block_channels, layers_per_block)))):
             res = image_size // 2**level
-            if encode_only:
-                continue
             if level == len(block_channels) - 1:
                 self.dec[f'{res}x{res}_in0'] = UNetBlock(cout, cout, emb_channels, mode='dec', attention=midblock_attention, **block_kwargs)
                 self.dec[f'{res}x{res}_in1'] = UNetBlock(cout, cout, emb_channels, mode='dec', **block_kwargs)
@@ -138,9 +126,9 @@ class EDMUnet2D(ModelMixin, ConfigMixin):
                 self.dec[f'{res}x{res}_block{idx}'] = UNetBlock(cin, cout, emb_channels, mode='dec', attention=(res in attn_resolutions), **block_kwargs)
         self.out_conv = MPConv(cout, out_channels, kernel=[3, 3])
         
-        # logvar
-        self.logvar_fourier = MPFourier(logvar_channels)
-        self.logvar_linear = MPConv(logvar_channels, n_logvar, kernel=[])
+        # logvar (internal, not configurable)
+        self.logvar_fourier = MPFourier(128)
+        self.logvar_linear = MPConv(128, 1, kernel=[])
 
     def compute_embeddings(self, noise_labels, conditional_inputs):
         conditional_inputs = conditional_inputs or []

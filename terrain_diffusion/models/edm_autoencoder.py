@@ -20,14 +20,11 @@ class EDMAutoencoder(ModelMixin, ConfigMixin):
         model_channels=128,
         model_channel_mults=None,
         layers_per_block=3,
-        layers_per_block_decoder=None,
         attn_resolutions=None,
         midblock_attention=True,
-        logvar_channels=128,
         block_kwargs=None,
         conditional_inputs=[],
         latent_channels=None,
-        n_logvar=1,
         direct_skips=[]
     ):
         """
@@ -40,10 +37,8 @@ class EDMAutoencoder(ModelMixin, ConfigMixin):
             model_channels (int, optional): The dimension of the model. Default is 128.
             model_channel_mults (list, optional): The channel multipliers for each block. Default is [1, 2, 3, 4].
             layers_per_block (int, optional): The number of layers per block. Default is 2.
-            layers_per_block_decoder (int, optional): The number of layers per block for the decoder. Default is layers_per_block.
             attn_resolutions (list, optional): The resolutions at which attention is applied. Default is None.
             midblock_attention (bool, optional): Whether to apply attention in the midblock. Default is True.
-            logvar_channels (int, optional): The number of channels for uncertainty estimation. Default is 128.
             block_kwargs (dict, optional): Additional keyword arguments for UNetBlock. Default is None.
             conditional_inputs (list, optional): A list of tuples describing additional inputs to the model.
             latent_channels (int, optional): The number of channels in the latent space. Required.
@@ -58,12 +53,9 @@ class EDMAutoencoder(ModelMixin, ConfigMixin):
         out_channels = out_channels or in_channels
         if isinstance(layers_per_block, int):
             layers_per_block = [layers_per_block] * len(model_channel_mults)
-        layers_per_block_decoder = layers_per_block_decoder or layers_per_block
-        if isinstance(layers_per_block_decoder, int):
-            layers_per_block_decoder = [layers_per_block_decoder] * len(model_channel_mults)
         assert latent_channels is not None, "latent_channels must be specified"
         
-        # Encoder (EDMUnet2D)
+        # Encoder (EDMUnet2D) - use internal-only parameters
         self.encoder = EDMUnet2D(
             image_size=image_size,
             in_channels=in_channels,
@@ -75,11 +67,8 @@ class EDMAutoencoder(ModelMixin, ConfigMixin):
             noise_emb_dims=0,
             attn_resolutions=attn_resolutions,
             midblock_attention=midblock_attention,
-            logvar_channels=logvar_channels,
             block_kwargs=block_kwargs,
-            conditional_inputs=conditional_inputs,
-            encode_only=True,
-            disable_out_gain=False
+            conditional_inputs=conditional_inputs
         )
         self.encoder.out_gain = nn.Parameter(torch.ones([]))
         
@@ -88,7 +77,7 @@ class EDMAutoencoder(ModelMixin, ConfigMixin):
         self.decoder = nn.ModuleList()
         self.decoder_conv = MPConv(latent_channels + len(direct_skips) + 1, model_channels * model_channel_mults[-1], kernel=[1, 1])
         cout = model_channels * model_channel_mults[-1]  # +1 because we add a ones channel to simulate a bias
-        for level, (channels, nb) in reversed(list(enumerate(zip(block_channels, layers_per_block_decoder)))):
+        for level, (channels, nb) in reversed(list(enumerate(zip(block_channels, layers_per_block)))):
             res = image_size // 2**level
             if level == len(block_channels) - 1:
                 self.decoder.append(UNetBlock(cout, cout, 0, mode='dec', attention=midblock_attention, **block_kwargs))
@@ -102,7 +91,7 @@ class EDMAutoencoder(ModelMixin, ConfigMixin):
         self.out_conv = MPConv(cout, out_channels, kernel=[3, 3])
         self.out_gain = nn.Parameter(torch.ones([]) * 0.1)
         
-        self.logvar = nn.Parameter(torch.zeros([n_logvar]))
+        self.logvar = nn.Parameter(torch.zeros([1]))
 
     def preencode(self, x, conditional_inputs=None):
         encodings = self.encoder(x, noise_labels=None, conditional_inputs=conditional_inputs)
@@ -129,7 +118,7 @@ class EDMAutoencoder(ModelMixin, ConfigMixin):
         eps = torch.randn_like(std)
         return means + eps * std
     
-    def decode(self, z, include_logvar=False):
+    def decode(self, z):
         # Extract direct skip channels from end of latent
         direct_channels = z[:, self.config.latent_channels:]
         
@@ -152,9 +141,6 @@ class EDMAutoencoder(ModelMixin, ConfigMixin):
                 
             decoder_out = direct_output_mask * direct_output + (1 - direct_output_mask) * decoder_out
             
-        if include_logvar:
-            logvar = self.logvar.reshape(-1, 1, 1, 1)
-            return decoder_out, logvar
         return decoder_out
 
     def count_parameters(self):
@@ -165,13 +151,3 @@ class EDMAutoencoder(ModelMixin, ConfigMixin):
             int: Total number of trainable parameters.
         """
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
-
-class Logvar(nn.Module):
-    def __init__(self, channels):
-        super().__init__()
-        self.logvar_fourier = MPFourier(channels)
-        self.logvar_linear = MPConv(channels, 1, kernel=[])
-
-    def forward(self, x):
-        return self.logvar_linear(self.logvar_fourier(x))
-
