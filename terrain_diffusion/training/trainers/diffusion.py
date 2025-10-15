@@ -5,10 +5,13 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 import warnings
 from ema_pytorch import PostHocEMA
+from torchmetrics.image.kid import KernelInceptionDistance
 
 from terrain_diffusion.training.trainers.trainer import Trainer
 from terrain_diffusion.training.datasets import LongDataset
 from terrain_diffusion.models.edm_unet import EDMUnet2D
+from terrain_diffusion.models.edm_autoencoder import EDMAutoencoder
+from terrain_diffusion.data.laplacian_encoder import laplacian_denoise, laplacian_decode
 from terrain_diffusion.training.utils import temporary_ema_to_model
 
 
@@ -49,6 +52,15 @@ class DiffusionTrainer(Trainer):
         # Initialize EMA
         resolved['ema']['checkpoint_folder'] = os.path.join(resolved['logging']['save_dir'], 'phema')
         self.ema = PostHocEMA(self.model, **resolved['ema'])
+        
+        autoencoder_path = self.config['evaluation'].get('kid_autoencoder_path')
+        if autoencoder_path is not None:
+            autoencoder = EDMAutoencoder.from_pretrained(autoencoder_path)
+            autoencoder.eval()
+            autoencoder.requires_grad_(False)
+            autoencoder = torch.compile(autoencoder)
+        else:
+            autoencoder = None
         
         print("Validation dataset size:", len(self.val_dataset))
         print(f"Training model with {self.model.count_parameters()} parameters.")
@@ -112,18 +124,9 @@ class DiffusionTrainer(Trainer):
         return self.model
     
     def _calc_loss(self, pred_v_t, v_t, logvar, sigma_data):
-        """Calculate loss with optional grouping."""
+        """Calculate loss."""
         loss = 1 / (logvar.exp() * sigma_data ** 2) * ((pred_v_t - v_t) ** 2) + logvar
-        if 'loss_groups' not in self.config['training']:
-            return loss.mean()
-        
-        loss_groups = []
-        c = 0
-        for group_channels in self.config['training']['loss_groups']:
-            loss_groups.append(loss[:, c:c+group_channels].mean())
-            c += group_channels
-        loss = torch.stack(loss_groups).mean()
-        return loss
+        return loss.mean()
     
     def train_step(self, state):
         """Perform one training step."""
@@ -192,6 +195,173 @@ class DiffusionTrainer(Trainer):
             'batch_size': images.shape[0]
         }
     
+    def _normalize_and_process_terrain(self, terrain):
+        """Normalize terrain to [0, 255] uint8 format for KID calculation."""
+        terrain_min = torch.amin(terrain, dim=(1, 2, 3), keepdim=True)
+        terrain_max = torch.amax(terrain, dim=(1, 2, 3), keepdim=True)
+        terrain_range = torch.maximum(terrain_max - terrain_min, torch.tensor(1.0))
+        terrain_mid = (terrain_min + terrain_max) / 2
+        
+        terrain_norm = torch.clamp(((terrain - terrain_mid) / terrain_range + 0.5) * 255, 0, 255)
+        terrain_norm = terrain_norm.repeat(1, 3, 1, 1)
+        return terrain_norm.to(torch.uint8)
+    
+    def _decode_latents_to_terrain(self, latents, lowfreq_input, autoencoder, scheduler):
+        """Decode latents to terrain using autoencoder and laplacian decoding."""
+        latents_std = self.val_dataloader.dataset.base_dataset.latents_std.to(latents.device)
+        latents_mean = self.val_dataloader.dataset.base_dataset.latents_mean.to(latents.device)
+        sigma_data = scheduler.config.sigma_data
+        
+        latent = (latents[:, :4] / latents_std + latents_mean) / sigma_data
+        highfreq = autoencoder.decode(latent)[:, :1]
+        highfreq = self.val_dataloader.dataset.base_dataset.denormalize_residual(
+            highfreq, self.val_dataloader.dataset.base_dataset.subset_resolutions[0]
+        )
+        lowfreq = self.val_dataloader.dataset.base_dataset.denormalize_lowfreq(lowfreq_input)
+        highfreq, lowfreq = laplacian_denoise(highfreq, lowfreq, sigma=5)
+        return laplacian_decode(highfreq, lowfreq)
+    
+    def _calculate_base_kid(self):
+        """Calculate Kernel Inception Distance (KID) for generated samples."""
+        n_images = self.config['evaluation']['kid_n_images']
+        pbar = tqdm(total=n_images, desc="Calculating KID")
+        
+        scheduler = self.scheduler.to(self.accelerator.device)
+        scheduler.set_timesteps(self.config['evaluation']['kid_scheduler_steps'])
+        
+        autoencoder = self.autoencoder.to(self.accelerator.device)
+        
+        with torch.no_grad(), self.accelerator.autocast():
+            kid = KernelInceptionDistance(normalize=True).to(self.accelerator.device)
+            kid_squared = KernelInceptionDistance(normalize=True).to(self.accelerator.device)
+            
+            data_iter = iter(self.val_dataloader)
+            samples_generated = 0
+            
+            while samples_generated < n_images:
+                batch = next(data_iter)
+                images = batch['image']
+                cond_img = batch.get('cond_img')
+                conditional_inputs = batch.get('cond_inputs')
+                
+                # Generate samples using diffusion sampling
+                samples = torch.randn_like(images) * scheduler.sigmas[0]
+                
+                # Sampling loop
+                for t, sigma in zip(scheduler.timesteps, scheduler.sigmas):
+                    t, sigma = t.to(samples.device), sigma.to(samples.device)
+                    
+                    scaled_input = scheduler.precondition_inputs(samples, sigma)
+                    cnoise = scheduler.trigflow_precondition_noise(sigma.view(-1).expand(samples.shape[0]))
+                    
+                    # Get model predictions
+                    x = torch.cat([scaled_input, cond_img], dim=1)
+                    model_output = self.model(x, noise_labels=cnoise, conditional_inputs=conditional_inputs)
+                    
+                    samples = scheduler.step(model_output, t, samples).prev_sample
+                
+                # Decode latents to terrain
+                terrain = self._decode_latents_to_terrain(samples, images[:, 4:5], autoencoder, scheduler)
+                real_terrain = self._decode_latents_to_terrain(images, images[:, 4:5], autoencoder, scheduler)
+                
+                # Update KID metric for original terrain
+                kid.update(self._normalize_and_process_terrain(terrain), real=False)
+                kid.update(self._normalize_and_process_terrain(real_terrain), real=True)
+                
+                # Update KID metric for squared terrain: sign(terrain)*terrain**2
+                terrain_squared = torch.sign(terrain) * terrain ** 2
+                real_terrain_squared = torch.sign(real_terrain) * real_terrain ** 2
+                kid_squared.update(self._normalize_and_process_terrain(terrain_squared), real=False)
+                kid_squared.update(self._normalize_and_process_terrain(real_terrain_squared), real=True)
+                
+                samples_generated += images.shape[0]
+                pbar.update(images.shape[0])
+            
+            pbar.close()
+            
+            autoencoder = autoencoder.to('cpu')
+            
+            # Calculate final KID scores
+            kid_mean, kid_std = kid.compute()
+            kid_sq_mean, kid_sq_std = kid_squared.compute()
+            print(f"Final KID Score (original): {kid_mean.item():.6f} ± {kid_std.item():.6f}")
+            print(f"Final KID Score (squared): {kid_sq_mean.item():.6f} ± {kid_sq_std.item():.6f}")
+            return {
+                'kid_mean': kid_mean.item(), 
+                'kid_std': kid_std.item(),
+                'kid_squared_mean': kid_sq_mean.item(),
+                'kid_squared_std': kid_sq_std.item()
+            }
+    
+    def _calculate_decoder_kid(self):
+        """Calculate Kernel Inception Distance (KID) for decoder models."""
+        n_images = self.config['evaluation']['kid_n_images']
+        pbar = tqdm(total=n_images, desc="Calculating Decoder KID")
+        
+        scheduler = self.scheduler.to(self.accelerator.device)
+        scheduler.set_timesteps(self.config['evaluation']['kid_scheduler_steps'])
+        
+        with torch.no_grad(), self.accelerator.autocast():
+            kid = KernelInceptionDistance(normalize=True).to(self.accelerator.device)
+            kid_squared = KernelInceptionDistance(normalize=True).to(self.accelerator.device)
+            
+            data_iter = iter(self.val_dataloader)
+            samples_generated = 0
+            
+            while samples_generated < n_images:
+                batch = next(data_iter)
+                images = batch['image']
+                cond_img = batch.get('cond_img')
+                conditional_inputs = batch.get('cond_inputs')
+                
+                # Generate samples using diffusion sampling
+                samples = torch.randn_like(images) * scheduler.sigmas[0]
+                
+                # Sampling loop
+                for t, sigma in zip(scheduler.timesteps, scheduler.sigmas):
+                    t, sigma = t.to(samples.device), sigma.to(samples.device)
+                    
+                    scaled_input = scheduler.precondition_inputs(samples, sigma)
+                    cnoise = scheduler.trigflow_precondition_noise(sigma.view(-1).expand(samples.shape[0]))
+                    
+                    # Get model predictions
+                    x = torch.cat([scaled_input, cond_img], dim=1)
+                    model_output = self.model(x, noise_labels=cnoise, conditional_inputs=conditional_inputs)
+                    
+                    samples = scheduler.step(model_output, t, samples).prev_sample
+                
+                # Only evaluate first channel
+                samples = samples[:, :1]
+                real_samples = images[:, :1]
+                
+                # Update KID metric for original samples
+                kid.update(self._normalize_and_process_terrain(samples), real=False)
+                kid.update(self._normalize_and_process_terrain(real_samples), real=True)
+                
+                # Update KID metric for squared samples: sign(x)*x**2
+                samples_squared = torch.sign(samples) * samples ** 2
+                real_squared = torch.sign(real_samples) * real_samples ** 2
+                kid_squared.update(self._normalize_and_process_terrain(samples_squared), real=False)
+                kid_squared.update(self._normalize_and_process_terrain(real_squared), real=True)
+                
+                samples_generated += images.shape[0]
+                pbar.update(images.shape[0])
+            
+            pbar.close()
+            
+            # Calculate final KID scores
+            kid_mean, kid_std = kid.compute()
+            kid_sq_mean, kid_sq_std = kid_squared.compute()
+            print(f"Final Decoder KID Score (original): {kid_mean.item():.6f} ± {kid_std.item():.6f}")
+            print(f"Final Decoder KID Score (squared): {kid_sq_mean.item():.6f} ± {kid_sq_std.item():.6f}")
+            return {
+                'kid_mean': kid_mean.item(), 
+                'kid_std': kid_std.item(),
+                'kid_squared_mean': kid_sq_mean.item(),
+                'kid_squared_std': kid_sq_std.item()
+            }
+                
+    
     def evaluate(self):
         """Perform evaluation and return metrics."""
         validation_stats = {'loss': []}
@@ -199,55 +369,46 @@ class DiffusionTrainer(Trainer):
         pbar = tqdm(total=self.config['evaluation']['validation_steps'], desc="Validation")
         val_dataloader_iter = iter(self.val_dataloader)
         
-        while pbar.n < pbar.total:
-            batch = next(val_dataloader_iter)
-            images = batch['image']
-            cond_img = batch.get('cond_img')
-            conditional_inputs = batch.get('cond_inputs')
-            
-            sigma = torch.randn(images.shape[0], device=images.device, generator=generator).reshape(-1, 1, 1, 1)
-            sigma = (sigma * self.config['evaluation']['P_std'] + self.config['evaluation']['P_mean']).exp()
-            
-            sigma_data = self.scheduler.config.sigma_data
-            if self.config['evaluation'].get('scale_sigma', False):
-                calc_channels = self.config['evaluation']['scaling_channels']
-                sigma = sigma * torch.maximum(
-                    torch.std(images[:, calc_channels], dim=[1, 2, 3], keepdim=True) / sigma_data, 
-                    torch.tensor(self.config['evaluation'].get('sigma_scale_eps', 0.05), device=images.device)
-                )
-            
-            t = torch.atan(sigma / sigma_data)
-            cnoise = t.flatten()
-            
-            noise = torch.randn_like(images) * sigma_data
-            x_t = torch.cos(t) * images + torch.sin(t) * noise
-
-            x = x_t / sigma_data
-            if cond_img is not None:
-                x = torch.cat([x, cond_img], dim=1)
+        with temporary_ema_to_model(self.ema.ema_models[0]):
+            while pbar.n < pbar.total:
+                batch = next(val_dataloader_iter)
+                images = batch['image']
+                cond_img = batch.get('cond_img')
+                conditional_inputs = batch.get('cond_inputs')
                 
-            self.model.eval()
-            with torch.no_grad(), self.accelerator.autocast():
-                model_output, logvar = self.model(x, noise_labels=cnoise, conditional_inputs=conditional_inputs, return_logvar=True)
-                pred_v_t = -sigma_data * model_output
+                sigma = torch.randn(images.shape[0], device=images.device, generator=generator).reshape(-1, 1, 1, 1)
+                sigma = (sigma * self.config['evaluation']['P_std'] + self.config['evaluation']['P_mean']).exp()
                 
-            v_t = torch.cos(t) * noise - torch.sin(t) * images
+                sigma_data = self.scheduler.config.sigma_data
+                if self.config['evaluation'].get('scale_sigma', False):
+                    calc_channels = self.config['evaluation']['scaling_channels']
+                    sigma = sigma * torch.maximum(
+                        torch.std(images[:, calc_channels], dim=[1, 2, 3], keepdim=True) / sigma_data, 
+                        torch.tensor(self.config['evaluation'].get('sigma_scale_eps', 0.05), device=images.device)
+                    )
+                
+                t = torch.atan(sigma / sigma_data)
+                cnoise = t.flatten()
+                
+                noise = torch.randn_like(images) * sigma_data
+                x_t = torch.cos(t) * images + torch.sin(t) * noise
 
-            loss = self._calc_loss(pred_v_t, v_t, logvar, sigma_data)
-            validation_stats['loss'].append(loss.item())
+                x = x_t / sigma_data
+                if cond_img is not None:
+                    x = torch.cat([x, cond_img], dim=1)
+                    
+                self.model.eval()
+                with torch.no_grad(), self.accelerator.autocast():
+                    model_output, logvar = self.model(x, noise_labels=cnoise, conditional_inputs=conditional_inputs, return_logvar=True)
+                    pred_v_t = -sigma_data * model_output
+                    
+                v_t = torch.cos(t) * noise - torch.sin(t) * images
+
+                loss = self._calc_loss(pred_v_t, v_t, logvar, sigma_data)
+                validation_stats['loss'].append(loss.item())
+                
+                pbar.update(images.shape[0])
+                pbar.set_postfix(loss=f"{np.mean(validation_stats['loss']):.4f}")
             
-            pbar.update(images.shape[0])
-            pbar.set_postfix(loss=f"{np.mean(validation_stats['loss']):.4f}")
-        
-        # Handle EMA validation if configured
-        if self.config['evaluation'].get('val_ema_idx', -1) >= 0:
-            if self.config['evaluation']['val_ema_idx'] < len(self.ema.ema_models):
-                with temporary_ema_to_model(self.ema.ema_models[self.config['evaluation']['val_ema_idx']]):
-                    # Re-run validation with EMA model
-                    pass  # Already run above, this is for compatibility
-            else:
-                warnings.warn(f"Invalid val_ema_idx: {self.config['evaluation']['val_ema_idx']}. "
-                              "Using model's parameters.")
-        
-        return {'val_loss': np.mean(validation_stats['loss'])}
+            return {'val_loss': np.mean(validation_stats['loss'])}
 

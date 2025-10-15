@@ -11,6 +11,7 @@ from ema_pytorch import PostHocEMA
 from terrain_diffusion.training.trainers.trainer import Trainer
 from terrain_diffusion.training.datasets import LongDataset
 from terrain_diffusion.models.edm_autoencoder import EDMAutoencoder
+from terrain_diffusion.training.utils import temporary_ema_to_model
 
 
 class AutoencoderTrainer(Trainer):
@@ -213,7 +214,7 @@ class AutoencoderTrainer(Trainer):
             conditional_inputs = batch.get('cond_inputs')
             
             self.model.eval()
-            with torch.no_grad(), self.accelerator.autocast():
+            with torch.no_grad(), self.accelerator.autocast(), temporary_ema_to_model(self.ema.ema_models[0]):
                 scaled_clean_images = images
                 if cond_img is not None:
                     scaled_clean_images = torch.cat([scaled_clean_images, cond_img], dim=1)

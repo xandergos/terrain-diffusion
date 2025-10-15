@@ -25,7 +25,6 @@ evaluation:
   validate_epochs: 5
   val_ema_idx: 0
   validation_steps: 16384
-  training_eval: true
 
 optimizer:
   type: "adam"

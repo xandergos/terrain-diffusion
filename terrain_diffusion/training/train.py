@@ -197,8 +197,10 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
             }
             # Add training statistics
             for k, v in stats_hist.items():
-                if isinstance(v[0], (int, float)):
-                    log_values[f'train/{k}'] = np.mean(v)
+                if k == 'lr':
+                    log_values[f'train/{k}'] = v[-1]
+                elif isinstance(v[0], (int, float)):
+                    log_values[f'train/{k}'] = np.nanmean(v)
             # Add evaluation metrics
             log_values.update(eval_metrics)
             
