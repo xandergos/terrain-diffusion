@@ -203,10 +203,6 @@ class AutoencoderTrainer(Trainer):
         pbar = tqdm(total=self.config['evaluation']['validation_steps'], desc="Validation")
         val_dataloader_iter = iter(self.val_dataloader)
         
-        fid_metric = None
-        if self.config['evaluation'].get('eval_fid', False):
-            fid_metric = FrechetInceptionDistance(feature=2048).to(self.accelerator.device)
-        
         while pbar.n < pbar.total:
             batch = next(val_dataloader_iter)
             images = batch['image']
@@ -231,24 +227,6 @@ class AutoencoderTrainer(Trainer):
                 kl_loss = -0.5 * torch.mean(1 + ndz_logvars - ndz_means**2 - ndz_logvars.exp())
                 total_loss = recon_loss + kl_loss * self.config['training']['kl_weight']
 
-                # Update FID metric if enabled
-                if fid_metric is not None:
-                    try:
-                        pred_residual = decoded_x[:, :1]
-                        real_residual = scaled_clean_images[:, :1]
-                        real_min = torch.amin(real_residual, dim=(1, 2, 3), keepdim=True)
-                        real_max = torch.amax(real_residual, dim=(1, 2, 3), keepdim=True)
-                        value_range = torch.maximum(real_max - real_min, torch.tensor(1.0, device=real_residual.device))
-                        value_mid = (real_min + real_max) / 2
-                        samples_norm = torch.clamp(((pred_residual - value_mid) / value_range + 0.5) * 255, 0, 255)
-                        samples_norm = samples_norm.repeat(1, 3, 1, 1).to(torch.uint8)
-                        real_norm = torch.clamp(((real_residual - value_mid) / value_range + 0.5) * 255, 0, 255)
-                        real_norm = real_norm.repeat(1, 3, 1, 1).to(torch.uint8)
-                        fid_metric.update(samples_norm, real=False)
-                        fid_metric.update(real_norm, real=True)
-                    except Exception:
-                        pass
-
             validation_stats['loss'].append(total_loss.item())
             validation_stats['recon_loss'].append(recon_loss.item())
             validation_stats['mse_loss'].append(mse_loss.item())
@@ -256,12 +234,9 @@ class AutoencoderTrainer(Trainer):
             validation_stats['kl_loss'].append(kl_loss.item())
             
             pbar.update(images.shape[0])
-            pbar.set_postfix({k: f"{np.mean(v):.3f}" for k, v in validation_stats.items()})
+            pbar.set_postfix({k: f"{np.nanmean(v):.3f}" for k, v in validation_stats.items()})
         
-        # Return average losses
-        out_stats = {f'val/{k}': np.mean(v) for k, v in validation_stats.items()}
-        if fid_metric is not None:
-            out_stats['val/fid'] = fid_metric.compute().item()
+        out_stats = {f'val/{k}': np.nanmean(v) for k, v in validation_stats.items()}
         
         return out_stats
 

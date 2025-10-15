@@ -3,11 +3,8 @@ trainer_class:
 
 logging:
   save_dir: "checkpoints/autoencoder_x8"
-  allow_overwrite: false
-  plot_epochs: 50
   save_epochs: 5
   temp_save_epochs: 1
-  seed: 74
 
 training:
   train_batch_size: 64
@@ -16,14 +13,12 @@ training:
   mixed_precision: "fp16"
   epochs: 150
   epoch_steps: 1024
-  seed: 74
   kl_weight: 0.05
   mse_weight: 0.5
   perceptual_weight: 0.5
 
 evaluation:
   validate_epochs: 5
-  val_ema_idx: 0
   validation_steps: 16384
 
 optimizer:

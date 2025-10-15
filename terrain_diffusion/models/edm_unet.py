@@ -176,7 +176,7 @@ class EDMUnet2D(ModelMixin, ConfigMixin):
         x = self.out_conv(x, gain=self.out_gain)
     
         if return_logvar:
-            logvar = self.logvar_linear(self.logvar_fourier(noise_labels)).reshape(-1, 1, 1, 1)
+            logvar = self.logvar_linear(self.logvar_fourier(torch.log(torch.tan(noise_labels) * 2))).reshape(-1, 1, 1, 1)
             return x, logvar
         return x
     

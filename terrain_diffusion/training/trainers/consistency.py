@@ -218,7 +218,7 @@ class ConsistencyTrainer(Trainer):
             if self.accelerator.sync_gradients:
                 grad_norm = self.accelerator.clip_grad_norm_(
                     self.model.parameters(), 
-                    max_norm=self.config['training'].get('gradient_clip_val', 100.0)
+                    max_norm=self.config['training'].get('gradient_clip_val', self.config['training'].get('gradient_clip_val', 100.0))
                 )
             else:
                 grad_norm = torch.tensor(0.0)
@@ -233,8 +233,7 @@ class ConsistencyTrainer(Trainer):
             'lr': lr,
             'grad_norm': grad_norm.item(),
             'max_f_theta_grad_norm': max_f_theta_grad_norm.item(),
-            'max_g_norm': max_g_norm.item(),
-            'batch_size': images.shape[0]
+            'max_g_norm': max_g_norm.item()
         }
     
     def evaluate(self):
