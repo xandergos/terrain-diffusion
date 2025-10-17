@@ -2,7 +2,7 @@ import abc
 
 class Trainer(abc.ABC):
     @abc.abstractmethod
-    def train_step(self, state):
+    def train_step(self, state, batch):
         """Perform one training step."""
         pass
 

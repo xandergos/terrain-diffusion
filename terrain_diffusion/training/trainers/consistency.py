@@ -1,12 +1,8 @@
-import numpy as np
 import os
 import torch
-from torch.utils.data import DataLoader
-from tqdm import tqdm
 from ema_pytorch import PostHocEMA
 
 from terrain_diffusion.training.trainers.trainer import Trainer
-from terrain_diffusion.training.datasets import LongDataset
 from terrain_diffusion.models.edm_unet import EDMUnet2D
 
 
@@ -21,8 +17,6 @@ class ConsistencyTrainer(Trainer):
         
         # Load pretrained models
         self.model_m_pretrained = EDMUnet2D.from_pretrained(resolved['model']['main_path'])
-        
-        # Make guide model optional
         self.model_g_pretrained = None
         if 'guide_path' in resolved['model'] and resolved['model']['guide_path']:
             self.model_g_pretrained = EDMUnet2D.from_pretrained(resolved['model']['guide_path'])
@@ -37,16 +31,7 @@ class ConsistencyTrainer(Trainer):
         self.model.eval()
         
         self.train_dataset = resolved['train_dataset']
-        
-        # Setup optimizer
         self.optimizer = self._get_optimizer(self.model, config)
-        
-        # Setup dataloader
-        self.train_dataloader = DataLoader(
-            LongDataset(self.train_dataset), 
-            batch_size=config['training']['train_batch_size'],
-            **resolved['dataloader_kwargs']
-        )
         
         # Initialize EMA
         resolved['ema']['checkpoint_folder'] = os.path.join(resolved['logging']['save_dir'], 'phema')
@@ -73,19 +58,16 @@ class ConsistencyTrainer(Trainer):
     def get_accelerate_modules(self):
         """Returns modules that need to be passed to accelerator.prepare."""
         if self.model_g_pretrained is not None:
-            return (self.model, self.model_m_pretrained, self.model_g_pretrained, 
-                    self.train_dataloader, self.optimizer)
+            return (self.model, self.model_m_pretrained, self.model_g_pretrained, self.optimizer)
         else:
-            return (self.model, self.model_m_pretrained, self.train_dataloader, self.optimizer)
+            return (self.model, self.model_m_pretrained, self.optimizer)
     
     def set_prepared_modules(self, prepared_modules):
         """Set the modules returned from accelerator.prepare back into the trainer."""
         if self.model_g_pretrained is not None:
-            self.model, self.model_m_pretrained, self.model_g_pretrained, \
-                self.train_dataloader, self.optimizer = prepared_modules
+            self.model, self.model_m_pretrained, self.model_g_pretrained, self.optimizer = prepared_modules
         else:
-            self.model, self.model_m_pretrained, self.train_dataloader, \
-                self.optimizer = prepared_modules
+            self.model, self.model_m_pretrained, self.optimizer = prepared_modules
         # Move EMA to device after models are prepared
         self.ema = self.ema.to(self.accelerator.device)
     
@@ -103,9 +85,8 @@ class ConsistencyTrainer(Trainer):
         """Returns the main model to save config for."""
         return self.model
     
-    def train_step(self, state):
+    def train_step(self, state, batch):
         """Perform one training step."""
-        batch = next(self.train_iter)
         images = batch['image']
         cond_img = batch.get('cond_img')
         conditional_inputs = batch.get('cond_inputs')
@@ -114,12 +95,6 @@ class ConsistencyTrainer(Trainer):
             sigma_data = self.config['training']['sigma_data']
             sigma = torch.randn(images.shape[0], device=images.device).reshape(-1, 1, 1, 1)
             sigma = (sigma * self.config['training']['P_std'] + self.config['training']['P_mean']).exp()
-            
-            if self.config['training'].get('scale_sigma', False):
-                sigma = sigma * torch.maximum(
-                    torch.std(images, dim=[1, 2, 3], keepdim=True) / sigma_data, 
-                    torch.tensor(self.config['training'].get('sigma_scale_eps', 0.05), device=images.device)
-                )
             
             t = torch.arctan(sigma / sigma_data)
             t.requires_grad_(True)

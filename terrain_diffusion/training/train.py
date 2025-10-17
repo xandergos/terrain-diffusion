@@ -10,10 +10,12 @@ from confection import Config, registry
 import yaml
 from tqdm import tqdm
 import wandb
+from torch.utils.data import DataLoader
 
 from terrain_diffusion.training.registry import build_registry
-from terrain_diffusion.training.utils import SerializableEasyDict as EasyDict
+from terrain_diffusion.training.utils import SerializableEasyDict as EasyDict, recursive_to
 from terrain_diffusion.training.utils import safe_rmtree, set_nested_value
+from terrain_diffusion.training.datasets.long_dataset import LongDataset
 
 
 @click.command(context_settings=dict(ignore_unknown_options=True, allow_extra_args=True))
@@ -98,23 +100,28 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
     trainer_class = resolved['trainer']
     trainer = trainer_class(config, resolved, accelerator, state)
     
-    # Load model checkpoint if provided (before accelerator.prepare)
     if model_ckpt_path:
         trainer.load_model_checkpoint(model_ckpt_path)
     
-    # Prepare modules with accelerator
+    train_dataset = resolved['train_dataset']
+    batch_size = config['training'].get('train_batch_size') or config['training']['batch_size']
+
+    dataloader_kwargs = dict(resolved.get('dataloader_kwargs', {}))
+    train_dataloader = DataLoader(
+        LongDataset(train_dataset, shuffle=True),
+        batch_size=batch_size,
+        **dataloader_kwargs
+    )
+
     modules = trainer.get_accelerate_modules()
     prepared_modules = accelerator.prepare(*modules)
-    
-    # Set prepared modules back into trainer (trainer handles EMA device transfer)
+    train_dataloader = accelerator.prepare(train_dataloader)
     trainer.set_prepared_modules(prepared_modules)
     
-    # Register state and trainer's checkpoint modules for checkpointing
     accelerator.register_for_checkpointing(state)
     for module in trainer.get_checkpoint_modules():
         accelerator.register_for_checkpointing(module)
     
-    # Load from checkpoint if needed
     if ckpt_path:
         torch.serialization.add_safe_globals([np.core.multiarray.scalar])
         accelerator.load_state(ckpt_path)
@@ -149,18 +156,14 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
         except Exception:
             pass
     
-    # Training loop
-    train_iter = iter(trainer.train_dataloader)
-    trainer.train_iter = train_iter  # Store iterator in trainer for access in train_step
-    
     while state['epoch'] < config['training']['epochs']:
         stats_hist = {}
-        progress_bar = tqdm(train_iter, desc=f"Epoch {state['epoch']}", 
-                          total=config['training']['epoch_steps'])
+        progress_bar = tqdm(total=config['training']['epoch_steps'], desc=f"Epoch {state['epoch']}")
         
+        train_iter = iter(train_dataloader)
         while progress_bar.n < config['training']['epoch_steps']:
-            # Perform training step
-            step_stats = trainer.train_step(state)
+            batch = recursive_to(next(train_iter), device=accelerator.device)
+            step_stats = trainer.train_step(state, batch)
             
             # Accumulate statistics
             for k, v in step_stats.items():

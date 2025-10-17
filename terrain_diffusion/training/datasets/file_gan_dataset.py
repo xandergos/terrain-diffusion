@@ -1,3 +1,4 @@
+import random
 import numpy as np
 import torch
 from torch.utils.data import Dataset
@@ -65,6 +66,11 @@ class FileGANDataset(Dataset):
         """Return a fixed length (can be adjusted based on needs)"""
         return 10000  # Arbitrary number of samples per epoch
         
+    def set_seed(self, seed):
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+
     def __getitem__(self, idx):
         """
         Get a random crop from the stacked datasets.

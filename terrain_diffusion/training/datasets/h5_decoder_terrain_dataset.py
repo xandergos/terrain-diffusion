@@ -4,6 +4,7 @@ from torch.utils.data import Dataset
 from tqdm import tqdm
 import h5py
 import torch.nn.functional as F
+import numpy as np
 
 
 class H5DecoderTerrainDataset(Dataset):
@@ -136,9 +137,13 @@ class H5DecoderTerrainDataset(Dataset):
 
     def __len__(self):
         return max(len(keys) for keys in self.keys)
+    
+    def set_seed(self, seed):
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
 
     def __getitem__(self, index):
-        
         # Draw a random subset based on subset weights
         subset_idx = random.choices(range(len(self.subset_weights)), weights=self.subset_weights, k=1)[0]
         class_label = self.subset_class_labels[subset_idx] if self.subset_class_labels is not None else None

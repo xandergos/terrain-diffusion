@@ -133,6 +133,11 @@ class H5AutoencoderDataset(Dataset):
 
     def __len__(self):
         return max(len(keys) for keys in self.keys)
+    
+    def set_seed(self, seed):
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
 
     def __getitem__(self, index):
         subset_idx = random.choices(range(len(self.subset_weights)), weights=self.subset_weights, k=1)[0]

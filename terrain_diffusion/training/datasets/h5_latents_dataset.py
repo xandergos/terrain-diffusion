@@ -103,6 +103,11 @@ class H5LatentsDataset(Dataset):
 
     def __len__(self):
         return 100000
+    
+    def set_seed(self, seed):
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
 
     def __getitem__(self, idx):
         LOWFREQ_MEAN = -31.4

@@ -2,8 +2,8 @@ from collections import defaultdict
 import numpy as np
 import os
 import torch
-from torch.utils.data import DataLoader
 import lpips
+from torch.utils.data import DataLoader
 from torchmetrics.image.fid import FrechetInceptionDistance
 from tqdm import tqdm
 from ema_pytorch import PostHocEMA
@@ -28,24 +28,10 @@ class AutoencoderTrainer(Trainer):
         assert isinstance(self.model, EDMAutoencoder), "Currently only EDMAutoencoder is supported."
         
         self.train_dataset = resolved['train_dataset']
-        self.val_dataset = resolved['val_dataset']
+        self.val_dataset = LongDataset(resolved['val_dataset'], shuffle=True)
         
         # Setup optimizer
         self.optimizer = self._get_optimizer(self.model, config)
-        
-        # Setup dataloaders
-        self.train_dataloader = DataLoader(
-            LongDataset(self.train_dataset, shuffle=True), 
-            batch_size=config['training']['train_batch_size'],
-            **resolved['dataloader_kwargs'], 
-            drop_last=True
-        )
-        self.val_dataloader = DataLoader(
-            LongDataset(self.val_dataset, shuffle=True), 
-            batch_size=config['training']['train_batch_size'],
-            **resolved['dataloader_kwargs'], 
-            drop_last=True
-        )
         
         # Perceptual loss
         self.perceptual_loss = lpips.LPIPS(net='alex', spatial=True)
@@ -73,12 +59,12 @@ class AutoencoderTrainer(Trainer):
     
     def get_accelerate_modules(self):
         """Returns modules that need to be passed to accelerator.prepare."""
-        return (self.model, self.train_dataloader, self.optimizer, 
+        return (self.model, self.optimizer, 
                 self.val_dataloader, self.perceptual_loss)
     
     def set_prepared_modules(self, prepared_modules):
         """Set the modules returned from accelerator.prepare back into the trainer."""
-        self.model, self.train_dataloader, self.optimizer, \
+        self.model, self.optimizer, \
             self.val_dataloader, self.perceptual_loss = prepared_modules
         # Move EMA to device after models are prepared
         self.ema = self.ema.to(self.accelerator.device)
@@ -138,12 +124,10 @@ class AutoencoderTrainer(Trainer):
         
         return total_loss, mse_loss, perceptual_loss
     
-    def train_step(self, state):
+    def train_step(self, state, batch):
         """Perform one training step."""
         stats = {}
         
-        # Fetch batch for autoencoder training
-        batch = next(self.train_iter)
         images = batch['image']
         cond_img = batch.get('cond_img')
         conditional_inputs = batch.get('cond_inputs')
@@ -199,6 +183,13 @@ class AutoencoderTrainer(Trainer):
     
     def evaluate(self):
         """Perform evaluation and return metrics."""
+        self.val_dataset.set_seed(self.config['training']['seed'] + 789)
+        self.val_dataloader = DataLoader(
+            self.val_dataset, 
+            batch_size=self.config['training']['batch_size'],
+            **self.resolved['dataloader_kwargs']
+        )
+        
         validation_stats = defaultdict(list)
         pbar = tqdm(total=self.config['evaluation']['validation_steps'], desc="Validation")
         val_dataloader_iter = iter(self.val_dataloader)

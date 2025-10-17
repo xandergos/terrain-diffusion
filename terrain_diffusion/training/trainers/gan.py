@@ -1,14 +1,14 @@
 import numpy as np
 import os
 import torch
-from torch.utils.data import DataLoader
 from torchvision.transforms.v2.functional import gaussian_blur
 from torchmetrics.image.fid import FrechetInceptionDistance
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 from ema_pytorch import PostHocEMA
 
+from terrain_diffusion.training.datasets.long_dataset import LongDataset
 from terrain_diffusion.training.trainers.trainer import Trainer
-from terrain_diffusion.training.datasets import LongDataset
 from terrain_diffusion.training.utils import temporary_ema_to_model
 
 
@@ -89,18 +89,11 @@ class GANTrainer(Trainer):
         self.generator = resolved['generator']
         self.discriminator = resolved['discriminator']
         self.train_dataset = resolved['train_dataset']
-        self.val_dataset = LongDataset(resolved['val_dataset'], length=50000)
+        self.val_dataset = LongDataset(resolved['val_dataset'], shuffle=True)
         
         # Setup optimizers
         self.g_optimizer = self._get_optimizer(self.generator, config['g_optimizer'])
         self.d_optimizer = self._get_optimizer(self.discriminator, config['d_optimizer'])
-        
-        # Setup dataloader
-        self.train_dataloader = DataLoader(
-            LongDataset(self.train_dataset, shuffle=True),
-            batch_size=config['training']['batch_size'],
-            **resolved['dataloader_kwargs']
-        )
         
         # Warmup parameters
         self.burnin_steps = config['training'].get('burnin_steps', 0)
@@ -127,13 +120,11 @@ class GANTrainer(Trainer):
         
     def get_accelerate_modules(self):
         """Returns modules that need to be passed to accelerator.prepare."""
-        return (self.generator, self.discriminator, self.train_dataloader, 
-                self.g_optimizer, self.d_optimizer)
+        return (self.generator, self.discriminator, self.g_optimizer, self.d_optimizer)
     
     def set_prepared_modules(self, prepared_modules):
         """Set the modules returned from accelerator.prepare back into the trainer."""
-        self.generator, self.discriminator, self.train_dataloader, \
-            self.g_optimizer, self.d_optimizer = prepared_modules
+        self.generator, self.discriminator, self.g_optimizer, self.d_optimizer = prepared_modules
         # Move EMA to device after models are prepared
         self.ema = self.ema.to(self.accelerator.device)
     
@@ -151,7 +142,7 @@ class GANTrainer(Trainer):
         """Returns the main model to save config for."""
         return self.generator
     
-    def train_step(self, state):
+    def train_step(self, state, batch):
         """Perform one training step."""
         # Warmup r_gamma and beta_2 during burnin steps
         if state['step'] < self.burnin_steps:
@@ -177,7 +168,6 @@ class GANTrainer(Trainer):
 
         # Train discriminator
         with self.accelerator.accumulate(self.discriminator):
-            batch = next(self.train_iter)
             real_images = batch['image']
             batch_size = real_images.shape[0]
             
@@ -306,7 +296,8 @@ class GANTrainer(Trainer):
         """Perform evaluation and return metrics."""
         self.generator.eval()
         with temporary_ema_to_model(self.ema.ema_models[0]):
+            self.val_dataset.set_seed(self.config['training']['seed'] + 123)
             fid = calculate_fid(self.generator, self.val_dataset, self.config, self.accelerator.device)
         self.generator.train()
-        return {'eval/fid': fid}
+        return {'val/fid': fid}
 
