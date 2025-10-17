@@ -99,8 +99,8 @@ def evaluate_model(model, val_dataloader, perceptual_loss,
               help='Number of validation steps (overrides config)')
 @click.option('--study-name', type=str, default=None,
               help='Name for the Optuna study (for resuming)')
-@click.option('--storage', type=str, default=None,
-              help='Database URL for Optuna storage (for resuming)')
+@click.option('--storage', is_flag=True, default=False,
+              help='Enable persistent Optuna storage under save_dir')
 def main(config_path, n_trials, validation_steps, study_name, storage):
     """
     Perform Bayesian Optimization to find optimal EMA sigma_rel value.
@@ -157,8 +157,7 @@ def main(config_path, n_trials, validation_steps, study_name, storage):
     val_dataloader = DataLoader(
         LongDataset(val_dataset, shuffle=True),
         batch_size=config['training']['train_batch_size'],
-        **resolved['dataloader_kwargs'],
-        drop_last=True
+        **resolved['dataloader_kwargs']
     )
     
     # Setup perceptual loss
@@ -214,19 +213,27 @@ def main(config_path, n_trials, validation_steps, study_name, storage):
     if study_name is None:
         study_name = f"autoencoder_ema_sweep_{os.path.basename(save_dir)}"
     
+    # Configure Optuna storage
+    if storage:
+        storage_dir = os.path.join(save_dir, 'storage')
+        os.makedirs(storage_dir, exist_ok=True)
+        storage_url = f"sqlite:///{os.path.join(storage_dir, 'optuna.db')}"
+    else:
+        storage_url = None
+    
     print(f"\n{'='*80}")
     print(f"Starting Bayesian Optimization with Optuna")
     print(f"Study name: {study_name}")
     print(f"Number of trials: {n_trials}")
     print(f"Search range: σ_rel ∈ [{min_sigma}, {max_sigma}]")
-    if storage:
-        print(f"Storage: {storage}")
+    if storage_url:
+        print(f"Storage: {storage_url}")
     print(f"{'='*80}\n")
     
     study = optuna.create_study(
         study_name=study_name,
         direction='minimize',
-        storage=storage,
+        storage=storage_url,
         load_if_exists=True,
         sampler=optuna.samplers.GPSampler(seed=42)
     )
