@@ -11,6 +11,8 @@ from tqdm import tqdm
 from collections import defaultdict
 import optuna
 import matplotlib.pyplot as plt
+from optuna.exceptions import TrialPruned
+import math
 
 from ema_pytorch import PostHocEMA
 from torchmetrics.image.kid import KernelInceptionDistance
@@ -29,13 +31,34 @@ def _normalize_uint8_three_channel(images: torch.Tensor) -> torch.Tensor:
     normalized = torch.clamp(((images - image_mid) / image_range + 0.5) * 255, 0, 255)
     return normalized.repeat(1, 3, 1, 1).to(torch.uint8)
 
-
-def evaluate_decoder_kid(model, g_model, guidance_scale, score_scaling, scheduler, val_dataloader, kid_n_images, kid_scheduler_steps, accelerator):
-    """Compute KID for the decoder using diffusion sampling on the validation set."""
+def evaluate_decoder_kid(model, g_model=None, guidance_scale=1.0, score_scaling=1.0, scheduler=None, val_dataloader=None, kid_n_images=None, kid_scheduler_steps=None, accelerator=None, trial=None, check_interval=None, prune_probability_threshold=None):
+    """Compute KID for the decoder using diffusion sampling on the validation set, with optional interim pruning."""
     pbar = tqdm(total=kid_n_images, desc="Calculating Decoder KID")
     kid = KernelInceptionDistance(normalize=True).to(accelerator.device)
     generator = torch.Generator(device=accelerator.device).manual_seed(548)
     val_dataloader_iter = iter(val_dataloader)
+
+    def _norm_cdf(z):
+        return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+
+    def _maybe_prune(cur_mean, cur_std):
+        if trial is None or prune_probability_threshold is None:
+            return
+        study = trial.study
+        if study is None:
+            return
+        for t in study.get_trials(deepcopy=False, states=(optuna.trial.TrialState.COMPLETE,)):
+            if t.number == trial.number:
+                continue
+            other_mean = t.value
+            other_std = t.user_attrs.get('kid_std')
+            if other_mean is None or other_std is None:
+                continue
+            denom = math.sqrt(cur_std * cur_std + float(other_std) * float(other_std))
+            z = -(cur_mean - float(other_mean)) / denom
+            p_cur_less = _norm_cdf(z)
+            if p_cur_less < prune_probability_threshold:
+                raise TrialPruned(f"Pruned at {pbar.n} images: P(cur < trial {t.number})={p_cur_less:.4f} < {prune_probability_threshold}")
 
     with torch.no_grad(), accelerator.autocast():
         while pbar.n < pbar.total:
@@ -69,6 +92,15 @@ def evaluate_decoder_kid(model, g_model, guidance_scale, score_scaling, schedule
             kid.update(_normalize_uint8_three_channel(images), real=True)
 
             pbar.update(images.shape[0])
+
+            # Interim pruning checks
+            if check_interval and (pbar.n % check_interval == 0 or pbar.n >= pbar.total):
+                cur_mean_t, cur_std_t = kid.compute()
+                cur_mean = float(cur_mean_t.item())
+                cur_std = float(cur_std_t.item())
+                if trial is not None:
+                    trial.report(cur_mean, step=pbar.n)
+                _maybe_prune(cur_mean, cur_std)
 
     pbar.close()
     kid_mean, kid_std = kid.compute()
@@ -130,9 +162,13 @@ def main(config_path, guide_config_path, n_trials, study_name, storage):
         guide_model = accelerator.prepare(guide_model)
 
     # Evaluation parameters
-    kid_n_images = int(config['evaluation']['kid_n_images'])
-    kid_scheduler_steps = int(config['evaluation']['kid_scheduler_steps'])
+    kid_n_images = int(config['sweep']['kid_n_images'])
+    kid_scheduler_steps = int(config['sweep']['kid_scheduler_steps'])
     
+    # Pruning parameters
+    intermediate_steps = int(config['sweep'].get('intermediate_steps', 1024))
+    prune_probability_threshold = float(config['sweep'].get('prune_probability_threshold', 0.05))
+
     min_sigma = config['sweep']['min_ema_sigma']
     max_sigma = config['sweep']['max_ema_sigma']
     min_guidance_scale = config['sweep']['min_guidance_scale']
@@ -179,12 +215,21 @@ def main(config_path, guide_config_path, n_trials, study_name, storage):
         )
         kid_mean, kid_std = evaluate_decoder_kid(
             model=model,
+            g_model=guide_model,
+            guidance_scale=guidance_scale,
+            score_scaling=score_scaling,
             scheduler=scheduler,
             val_dataloader=val_dataloader,
             kid_n_images=kid_n_images,
             kid_scheduler_steps=kid_scheduler_steps,
             accelerator=accelerator,
+            trial=trial,
+            check_interval=intermediate_steps,
+            prune_probability_threshold=prune_probability_threshold,
         )
+
+        # Store std on trial for future pruning comparisons
+        trial.set_user_attr('kid_std', float(kid_std))
 
         print(f"Result: KID mean = {kid_mean:.6f} (std = {kid_std:.6f})")
         return kid_mean
@@ -216,6 +261,25 @@ def main(config_path, guide_config_path, n_trials, study_name, storage):
         load_if_exists=True,
         sampler=optuna.samplers.TPESampler(seed=42),
     )
+
+    # Optionally force a simple baseline as the first trial
+    baseline_first = bool(config['sweep'].get('baseline_first_trial', True))
+    if baseline_first:
+        baseline_params = {
+            'sigma_rel': 0.05,
+            'score_scaling': 1.0,
+        }
+        if guide_model:
+            baseline_params.update({
+                'guidance_scale': 1.0,
+                'guide_sigma_rel': 0.05,
+                'guide_ema_step': 2048,
+            })
+
+        # Only enqueue as first if the study has no trials yet
+        if len(study.trials) == 0:
+            print("Enqueuing baseline first trial:", baseline_params)
+            study.enqueue_trial(baseline_params)
 
     # Run optimization
     study.optimize(objective, n_trials=n_trials)

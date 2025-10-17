@@ -368,13 +368,15 @@ class DiffusionTrainer(Trainer):
                 
                 pbar.update(images.shape[0])
                 pbar.set_postfix(loss=f"{np.mean(validation_stats['loss']):.4f}")
+            pbar.close()
             
+            output = {'val/loss': np.mean(validation_stats['loss'])}
             if self.config['evaluation'].get('mode') == 'base':
-                validation_stats.update(self._calculate_base_kid(val_dataloader_iter, generator))
+                output.update(self._calculate_base_kid(val_dataloader_iter, generator))
             elif self.config['evaluation'].get('mode') == 'decoder':
-                validation_stats.update(self._calculate_decoder_kid(val_dataloader_iter, generator))
+                output.update(self._calculate_decoder_kid(val_dataloader_iter, generator))
             else:
                 print('No mode specified, skipping KID calculation')
             
-            return {'val/loss': np.mean(validation_stats['loss'])}
+            return output
 
