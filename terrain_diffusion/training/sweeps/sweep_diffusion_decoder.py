@@ -17,10 +17,14 @@ import math
 from ema_pytorch import PostHocEMA
 from torchmetrics.image.kid import KernelInceptionDistance
 
+from terrain_diffusion.models.edm_autoencoder import EDMAutoencoder
 from terrain_diffusion.training.registry import build_registry
 from terrain_diffusion.training.datasets import LongDataset
 from terrain_diffusion.training.utils import recursive_to
 
+#autoencoder = EDMAutoencoder.from_pretrained("checkpoints/models/autoencoder_x8").to('cuda')
+#autoencoder.eval()
+#autoencoder.requires_grad_(False)
 
 def _normalize_uint8_three_channel(images: torch.Tensor) -> torch.Tensor:
     """Normalize single-channel images to uint8 [0, 255] repeated to 3 channels."""
@@ -31,10 +35,19 @@ def _normalize_uint8_three_channel(images: torch.Tensor) -> torch.Tensor:
     normalized = torch.clamp(((images - image_mid) / image_range + 0.5) * 255, 0, 255)
     return normalized.repeat(1, 3, 1, 1).to(torch.uint8)
 
-def evaluate_decoder_kid(model, g_model=None, guidance_scale=1.0, score_scaling=1.0, scheduler=None, val_dataloader=None, kid_n_images=None, kid_scheduler_steps=None, accelerator=None, trial=None, check_interval=None, prune_probability_threshold=None):
+def _get_weights(size):
+    s = size
+    mid = (s - 1) / 2
+    y, x = torch.meshgrid(torch.arange(s), torch.arange(s), indexing='ij')
+    epsilon = 1e-3
+    distance_y = 1 - (1 - epsilon) * torch.clamp(torch.abs(y - mid).float() / mid, 0, 1)
+    distance_x = 1 - (1 - epsilon) * torch.clamp(torch.abs(x - mid).float() / mid, 0, 1)
+    return (distance_y * distance_x)[None, None, :, :]
+    
+def evaluate_decoder_kid(model, g_model=None, guidance_scale=1.0, score_scaling=1.0, scheduler=None, val_dataloader=None, kid_n_images=None, kid_scheduler_steps=None, accelerator=None, trial=None, check_interval=None, prune_probability_threshold=None, tile_size=128):
     """Compute KID for the decoder using diffusion sampling on the validation set, with optional interim pruning."""
     pbar = tqdm(total=kid_n_images, desc="Calculating Decoder KID")
-    kid = KernelInceptionDistance(normalize=True).to(accelerator.device)
+    kid = KernelInceptionDistance(normalize=True,).to(accelerator.device)
     generator = torch.Generator(device=accelerator.device).manual_seed(548)
     val_dataloader_iter = iter(val_dataloader)
 
@@ -43,10 +56,10 @@ def evaluate_decoder_kid(model, g_model=None, guidance_scale=1.0, score_scaling=
 
     def _maybe_prune(cur_mean, cur_std):
         if trial is None or prune_probability_threshold is None:
-            return
+            return False
         study = trial.study
         if study is None:
-            return
+            return False
         for t in study.get_trials(deepcopy=False, states=(optuna.trial.TrialState.COMPLETE,)):
             if t.number == trial.number:
                 continue
@@ -58,35 +71,56 @@ def evaluate_decoder_kid(model, g_model=None, guidance_scale=1.0, score_scaling=
             z = -(cur_mean - float(other_mean)) / denom
             p_cur_less = _norm_cdf(z)
             if p_cur_less < prune_probability_threshold:
-                raise TrialPruned(f"Pruned at {pbar.n} images: P(cur < trial {t.number})={p_cur_less:.4f} < {prune_probability_threshold}")
+                return True
+                #raise TrialPruned(f"Pruned at {pbar.n} images (KID={cur_mean:0.6f}): P(cur < trial {t.number})={p_cur_less:.4f} < {prune_probability_threshold}")
+        return False
 
+    weights = _get_weights(tile_size).to(accelerator.device)
     with torch.no_grad(), accelerator.autocast():
         while pbar.n < pbar.total:
             batch = recursive_to(next(val_dataloader_iter), device=accelerator.device)
             images = batch['image']
             cond_img = batch.get('cond_img')
             conditional_inputs = batch.get('cond_inputs')
+            assert not conditional_inputs
 
-            samples = torch.randn(images.shape, generator=generator, device=images.device) * scheduler.sigmas[0]
+            output = torch.zeros(images.shape, device=accelerator.device)
+            output_weights = torch.zeros(images.shape, device=accelerator.device)
+            initial_noise = torch.randn(images.shape, device=accelerator.device, generator=generator) * scheduler.sigmas[0]
+            num_tiles = (images.shape[-1] - tile_size // 2) // (tile_size // 2)
 
             # Sampling loop
-            scheduler.set_timesteps(kid_scheduler_steps)
-            for t, sigma in zip(scheduler.timesteps, scheduler.sigmas):
-                t, sigma = t.to(samples.device), sigma.to(samples.device)
+            for i in range(num_tiles):
+                for j in range(num_tiles):
+                    samples = initial_noise[..., i*tile_size//2:(i+2)*tile_size//2, j*tile_size//2:(j+2)*tile_size//2]
+                    tile_cond_img = cond_img[..., i*tile_size//2:(i+2)*tile_size//2, j*tile_size//2:(j+2)*tile_size//2]
+                    scheduler.set_timesteps(kid_scheduler_steps)
+                    for t, sigma in zip(scheduler.timesteps, scheduler.sigmas):
+                        t, sigma = t.to(samples.device), sigma.to(samples.device)
 
-                scaled_input = scheduler.precondition_inputs(samples, sigma)
-                cnoise = scheduler.trigflow_precondition_noise(sigma.view(-1).expand(samples.shape[0]))
+                        scaled_input = scheduler.precondition_inputs(samples, sigma)
+                        cnoise = scheduler.trigflow_precondition_noise(sigma.view(-1).expand(samples.shape[0]))
 
-                x = torch.cat([scaled_input, cond_img], dim=1)
-                if not g_model or guidance_scale == 1.0:
-                    model_output = model(x, noise_labels=cnoise, conditional_inputs=conditional_inputs)
-                else:
-                    model_output_m = model(x, noise_labels=cnoise, conditional_inputs=conditional_inputs)
-                    model_output_g = g_model(x, noise_labels=cnoise, conditional_inputs=conditional_inputs)
-                    model_output = model_output_g + guidance_scale * (model_output_m - model_output_g)
-                model_output = model_output * score_scaling
+                        model_input = torch.cat([scaled_input, tile_cond_img], dim=1)
+                        if not g_model or guidance_scale == 1.0:
+                            model_output = model(model_input, noise_labels=cnoise, conditional_inputs=[])
+                        else:
+                            model_output_m = model(model_input, noise_labels=cnoise, conditional_inputs=[])
+                            model_output_g = g_model(model_input, noise_labels=cnoise, conditional_inputs=[])
+                            model_output = model_output_g + guidance_scale * (model_output_m - model_output_g)
+                        model_output = model_output * score_scaling
 
-                samples = scheduler.step(model_output, t, samples).prev_sample
+                        samples = scheduler.step(model_output, t, samples).prev_sample
+                    
+                    _real = images[..., i*tile_size//2:(i+2)*tile_size//2, j*tile_size//2:(j+2)*tile_size//2]
+                    _fake = samples
+                    #_fake_ae = autoencoder.decode(tile_cond_img[..., ::8, ::8])
+                    
+                    output[..., i*tile_size//2:(i+2)*tile_size//2, j*tile_size//2:(j+2)*tile_size//2] += samples * weights
+                    output_weights[..., i*tile_size//2:(i+2)*tile_size//2, j*tile_size//2:(j+2)*tile_size//2] += weights
+
+            output = output / output_weights
+            samples = output
 
             kid.update(_normalize_uint8_three_channel(samples), real=False)
             kid.update(_normalize_uint8_three_channel(images), real=True)
@@ -100,7 +134,8 @@ def evaluate_decoder_kid(model, g_model=None, guidance_scale=1.0, score_scaling=
                 cur_std = float(cur_std_t.item())
                 if trial is not None:
                     trial.report(cur_mean, step=pbar.n)
-                _maybe_prune(cur_mean, cur_std)
+                if _maybe_prune(cur_mean, cur_std):
+                    return cur_mean_t.item(), cur_std_t.item()
 
     pbar.close()
     kid_mean, kid_std = kid.compute()
@@ -128,6 +163,10 @@ def main(config_path, guide_config_path, n_trials, study_name, storage):
     phema_folder = os.path.join(save_dir, 'phema')
     if not os.path.exists(phema_folder):
         raise ValueError(f"PHEMA folder not found: {phema_folder}")
+    guide_save_dir = guide_config['logging']['save_dir']
+    guide_phema_folder = os.path.join(guide_save_dir, 'phema')
+    if not os.path.exists(guide_phema_folder):
+        raise ValueError(f"PHEMA folder not found: {guide_phema_folder}")
 
     # Resolve full config
     resolved = registry.resolve(config, validate=False)
@@ -146,7 +185,7 @@ def main(config_path, guide_config_path, n_trials, study_name, storage):
     device = accelerator.device
 
     # Validation dataloader
-    val_dataset = resolved['val_dataset']
+    val_dataset = resolved['sweep_dataset']
 
     # EMA setup
     ema_config = resolved['ema'].copy()
@@ -156,7 +195,7 @@ def main(config_path, guide_config_path, n_trials, study_name, storage):
     model = accelerator.prepare(model)
     if guide_model:
         guide_ema_config = guide_resolved['ema'].copy()
-        guide_ema_config['checkpoint_folder'] = phema_folder
+        guide_ema_config['checkpoint_folder'] = guide_phema_folder
         guide_ema = PostHocEMA(guide_model, **guide_ema_config).to(device)
         guide_model = guide_model.to(device)
         guide_model = accelerator.prepare(guide_model)
@@ -164,6 +203,7 @@ def main(config_path, guide_config_path, n_trials, study_name, storage):
     # Evaluation parameters
     kid_n_images = int(config['sweep']['kid_n_images'])
     kid_scheduler_steps = int(config['sweep']['kid_scheduler_steps'])
+    tile_size = int(config['sweep']['tile_size'])
     
     # Pruning parameters
     intermediate_steps = int(config['sweep'].get('intermediate_steps', 1024))
@@ -189,7 +229,7 @@ def main(config_path, guide_config_path, n_trials, study_name, storage):
         sigma_rel = trial.suggest_float('sigma_rel', min_sigma, max_sigma, log=False)
         if guide_model:
             guide_sigma_rel = trial.suggest_float('guide_sigma_rel', min_sigma, max_sigma, log=False)
-            guide_ema_step = trial.suggest_int('guide_ema_step', min_guide_ema_step, max_guide_ema_step, step=1024)
+            guide_ema_step = trial.suggest_int('guide_ema_step', min_guide_ema_step, max_guide_ema_step, log=True)
             guidance_scale = trial.suggest_float('guidance_scale', min_guidance_scale, max_guidance_scale, log=False)
         else:
             guide_sigma_rel = None
@@ -210,8 +250,7 @@ def main(config_path, guide_config_path, n_trials, study_name, storage):
 
         val_dataloader = DataLoader(
             LongDataset(val_dataset, shuffle=True, seed=958),
-            batch_size=config['training']['train_batch_size'],
-            **resolved['dataloader_kwargs']
+            batch_size=config['sweep']['batch_size']
         )
         kid_mean, kid_std = evaluate_decoder_kid(
             model=model,
@@ -226,7 +265,9 @@ def main(config_path, guide_config_path, n_trials, study_name, storage):
             trial=trial,
             check_interval=intermediate_steps,
             prune_probability_threshold=prune_probability_threshold,
+            tile_size=tile_size,
         )
+        del val_dataloader
 
         # Store std on trial for future pruning comparisons
         trial.set_user_attr('kid_std', float(kid_std))
@@ -243,6 +284,10 @@ def main(config_path, guide_config_path, n_trials, study_name, storage):
     print(f"Study name: {study_name}")
     print(f"Number of trials: {n_trials}")
     print(f"Search range: σ_rel ∈ [{min_sigma}, {max_sigma}]")
+    print(f"Search range: guidance_scale ∈ [{min_guidance_scale}, {max_guidance_scale}]")
+    print(f"Search range: score_scaling ∈ [{min_score_scaling}, {max_score_scaling}]")
+    print(f"Search range: guide_σ_rel ∈ [{min_sigma}, {max_sigma}]")
+    print(f"Search range: guide_ema_step ∈ [{min_guide_ema_step}, {max_guide_ema_step}]")
     # Configure Optuna storage
     if storage:
         storage_dir = os.path.join(save_dir, 'storage')
@@ -259,12 +304,16 @@ def main(config_path, guide_config_path, n_trials, study_name, storage):
         direction='minimize',
         storage=storage_url,
         load_if_exists=True,
-        sampler=optuna.samplers.TPESampler(seed=42),
+        sampler=optuna.samplers.TPESampler(seed=42, 
+                                           n_startup_trials=24,
+                                           multivariate=True,
+                                           group=True,
+                                           n_ei_candidates=64),
     )
 
     # Optionally force a simple baseline as the first trial
     baseline_first = bool(config['sweep'].get('baseline_first_trial', True))
-    if baseline_first:
+    if baseline_first and len(study.trials) == 0:
         baseline_params = {
             'sigma_rel': 0.05,
             'score_scaling': 1.0,
@@ -273,13 +322,26 @@ def main(config_path, guide_config_path, n_trials, study_name, storage):
             baseline_params.update({
                 'guidance_scale': 1.0,
                 'guide_sigma_rel': 0.05,
-                'guide_ema_step': 2048,
+                'guide_ema_step': min_guide_ema_step,
             })
 
         # Only enqueue as first if the study has no trials yet
-        if len(study.trials) == 0:
-            print("Enqueuing baseline first trial:", baseline_params)
-            study.enqueue_trial(baseline_params)
+        print("Enqueuing baseline first trial:", baseline_params)
+        study.enqueue_trial(baseline_params)
+            
+        baseline_params = {
+            'sigma_rel': 0.05,
+            'score_scaling': 1.4,
+        }
+        if guide_model:
+            baseline_params.update({
+                'guidance_scale': 1.0,
+                'guide_sigma_rel': 0.05,
+                'guide_ema_step': min_guide_ema_step,
+            })
+
+        print("Enqueuing baseline second trial:", baseline_params)
+        study.enqueue_trial(baseline_params)
 
     # Run optimization
     study.optimize(objective, n_trials=n_trials)
@@ -287,11 +349,19 @@ def main(config_path, guide_config_path, n_trials, study_name, storage):
     # Best results
     best_trial = study.best_trial
     optimal_sigma = float(best_trial.params['sigma_rel'])
+    optimal_guide_sigma = float(best_trial.params['guide_sigma_rel'])
+    optimal_guide_ema_step = int(best_trial.params['guide_ema_step'])
+    optimal_guidance_scale = float(best_trial.params['guidance_scale'])
+    optimal_score_scaling = float(best_trial.params['score_scaling'])
     optimal_kid = float(best_trial.value)
 
     print("\n" + "=" * 80)
     print("Optimization complete!")
     print(f"Optimal σ_rel: {optimal_sigma:.6f}")
+    print(f"Optimal guide_σ_rel: {optimal_guide_sigma:.6f}")
+    print(f"Optimal guide_ema_step: {optimal_guide_ema_step}")
+    print(f"Optimal guidance_scale: {optimal_guidance_scale}")
+    print(f"Optimal score_scaling: {optimal_score_scaling}")
     print(f"Optimal KID mean: {optimal_kid:.6f}")
     print(f"Best trial: {best_trial.number}")
     print("=" * 80)
@@ -299,6 +369,10 @@ def main(config_path, guide_config_path, n_trials, study_name, storage):
     # Save results
     results = {
         'optimal_sigma_rel': optimal_sigma,
+        'optimal_guide_sigma_rel': optimal_guide_sigma,
+        'optimal_guide_ema_step': optimal_guide_ema_step,
+        'optimal_guidance_scale': optimal_guidance_scale,
+        'optimal_score_scaling': optimal_score_scaling,
         'optimal_kid_mean': optimal_kid,
         'best_trial_number': best_trial.number,
         'n_trials': len(study.trials),
@@ -306,6 +380,10 @@ def main(config_path, guide_config_path, n_trials, study_name, storage):
             {
                 'number': t.number,
                 'sigma_rel': t.params.get('sigma_rel'),
+                'guide_sigma_rel': t.params.get('guide_sigma_rel'),
+                'guide_ema_step': t.params.get('guide_ema_step'),
+                'guidance_scale': t.params.get('guidance_scale'),
+                'score_scaling': t.params.get('score_scaling'),
                 'kid_mean': t.value,
                 'state': t.state.name,
             }

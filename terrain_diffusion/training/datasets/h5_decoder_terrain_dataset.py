@@ -82,6 +82,8 @@ class H5DecoderTerrainDataset(Dataset):
         self.residual_std = residual_std
         if self.residual_mean is None or self.residual_std is None:
             self.calculate_stats()
+            
+        assert crop_size % 8 == 0, "Crop size must be divisible by 8"
         
     def calculate_stats(self, num_samples=10000):
         """Compute per-channel mean and std using a streaming Welford algorithm.
@@ -153,7 +155,6 @@ class H5DecoderTerrainDataset(Dataset):
         
         with h5py.File(self.h5_file, 'r') as f:
             group_path = f"{res}/{chunk_id}/{subchunk_id}"
-            res_group = f[str(res)]
             data_latent = f[f"{group_path}/latent"]
             
             latent_shape = data_latent.shape

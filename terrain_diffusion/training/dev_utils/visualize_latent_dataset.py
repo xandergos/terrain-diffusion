@@ -3,9 +3,8 @@
 Visualization script for H5LatentsDataset with autoencoder decoding.
 
 This script loads the H5LatentsDataset and visualizes:
-- Decoded terrain (residual + water) from latents using an autoencoder
-- Climate channels (switchable via buttons)
-- Lowfreq and climate mask channels
+- Merged terrain (decoded residual combined with lowfreq)
+- Lowfreq channel
 
 Usage:
     python visualize_latent_dataset.py --autoencoder-path /path/to/autoencoder --config /path/to/config.cfg
@@ -21,7 +20,7 @@ from matplotlib.widgets import Button
 import yaml
 from confection import Config, registry
 from torch.utils.data import DataLoader
-from terrain_diffusion.training.datasets import H5LatentsDataset, LongDataset
+from terrain_diffusion.training.datasets import LongDataset
 from terrain_diffusion.models.edm_autoencoder import EDMAutoencoder
 from terrain_diffusion.training.registry import build_registry
 from terrain_diffusion.training.utils import recursive_to
@@ -40,10 +39,10 @@ class LatentDatasetVisualizer:
         self.batch_idx = 0
         
         # Setup matplotlib figure
-        # Layout: 2 rows x 4 columns
-        # Row 1: Merged Terrain (Lowfreq + Residual), Water Coverage, Lowfreq, Climate Mask
-        # Row 2: Temperature, Temp Seasonality, Precipitation, Precip Seasonality
-        self.fig, self.axes = plt.subplots(2, 4, figsize=(16, 8))
+        # Layout: 1 row x 2 columns
+        # Col 1: Merged Terrain (Lowfreq + Residual)
+        # Col 2: Lowfreq
+        self.fig, self.axes = plt.subplots(1, 2, figsize=(12, 6))
         self.fig.suptitle('H5LatentsDataset Visualization', fontsize=16)
         
         # Add navigation buttons only in interactive mode
@@ -92,30 +91,28 @@ class LatentDatasetVisualizer:
         self.model.eval()
         with torch.no_grad():
             # Extract components from the concatenated image tensor
-            # image = [latents (4ch), lowfreq (1ch), climate (4ch), climate_mask (1ch)]
+            # image = [latents (4ch), lowfreq (1ch)]
             image = self.current_batch['image']
-            
+
             # Extract latents (first 4 channels) and lowfreq (channel 4)
             latents = image[:, :4, :, :] * 2
             lowfreq = image[:, 4:5, :, :] * 2
-            
-            # Decode latents to get terrain (residual + water)
+
+            # Decode latents to get residual terrain
             decoded = self.model.decode(latents)
             residual = decoded[:, :1, :, :]
-            watercover = decoded[:, 1:2, :, :]
-            
+
             # Denormalize residual and lowfreq
             residual = self.dataset.denormalize_residual(residual)
-            watercover = self.dataset.denormalize_watercover(watercover)
             lowfreq = self.dataset.denormalize_lowfreq(lowfreq)
-            
+
             # Apply laplacian denoise and decode to merge
             residual, lowfreq = laplacian_denoise(residual, lowfreq, 5.0)
             merged_terrain = laplacian_decode(residual, lowfreq)
-            
+
             # Store results
             self.merged_terrain = merged_terrain
-            self.watercover = watercover
+            self.lowfreq = lowfreq
             
         self.current_idx = 0
         self.batch_idx += 1
@@ -168,51 +165,24 @@ class LatentDatasetVisualizer:
             self.current_idx = 0
             
         # Get current data
-        image = self.current_batch['image'][self.current_idx]
         merged_terrain = self.merged_terrain[self.current_idx, 0]
-        watercover = self.watercover[self.current_idx, 0]
+        lowfreq = self.lowfreq[self.current_idx, 0]
         path = self.current_batch['path'][self.current_idx]
-        
-        # Extract components
-        # image = [latents (4ch), lowfreq (1ch), climate (4ch), climate_mask (1ch)]
-        latents = image[:4]
-        lowfreq = image[4]
-        climate = image[5:9]
-        climate_mask = image[9]
         
         # Clear all axes
         for ax in self.axes.flat:
             ax.clear()
             
-        # Row 1: Merged Terrain, Decoded Water, Lowfreq, Climate Mask
+        # Cols: Merged Terrain, Lowfreq
         terrain_np = merged_terrain.cpu().numpy() if isinstance(merged_terrain, torch.Tensor) else merged_terrain
-        self.axes[0, 0].imshow(terrain_np, cmap='terrain')
-        self.axes[0, 0].set_title('Merged Terrain')
-        self.axes[0, 0].axis('off')
-        
-        water_np = watercover.cpu().numpy() if isinstance(watercover, torch.Tensor) else watercover
-        self.axes[0, 1].imshow(water_np, cmap='Blues', vmin=0, vmax=1)
-        self.axes[0, 1].set_title('Water Coverage')
-        self.axes[0, 1].axis('off')
-        
+        self.axes[0].imshow(terrain_np, cmap='terrain')
+        self.axes[0].set_title('Merged Terrain')
+        self.axes[0].axis('off')
+
         lowfreq_np = lowfreq.cpu().numpy() if isinstance(lowfreq, torch.Tensor) else lowfreq
-        self.axes[0, 2].imshow(lowfreq_np, cmap='terrain')
-        self.axes[0, 2].set_title('Lowfreq')
-        self.axes[0, 2].axis('off')
-        
-        mask_np = climate_mask.cpu().numpy() if isinstance(climate_mask, torch.Tensor) else climate_mask
-        self.axes[0, 3].imshow(mask_np, cmap='gray')
-        self.axes[0, 3].set_title('Climate Mask')
-        self.axes[0, 3].axis('off')
-        
-        # Row 2: All climate channels
-        climate_names = ['Temperature', 'Temp Seasonality', 'Precipitation', 'Precip Seasonality']
-        for i in range(4):
-            climate_channel = climate[i]
-            climate_np = climate_channel.cpu().numpy() if isinstance(climate_channel, torch.Tensor) else climate_channel
-            self.axes[1, i].imshow(climate_np, cmap='RdYlBu_r')
-            self.axes[1, i].set_title(climate_names[i])
-            self.axes[1, i].axis('off')
+        self.axes[1].imshow(lowfreq_np, cmap='terrain')
+        self.axes[1].set_title('Lowfreq')
+        self.axes[1].axis('off')
         
         # Update title with current position and path
         self.fig.suptitle(
