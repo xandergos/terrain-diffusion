@@ -37,11 +37,11 @@ def calculate_fid(generator, val_dataset, device, n_samples=50000):
         images = images.repeat(1, 3, 1, 1)
         return images
     
-    pbar = tqdm(total=n_samples*2, desc="Calculating FID")
+    pbar = tqdm(total=n_samples, desc="Calculating FID")
 
     # Use the same real images to compute both real and fake statistics
     processed = 0
-    val_loader = DataLoader(val_dataset, batch_size=64, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=64)
     generator.eval()
     with torch.no_grad():
         while processed < n_samples:
@@ -65,17 +65,17 @@ def calculate_fid(generator, val_dataset, device, n_samples=50000):
                 mixed_input = torch.cos(t)[..., None, None] * images + torch.sin(t)[..., None, None] * z_img
                 fake_images = generator(mixed_input, t)[:, :1]
 
-                # Crop fake to match the current real images size if needed
-                if fake_images.shape[-2:] != images.shape[-2:]:
-                    h_diff = fake_images.shape[-2] - images.shape[-2]
-                    w_diff = fake_images.shape[-1] - images.shape[-1]
-                    h_start = torch.randint(0, max(1, h_diff + 1), (1,), device=device).item()
-                    w_start = torch.randint(0, max(1, w_diff + 1), (1,), device=device).item()
-                    fake_images = fake_images[:, :, h_start:h_start + images.shape[-2], w_start:w_start + images.shape[-1]]
+                # Crop real images to match the current fake images size if needed
+                h_diff = images.shape[-2] - fake_images.shape[-2]
+                w_diff = images.shape[-1] - fake_images.shape[-1]
+                h_start = h_diff // 2
+                w_start = w_diff // 2
+                images = images[:, :, h_start:h_start+fake_images.shape[-2], w_start:w_start+fake_images.shape[-1]]
 
+                fid.update(process_images(images[:, :1]), real=True)
                 fid.update(process_images(fake_images), real=False)
-                pbar.update(take_n)
-                processed += take_n
+                pbar.update(images.shape[0])
+                processed += images.shape[0]
     return float(fid.compute())
 
 
