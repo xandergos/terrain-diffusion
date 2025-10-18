@@ -161,10 +161,10 @@ class MPDumbGenerator(ModelMixin, ConfigMixin):
                 module.norm_weights()
 
 if __name__ == "__main__":
-    latent = torch.randn(1, 6, 12, 12)
+    latent = torch.randn(1, 6, 16, 16)
     model = MPDumbGenerator(channels=6,
                             model_channels=128,
-                            conv_depth=2,
+                            conv_depth=3,
                             linear_depth=3,
                             no_padding=True)
     emb = torch.rand(1, 6) * torch.pi/2

@@ -1,3 +1,4 @@
+from functools import cache
 import os
 import random
 import warnings
@@ -188,6 +189,13 @@ class GANDataset(Dataset):
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
+        
+    @cache
+    def get_band(self, band_idx):
+        with h5py.File(self.h5_file, 'r') as f:
+            data = f[f'gan_band_{band_idx}']
+            data = (data - f.attrs['means'][:, None, None]) / f.attrs['stds'][:, None, None]
+            return torch.from_numpy(data).float()
 
     def __getitem__(self, idx):
         with h5py.File(self.h5_file, 'r') as f:
@@ -202,18 +210,14 @@ class GANDataset(Dataset):
             j = random.randint(0, max_j)
             
             # Load and crop the data
-            with h5py.File(self.h5_file, 'r') as f:
-                data = f[f'gan_band_{band_idx}'][:, i:i+self.crop_size, j:j+self.crop_size]
-                data = (data - f.attrs['means'][:, None, None]) / f.attrs['stds'][:, None, None]
-                
-            data = torch.from_numpy(data).float()
+            data = self.get_band(band_idx)[:, i:i+self.crop_size, j:j+self.crop_size]
             
             if random.random() > 0.5:
                 data = torch.flip(data, dims=[-2])
             k = random.randint(0, 3)
             if k > 0:
                 data = torch.rot90(data, k=k, dims=[-2, -1])
-        return data
+        return {'image': data}
     
 if __name__ == "__main__":
     dataset = GANDataset(
@@ -232,7 +236,7 @@ if __name__ == "__main__":
     fig, axes = plt.subplots(6, 6, figsize=(15, 15))
     
     for i in range(6):
-        sample = dataset[i]
+        sample = dataset[i]['image']
         for ch in range(6):
             ax = axes[i, ch]
             ax.matshow(sample[ch].numpy())

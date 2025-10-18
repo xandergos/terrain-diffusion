@@ -19,7 +19,7 @@ def linear_warmup(start_value, end_value, current_step, total_steps):
     return start_value + (end_value - start_value) * (current_step / total_steps)
 
 
-def calculate_fid(generator, val_dataset, config, device, n_samples=50000):
+def calculate_fid(generator, val_dataset, device, n_samples=50000):
     """Calculate FID score between generated samples and validation dataset."""
     fid = FrechetInceptionDistance(normalize=True).to(device)
     
@@ -79,7 +79,7 @@ def calculate_fid(generator, val_dataset, config, device, n_samples=50000):
     return float(fid.compute())
 
 
-class GANTrainer(Trainer):
+class GANExpTrainer(Trainer):
     """Trainer for GAN models."""
     
     def __init__(self, config, resolved, accelerator, state):
@@ -196,30 +196,29 @@ class GANTrainer(Trainer):
                     print("Real image size:", real_images.shape)
                     self.printed_size = True
                     
-                # Crop fake images to match real image size if needed
-                if fake_images.shape[-2:] != real_images.shape[-2:]:
-                    h_diff = fake_images.shape[-2] - real_images.shape[-2]
-                    w_diff = fake_images.shape[-1] - real_images.shape[-1]
-                    h_starts = torch.randint(0, max(1, h_diff + 1), (batch_size,), device=fake_images.device)
-                    w_starts = torch.randint(0, max(1, w_diff + 1), (batch_size,), device=fake_images.device)
-                    fake_images = torch.stack([
-                        fake_images[i, :, h_starts[i]:h_starts[i]+real_images.shape[-2], 
-                                    w_starts[i]:w_starts[i]+real_images.shape[-1]]
-                        for i in range(batch_size)
-                    ])
+                cond_cat = torch.cat([mixed_real, mixed_real], dim=0)
                 
-                # Discriminator sees true real images vs generated fakes
-                all_images = torch.cat([real_images, fake_images.detach()], dim=0).detach().requires_grad_(True)
-                pred = self.discriminator(all_images)
-                real_pred = pred[:batch_size]
-                fake_pred = pred[batch_size:]
+                # Central crop real_images to match fake_images size
+                real_images_uncropped = real_images
+                
+                h_diff = real_images.shape[-2] - fake_images.shape[-2]
+                w_diff = real_images.shape[-1] - fake_images.shape[-1]
+                h_start = h_diff // 2
+                w_start = w_diff // 2
+                real_images = real_images[:, :, h_start:h_start+fake_images.shape[-2], w_start:w_start+fake_images.shape[-1]]
+                
+                img_cat = torch.cat([real_images, fake_images.detach()], dim=0).detach().requires_grad_(True)
+                t_cat = torch.cat([t, t], dim=0)
+                pred_cat = self.discriminator(cond_cat, img_cat, t_cat)
+                real_pred, fake_pred = pred_cat[:batch_size], pred_cat[batch_size:]
                 
                 d_loss = torch.nn.functional.softplus(fake_pred - real_pred).mean()
                 
                 if self.config['training'].get('r_gamma', 0) > 0 and state['step'] % self.config['training'].get('r_interval', 16) == 0:
                     grad_real = torch.autograd.grad(
-                        outputs=pred.sum(), inputs=all_images,
-                        create_graph=True)[0]
+                        outputs=pred_cat.sum(), inputs=img_cat,
+                        create_graph=True, retain_graph=True
+                    )[0]
                     r_reg = current_r_gamma * 0.5 * grad_real.pow(2).reshape(grad_real.shape[0], -1).sum(1).mean()
                     total_d_loss = d_loss + r_reg
                 else:
@@ -236,29 +235,25 @@ class GANTrainer(Trainer):
         with self.accelerator.accumulate(self.generator):
             with self.accelerator.autocast():
                 self.discriminator.eval()
-                # Sample fresh t and mix real with noise for generator step
+                
                 t_g = torch.rand(batch_size, real_images.shape[1], device=self.accelerator.device) * (torch.pi / 2)
-                z_img_g = torch.randn_like(real_images)
-                mixed_real_g = torch.cos(t_g)[..., None, None] * real_images + torch.sin(t_g)[..., None, None] * z_img_g
+                z_img_g = torch.randn_like(real_images_uncropped)
+                mixed_real_g = torch.cos(t_g)[..., None, None] * real_images_uncropped + torch.sin(t_g)[..., None, None] * z_img_g
                 fake_images = self.generator(mixed_real_g, t_g)
 
-                # Crop fake images to match real image size if needed
-                if fake_images.shape[-2:] != real_images.shape[-2:]:
-                    h_diff = fake_images.shape[-2] - real_images.shape[-2]
-                    w_diff = fake_images.shape[-1] - real_images.shape[-1]
-                    h_starts = torch.randint(0, max(1, h_diff + 1), (batch_size,), device=fake_images.device)
-                    w_starts = torch.randint(0, max(1, w_diff + 1), (batch_size,), device=fake_images.device)
-                    fake_images = torch.stack([
-                        fake_images[i, :, h_starts[i]:h_starts[i]+real_images.shape[-2], 
-                                    w_starts[i]:w_starts[i]+real_images.shape[-1]]
-                        for i in range(batch_size)
-                    ])
-                
-                fake_pred = self.discriminator(fake_images)
+                fake_pred = self.discriminator(mixed_real_g, fake_images, t_g)
                 g_loss = torch.nn.functional.softplus(real_pred.detach() - fake_pred).mean()
                 
+                mean = fake_images.mean(dim=(0, 2, 3))
+                std = fake_images.std(dim=(0, 2, 3))
+                kl_loss = (
+                    torch.log(1 / (std + 1e-8)) +
+                    (std**2 + (mean - 1)**2) / (2 * (1**2 + 1e-8)) - 0.5
+                ).mean()
+                total_g_loss = g_loss + kl_loss * self.config['training'].get('kl_weight', 0.0)
+                
             self.g_optimizer.zero_grad()
-            self.accelerator.backward(g_loss)
+            self.accelerator.backward(total_g_loss)
             if self.accelerator.sync_gradients:
                 generator_grad_norm = self.accelerator.clip_grad_norm_(self.generator.parameters(), 10.0)
             self.g_optimizer.step()
@@ -286,11 +281,11 @@ class GANTrainer(Trainer):
         return {
             'd_loss': d_loss.item(),
             'g_loss': g_loss.item(),
+            'kl_loss': kl_loss.item(),
             'r_loss': (r_reg.item() / current_r_gamma) if current_r_gamma > 0 else 0,
-            'd_grad_norm': discriminator_grad_norm,
-            'g_grad_norm': generator_grad_norm,
-            'lr': lr,
-            'batch_size': batch_size
+            'd_grad_norm': discriminator_grad_norm.item(),
+            'g_grad_norm': generator_grad_norm.item(),
+            'lr': lr
         }
     
     def evaluate(self):
@@ -298,7 +293,7 @@ class GANTrainer(Trainer):
         self.generator.eval()
         with temporary_ema_to_model(self.ema.ema_models[0]):
             self.val_dataset.set_seed(self.config['training']['seed'] + 123)
-            fid = calculate_fid(self.generator, self.val_dataset, self.config, self.accelerator.device)
+            fid = calculate_fid(self.generator, self.val_dataset, self.accelerator.device)
         self.generator.train()
         return {'val/fid': fid}
 

@@ -23,55 +23,51 @@ class MPDumbDiscriminator(ModelMixin, ConfigMixin):
     def __init__(
         self,
         channels,
-        cond_channels=32,
+        hidden_channels=32,
         cond_depth=2,
-        disc_channels=64,
         channel_mults=[1, 2, 4, 8],
         layers_per_block=2,
-        no_padding=True,
         fourier_channels=64
     ):
         super().__init__()
-
-        # If image_channels not provided, assume same as conditioning channels
         self.channels = channels
 
         # Conditioning processing
-        self.cond_stem = MPConv(self.channels + 1, cond_channels, kernel=[1, 1])
+        self.cond_stem = MPConv(self.channels + 1, hidden_channels, kernel=[1, 1])
         self.cond_blocks = nn.ModuleList([
-            UNetBlock(cond_channels,
-                      cond_channels,
-                      emb_channels=cond_channels,
+            UNetBlock(hidden_channels,
+                      hidden_channels,
+                      emb_channels=hidden_channels,
                       mode='dec',
-                      no_padding=no_padding,
+                      no_padding=True,
                       activation='leaky_relu')
             for _ in range(cond_depth)
         ])
         # Per-channel Fourier embeddings of t and linear projection to emb space
         self.fouriers = nn.ModuleList([MPFourier(fourier_channels) for _ in range(self.channels)])
-        self.emb_linear = MPConv(self.channels * fourier_channels, cond_channels, kernel=[])
+        self.emb_linear = MPConv(self.channels * fourier_channels, hidden_channels, kernel=[])
 
         # Discriminator body (encoder-like, similar to MPDiscriminator)
         # No bias channel in discriminator input
-        disc_in_channels = self.channels + cond_channels
-        self.in_conv = MPConv(disc_in_channels, disc_channels, kernel=[1, 1])
+        disc_in_channels = self.channels + hidden_channels
+        self.in_conv = MPConv(disc_in_channels, hidden_channels, kernel=[1, 1])
 
         self.blocks = nn.ModuleList()
-        cur_channels = disc_channels
+        cur_channels = hidden_channels
         for k, mult in enumerate(channel_mults):
-            out_channels = disc_channels * mult
+            out_channels = hidden_channels * mult
             for i in range(layers_per_block - 1):
                 self.blocks.append(UNetBlock(
                     cur_channels if i == 0 else out_channels,
                     out_channels,
-                    emb_channels=cur_channels,
+                    emb_channels=hidden_channels,
                     mode='enc',
                     activation='leaky_relu'
                 ))
             self.blocks.append(UNetBlock(
                 cur_channels if layers_per_block == 1 else out_channels,
                 out_channels,
-                emb_channels=cur_channels,
+                emb_channels=hidden_channels,
                 mode='enc',
                 activation='leaky_relu',
                 resample_mode='down' if k != len(channel_mults) - 1 else 'keep'
@@ -121,12 +117,18 @@ class MPDumbDiscriminator(ModelMixin, ConfigMixin):
 
 if __name__ == "__main__":
     # Simple sanity check
-    b, c, h_big, w_big = 2, 6, 20, 20
-    h_small, w_small = 12, 12
+    b, c, h_big, w_big = 2, 6, 12, 12
+    h_small, w_small = 4, 4
     cond = torch.randn(b, c, h_big, w_big)
     img = torch.randn(b, c, h_small, w_small)
-    model = MPDumbDiscriminator(channels=c, image_channels=c, model_channels=32, conv_depth=2, no_padding=True,
-                                disc_channels=64, channel_mults=[1], layers_per_block=2)
+    model = MPDumbDiscriminator(
+        channels=c,
+        hidden_channels=32,
+        cond_depth=2,
+        channel_mults=[1],
+        layers_per_block=2,
+        fourier_channels=64
+    )
     t = torch.rand(b, c) * (torch.pi / 2)
     out = model(cond, img, t)
     print(out.shape)

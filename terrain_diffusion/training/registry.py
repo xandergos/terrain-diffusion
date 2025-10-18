@@ -14,6 +14,7 @@ from terrain_diffusion.training.trainers.autoencoder import AutoencoderTrainer
 from terrain_diffusion.training.trainers.consistency import ConsistencyTrainer
 from terrain_diffusion.training.trainers.diffusion import DiffusionTrainer
 from terrain_diffusion.training.trainers.gan import GANTrainer
+from terrain_diffusion.training.trainers.gan_exp import GANExpTrainer
 
 def build_registry():
     registry.scheduler = catalogue.create("confection", "schedulers", entry_points=False)
@@ -44,6 +45,7 @@ def build_registry():
     registry.trainer.register("consistency", func=lambda: ConsistencyTrainer)
     registry.trainer.register("diffusion", func=lambda: DiffusionTrainer)
     registry.trainer.register("gan", func=lambda: GANTrainer)
+    registry.trainer.register("gan_exp", func=lambda: GANExpTrainer)
     
     registry.utils = catalogue.create("confection", "utils", entry_points=False)
     registry.utils.register("create_list", func=lambda *args: list(args))
