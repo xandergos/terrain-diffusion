@@ -89,10 +89,14 @@ class MPGenerator(ModelMixin, ConfigMixin):
             cout = channels
         
         # Final output convolution
-        self.out_conv = MPConv(cout, out_channels + 1, kernel=[1, 1], no_padding=no_padding)
+        self.out_conv = MPConv(cout, out_channels, kernel=[1, 1], no_padding=no_padding)
         self.out_gain = nn.Parameter(torch.ones([]))
 
     def raw_forward(self, z):
+        # For backwards compatibility
+        return self.forward(z)
+
+    def forward(self, z):
         """
         Forward pass of the generator.
         
@@ -120,19 +124,6 @@ class MPGenerator(ModelMixin, ConfigMixin):
                 
         x = self.out_conv(x, gain=self.out_gain)
         return x
-    
-    def forward(self, z):
-        """
-        Forward pass of the generator.
-        
-        Args:
-            z (torch.Tensor): Input latent tensor of shape [batch_size, latent_channels, latent_size, latent_size]
-        
-        Returns:
-            torch.Tensor: Generated image of shape [batch_size, out_channels, out_size, out_size]
-        """
-        x = self.raw_forward(z)
-        return torch.cat([x[:, :1], x[:, 1:-1] * torch.sigmoid(x[:, -1:])], dim=1)
 
     def norm_weights(self):
         """Normalize all the weights in the model."""
@@ -140,15 +131,11 @@ class MPGenerator(ModelMixin, ConfigMixin):
             if module != self and hasattr(module, 'norm_weights'):
                 module.norm_weights()
 
-# Note: GBlock and ResNetGenerator classes were removed as they depended on 
-# ResBlock from the deleted discriminator_basic module and were not used anywhere.
-
-
 if __name__ == "__main__":
-    latent = torch.randn(1, 256, 20, 20)
-    model = MPGenerator(latent_channels=256, out_channels=5,
-                         model_channels=16,
-                         model_channel_mults=[64, 32, 16, 8, 4, 2, 1],
+    latent = torch.randn(1, 256, 22, 22)
+    model = MPGenerator(latent_channels=256, out_channels=6,
+                         model_channels=128,
+                         model_channel_mults=[1, 1, 1],
                          layers_per_block=2, no_padding=True,
                          stem_width=7)
     print(model(latent).shape)

@@ -235,7 +235,10 @@ def main(config_path, guide_config_path, n_trials, study_name, storage):
             guide_sigma_rel = None
             guide_ema_step = None
             guidance_scale = None
-        score_scaling = trial.suggest_float('score_scaling', min_score_scaling, max_score_scaling, log=False)
+        if min_score_scaling == max_score_scaling:
+            score_scaling = min_score_scaling
+        else:
+            score_scaling = trial.suggest_float('score_scaling', min_score_scaling, max_score_scaling, log=False)
 
         print("\n" + "=" * 80)
         print(f"Trial {trial.number}: Evaluating σ_rel = {sigma_rel:.6f}, guide_σ_rel = {guide_sigma_rel:.6f}, guide_ema_step = {guide_ema_step}, guidance_scale = {guidance_scale:.6f}, score_scaling = {score_scaling:.6f}")

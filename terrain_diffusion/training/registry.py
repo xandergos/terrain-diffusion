@@ -33,6 +33,7 @@ def build_registry():
     registry.dataset.register("h5_autoencoder", func=H5AutoencoderDataset)
     registry.dataset.register("h5_latents", func=H5LatentsDataset)
     registry.dataset.register("file_gan", func=FileGANDataset)
+    registry.dataset.register("gan", func=GANDataset)
     
     registry.trainer = catalogue.create("confection", "trainers", entry_points=False)
     registry.trainer.register("autoencoder", func=lambda: AutoencoderTrainer)
