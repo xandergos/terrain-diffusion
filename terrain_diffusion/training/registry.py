@@ -1,5 +1,7 @@
 import catalogue
 from confection import registry
+from terrain_diffusion.models.mp_dumb_discriminator import MPDumbDiscriminator
+from terrain_diffusion.models.mp_dumb_generator import MPDumbGenerator
 from terrain_diffusion.training.datasets import *
 from terrain_diffusion.data.laplacian_encoder import *
 from terrain_diffusion.models.mp_discriminator import MPDiscriminator
@@ -21,6 +23,8 @@ def build_registry():
     registry.model.register("unet", func=EDMUnet2D)
     registry.model.register("autoencoder", func=EDMAutoencoder)
     registry.model.register("generator", func=MPGenerator)
+    registry.model.register("dumb_generator", func=MPDumbGenerator)
+    registry.model.register("dumb_discriminator", func=MPDumbDiscriminator)
     registry.model.register("discriminator", func=MPDiscriminator)
     
     registry.lr_sched = catalogue.create("confection", "lr_sched", entry_points=False)
