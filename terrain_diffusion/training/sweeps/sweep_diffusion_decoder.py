@@ -26,6 +26,36 @@ from terrain_diffusion.training.utils import recursive_to
 #autoencoder.eval()
 #autoencoder.requires_grad_(False)
 
+def scale_score(
+    model_output: torch.Tensor,   
+    sample: torch.Tensor,
+    sigma: torch.Tensor, 
+    sigma_data: float,   
+    alpha: float = 1.5,  
+):
+    v_t = -sigma_data * model_output
+    
+    # Make sigma broadcast to sample shape if needed
+    if not torch.is_tensor(sigma):
+        sigma = torch.tensor(sigma, dtype=sample.dtype, device=sample.device)
+    while sigma.ndim < sample.ndim:
+        sigma = sigma.view(*sigma.shape, *([1] * (sample.ndim - sigma.ndim)))
+
+    sigma_data = torch.as_tensor(sigma_data, dtype=sample.dtype, device=sample.device)
+
+    t = torch.atan(sigma / sigma_data)
+    cos_t = torch.cos(t)
+    sin_t = torch.sin(t)
+
+    x0_pred = sample * cos_t - v_t * sin_t
+    noise_pred = sample * sin_t + v_t * cos_t
+
+    x0_alpha = sample + alpha * (x0_pred - sample)
+
+    v_t_alpha = noise_pred * cos_t - x0_alpha * sin_t
+
+    return v_t_alpha / -sigma_data
+
 def _normalize_uint8_three_channel(images: torch.Tensor) -> torch.Tensor:
     """Normalize single-channel images to uint8 [0, 255] repeated to 3 channels."""
     image_min = torch.amin(images, dim=(1, 2, 3), keepdim=True)
@@ -108,7 +138,7 @@ def evaluate_decoder_kid(model, g_model=None, guidance_scale=1.0, score_scaling=
                             model_output_m = model(model_input, noise_labels=cnoise, conditional_inputs=[])
                             model_output_g = g_model(model_input, noise_labels=cnoise, conditional_inputs=[])
                             model_output = model_output_g + guidance_scale * (model_output_m - model_output_g)
-                        model_output = model_output * score_scaling
+                        model_output = scale_score(model_output, samples, sigma, scheduler.config.sigma_data, alpha=score_scaling)
 
                         samples = scheduler.step(model_output, t, samples).prev_sample
                     
@@ -308,10 +338,11 @@ def main(config_path, guide_config_path, n_trials, study_name, storage):
         storage=storage_url,
         load_if_exists=True,
         sampler=optuna.samplers.TPESampler(seed=42, 
-                                           n_startup_trials=24,
+                                           n_startup_trials=config['sweep'].get('n_startup_trials', 24),
                                            multivariate=True,
                                            group=True,
-                                           n_ei_candidates=64),
+                                           n_ei_candidates=config['sweep'].get('n_ei_candidates', 64),
+                                           prior_weight=config['sweep'].get('prior_weight', 1.0)),
     )
 
     # Optionally force a simple baseline as the first trial

@@ -207,6 +207,12 @@ class GANDataset(Dataset):
                 data = (data - f.attrs['means'][:, None, None]) / f.attrs['stds'][:, None, None]
                 
             data = torch.from_numpy(data).float()
+            
+            if random.random() > 0.5:
+                data = torch.flip(data, dims=[-2])
+            k = random.randint(0, 3)
+            if k > 0:
+                data = torch.rot90(data, k=k, dims=[-2, -1])
         return data
     
 if __name__ == "__main__":
@@ -236,4 +242,3 @@ if __name__ == "__main__":
     
     plt.tight_layout()
     plt.show()
-    print("Saved visualization to gan_dataset_samples.png")

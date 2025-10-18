@@ -42,8 +42,11 @@ class MPGenerator(ModelMixin, ConfigMixin):
         init_channels = stem_channels or model_channels * model_channel_mults[0]
         
         # Initial stem convolution for spatial context
-        self.stem_conv = MPConv(latent_channels, init_channels, 
-                              kernel=[stem_width, stem_width], no_padding=no_padding)
+        if stem_width > 0:
+            self.stem_conv = MPConv(latent_channels, init_channels, 
+                                kernel=[stem_width, stem_width], no_padding=no_padding)
+        else:
+            self.stem_conv = None
         self.initial_skip_conv = MPConv(latent_channels, init_channels, kernel=[1, 1])
         
         # Upsampling after stem
@@ -107,7 +110,8 @@ class MPGenerator(ModelMixin, ConfigMixin):
             torch.Tensor: Generated image of shape [batch_size, out_channels, out_size, out_size]
         """
         # Apply stem conv
-        stem = self.stem_conv(z)
+        if self.stem_conv is not None:
+            stem = self.stem_conv(z)
         
         # Handle skip connection
         init_skip = self.initial_skip_conv(z)
@@ -117,7 +121,9 @@ class MPGenerator(ModelMixin, ConfigMixin):
             start_h = diff_h // 2
             start_w = diff_w // 2
             init_skip = init_skip[:, :, start_h:start_h + stem.shape[2], start_w:start_w + stem.shape[3]]
-        x = mp_sum([stem, init_skip], w=0.5)
+        
+        if self.stem_conv is not None:
+            x = mp_sum([stem, init_skip], w=0.5)
         
         for block in self.blocks:
             x = block(x, emb=None)

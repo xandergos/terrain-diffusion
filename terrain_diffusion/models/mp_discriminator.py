@@ -20,7 +20,6 @@ class MPDiscriminator(nn.Module):
         self,
         in_channels,
         additional_vars=0,
-        additional_vars_hidden=32,
         model_channels=64,
         channel_mults=[1, 2, 4, 8],
         layers_per_block=1,
@@ -72,15 +71,6 @@ class MPDiscriminator(nn.Module):
         # Global average pooling
         self.global_pool = nn.AdaptiveAvgPool2d(1)
         
-        # Additional variables linear classification head
-        self.additional_vars_head = nn.Sequential(
-            MPConv(additional_vars, additional_vars_hidden, kernel=[]),
-            nn.LeakyReLU(0.2),
-            MPConv(additional_vars_hidden, additional_vars_hidden, kernel=[]),
-            nn.LeakyReLU(0.2),
-            MPConv(additional_vars_hidden, additional_vars_hidden, kernel=[])
-        ) if additional_vars > 0 else None
-        
         # Final classification layer
         final_input_size = cur_channels # + (16 if additional_vars > 0 else 0)
         self.final_conv = MPConv(final_input_size, 1, kernel=[1, 1])  # 1x1 conv for final output
@@ -104,12 +94,6 @@ class MPDiscriminator(nn.Module):
         
         # Global average pooling
         x = self.global_pool(x).squeeze(-1).squeeze(-1)
-        
-        # Process additional variables if provided
-        if self.additional_vars_head is not None and additional_vars is not None:
-            assert False # Not supported rn
-            additional_features = self.additional_vars_head(additional_vars)
-            x = torch.cat([x, additional_features], dim=1)
             
         return x
 

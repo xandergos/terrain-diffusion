@@ -24,6 +24,52 @@ from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.utils.torch_utils import randn_tensor
 from diffusers.schedulers.scheduling_utils import SchedulerMixin, SchedulerOutput
 
+@torch.no_grad()
+def scale_score_in_velocity(
+    v0: torch.Tensor,          
+    sample: torch.Tensor,      
+    sigma: torch.Tensor,       
+    model_output: torch.Tensor,
+    alpha: float = 1.5,        
+    sigma_data: float = 0.5,   
+    eps: float = 1e-20,
+):
+    """
+    Returns:
+        v0_scaled: velocity with score component scaled by alpha
+    """
+    # Ensure sigma broadcasts correctly (handle scalar or per-sample tensors)
+    if not torch.is_tensor(sigma):
+        sigma = torch.tensor(sigma, dtype=sample.dtype, device=sample.device)
+    # broadcast to sample shape if needed
+    while sigma.ndim < sample.ndim:
+        sigma = sigma.view(*sigma.shape, *([1] * (sample.ndim - sigma.ndim)))
+
+    sigma2 = sigma * sigma
+    sigma_data = torch.as_tensor(sigma_data, dtype=sample.dtype, device=sample.device)
+    sigma_data2 = sigma_data * sigma_data
+
+    # --- Your x0_pred (denoised) formula ---
+    c_skip = sigma_data2 / (sigma2 + sigma_data2)
+    c_out  = sigma * sigma_data / torch.sqrt(sigma2 + sigma_data2)
+    denoised = c_skip * sample + c_out * model_output  # \hat{x}_0
+
+    # --- Denoising direction (the "score direction" up to constants) ---
+    d = denoised - sample  # same shape as v0
+
+    # --- Project v0 onto d and scale only that component ---
+    # Sum over non-batch dims to get per-sample inner products.
+    reduce_dims = tuple(range(1, v0.ndim))
+    dot_vd = (v0 * d).sum(dim=reduce_dims, keepdim=True)
+    dot_dd = (d * d).sum(dim=reduce_dims, keepdim=True).clamp_min(eps)
+
+    v_parallel = (dot_vd / dot_dd) * d
+    v_perp = v0 - v_parallel
+
+    # Lengthen the score component only
+    v0_scaled = v_perp + alpha * v_parallel
+
+    return v0_scaled
 
 class EDMDPMSolverMultistepScheduler(SchedulerMixin, ConfigMixin):
     """

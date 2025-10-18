@@ -59,7 +59,7 @@ def main(ctx, config_path, ckpt_path, override, steps, samples):
     
     val_dataloader = DataLoader(
         LongDataset(val_dataset, shuffle=True), 
-        batch_size=config['training']['train_batch_size'],
+        batch_size=config['training']['batch_size'],
         **resolved['dataloader_kwargs'], 
         drop_last=True
     )
