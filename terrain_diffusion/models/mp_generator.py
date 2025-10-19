@@ -115,7 +115,7 @@ class MPGenerator(ModelMixin, ConfigMixin):
         
         # Handle skip connection
         init_skip = self.initial_skip_conv(z)
-        if init_skip.shape != stem.shape:
+        if self.stem_conv is not None and init_skip.shape != stem.shape:
             diff_h = init_skip.shape[2] - stem.shape[2]
             diff_w = init_skip.shape[3] - stem.shape[3]
             start_h = diff_h // 2
@@ -124,6 +124,8 @@ class MPGenerator(ModelMixin, ConfigMixin):
         
         if self.stem_conv is not None:
             x = mp_sum([stem, init_skip], w=0.5)
+        else:
+            x = init_skip
         
         for block in self.blocks:
             x = block(x, emb=None)
@@ -138,10 +140,10 @@ class MPGenerator(ModelMixin, ConfigMixin):
                 module.norm_weights()
 
 if __name__ == "__main__":
-    latent = torch.randn(1, 256, 22, 22)
-    model = MPGenerator(latent_channels=256, out_channels=6,
+    latent = torch.randn(1, 32, 13, 13)
+    model = MPGenerator(latent_channels=32, out_channels=6,
                          model_channels=128,
-                         model_channel_mults=[1, 1, 1],
+                         model_channel_mults=[1, 1],
                          layers_per_block=2, no_padding=True,
-                         stem_width=7)
+                         stem_width=0)
     print(model(latent).shape)
