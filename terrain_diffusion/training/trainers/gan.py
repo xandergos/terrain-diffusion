@@ -237,8 +237,8 @@ class GANTrainer(Trainer):
                 fake_pred = self.discriminator(fake_images)
                 g_loss = torch.nn.functional.softplus(real_pred.detach() - fake_pred).mean()
                 
-                real_mean = real_images.mean(dim=(0, 2, 3))
-                real_std = real_images.std(dim=(0, 2, 3))
+                real_mean = 0
+                real_std = 1
 
                 mean = fake_images.mean(dim=(0, 2, 3))
                 std = fake_images.std(dim=(0, 2, 3))
@@ -286,10 +286,9 @@ class GANTrainer(Trainer):
             'kl_loss': kl_loss.item(),
             'range_loss': range_loss.item(),
             'r_loss': (r_reg.item() / current_r_gamma) if current_r_gamma > 0 else 0,
-            'd_grad_norm': discriminator_grad_norm,
-            'g_grad_norm': generator_grad_norm,
-            'lr': lr,
-            'batch_size': batch_size
+            'd_grad_norm': discriminator_grad_norm.item(),
+            'g_grad_norm': generator_grad_norm.item(),
+            'lr': lr
         }
     
     def evaluate(self):
