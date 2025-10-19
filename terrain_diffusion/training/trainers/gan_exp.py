@@ -58,7 +58,7 @@ def calculate_fid(generator, val_dataset, device, n_samples=50000):
                 t = torch.rand(images.shape[0], num_channels, device=device) * (torch.pi / 2)
                 
                 # Pure noise input
-                t = torch.full((images.shape[0], num_channels), torch.pi / 2, device=device)
+                t = torch.full((images.shape[0], num_channels), np.arctan(160), device=device)
                 
                 # Form mixed inputs using the same real images and fresh noise
                 z_img = torch.randn_like(images)
@@ -172,6 +172,11 @@ class GANExpTrainer(Trainer):
         def sample_t(bs, channels):
             t = torch.rand(bs, channels, device=self.accelerator.device)
             t = torch.atan(2 * torch.exp(10 * torch.sqrt(t) - 3))
+            
+            # Randomly make half the batch = arctan(160)
+            mask = torch.rand(bs, device=self.accelerator.device) < 0.5
+            t[mask] = torch.atan(torch.tensor(160.0, device=self.accelerator.device))
+            
             return t
 
         # Train discriminator
