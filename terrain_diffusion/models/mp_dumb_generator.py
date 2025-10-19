@@ -152,6 +152,8 @@ class MPDumbGenerator(ModelMixin, ConfigMixin):
         x = self.out_conv(x, gain=self.out_gain)
         
         anti_padding = (z_init.shape[2] - x.shape[2]) // 2
+        if anti_padding == 0:
+            return z_init * torch.cos(t[..., None, None]) - x * torch.sin(t[..., None, None])
         return z_init[:, :, anti_padding:-anti_padding, anti_padding:-anti_padding] * torch.cos(t[..., None, None]) - x * torch.sin(t[..., None, None])
     
     def norm_weights(self):
