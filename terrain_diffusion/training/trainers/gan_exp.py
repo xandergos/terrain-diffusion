@@ -56,6 +56,10 @@ def calculate_fid(generator, val_dataset, device, n_samples=50000):
                 # Sample random per-channel t in [0, pi/2]
                 num_channels = images.shape[1]
                 t = torch.rand(images.shape[0], num_channels, device=device) * (torch.pi / 2)
+                
+                # Pure noise input
+                t = torch.full((images.shape[0], num_channels), torch.pi / 2, device=device)
+                
                 # Form mixed inputs using the same real images and fresh noise
                 z_img = torch.randn_like(images)
                 mixed_input = torch.cos(t)[..., None, None] * images + torch.sin(t)[..., None, None] * z_img
