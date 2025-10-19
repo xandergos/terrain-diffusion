@@ -169,6 +169,11 @@ class GANExpTrainer(Trainer):
         else:
             current_r_gamma = self.final_r_gamma
 
+        def sample_t(bs, channels):
+            t = torch.rand(bs, channels, device=self.accelerator.device)
+            t = torch.atan(2 * torch.exp(10 * torch.sqrt(t) - 3))
+            return t
+
         # Train discriminator
         with self.accelerator.accumulate(self.discriminator):
             real_images = batch['image']
@@ -177,8 +182,8 @@ class GANExpTrainer(Trainer):
             with self.accelerator.autocast():
                 self.discriminator.train()
                 
+                t = sample_t(batch_size, real_images.shape[1])
                 # Sample per-channel t in [0, pi/2] and image-shaped noise for mixing
-                t = torch.rand(batch_size, real_images.shape[1], device=self.accelerator.device) * (torch.pi / 2)
                 z_img = torch.randn_like(real_images)
                 # Mix real images with noise: cos(t)*x + sin(t)*z (for generator input only)
                 mixed_real = torch.cos(t)[..., None, None] * real_images + torch.sin(t)[..., None, None] * z_img
@@ -236,7 +241,7 @@ class GANExpTrainer(Trainer):
             with self.accelerator.autocast():
                 self.discriminator.eval()
                 
-                t_g = torch.rand(batch_size, real_images.shape[1], device=self.accelerator.device) * (torch.pi / 2)
+                t_g = sample_t(batch_size, real_images_uncropped.shape[1])
                 z_img_g = torch.randn_like(real_images_uncropped)
                 mixed_real_g = torch.cos(t_g)[..., None, None] * real_images_uncropped + torch.sin(t_g)[..., None, None] * z_img_g
                 fake_images = self.generator(mixed_real_g, t_g)
