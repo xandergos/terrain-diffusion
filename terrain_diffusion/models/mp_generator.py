@@ -21,7 +21,6 @@ class MPGenerator(ModelMixin, ConfigMixin):
         model_channel_mults=None,
         layers_per_block=2,
         block_kwargs=None,
-        stem_width=7,
         stem_channels=None,
         no_padding=True
     ):
@@ -41,19 +40,7 @@ class MPGenerator(ModelMixin, ConfigMixin):
         
         init_channels = stem_channels or model_channels * model_channel_mults[0]
         
-        # Initial stem convolution for spatial context
-        if stem_width > 0:
-            self.stem_conv = MPConv(latent_channels, init_channels, 
-                                kernel=[stem_width, stem_width], no_padding=no_padding)
-        else:
-            self.stem_conv = None
         self.initial_skip_conv = MPConv(latent_channels, init_channels, kernel=[1, 1])
-        
-        # Upsampling after stem
-        self.initial_up = MPConvResample('up', kernel=[4, 4], 
-                                       in_channels=init_channels,
-                                       out_channels=init_channels,
-                                       skip_weight=0.0)
         
         # Build decoder blocks
         self.blocks = nn.ModuleList()
@@ -63,7 +50,6 @@ class MPGenerator(ModelMixin, ConfigMixin):
         for level, mult in enumerate(model_channel_mults):
             channels = model_channels * mult
             
-            # Replace GeneratorBlock with UNetBlock
             for i in range(layers_per_block - 1):
                 self.blocks.append(UNetBlock(cout if i == 0 else channels, 
                                              channels, 
@@ -71,10 +57,6 @@ class MPGenerator(ModelMixin, ConfigMixin):
                                              mode='dec',
                                              resample_mode='keep',
                                              no_padding=no_padding,
-                                             #activation='leaky_relu',
-                                             #resample_type='conv',
-                                             #resample_filter=2,
-                                             #resample_skip_weight=0.7,
                                              **block_kwargs))
                 
             self.blocks.append(UNetBlock(cout if layers_per_block == 1 else channels, 
@@ -83,10 +65,6 @@ class MPGenerator(ModelMixin, ConfigMixin):
                                          mode='dec',
                                          resample_mode='up_bilinear' if level != len(model_channel_mults) - 1 else 'keep',
                                          no_padding=no_padding,
-                                         #activation='leaky_relu',
-                                         #resample_type='conv',
-                                         #resample_filter=2,
-                                         #resample_skip_weight=0.7,
                                          **block_kwargs))
             
             cout = channels
@@ -109,23 +87,7 @@ class MPGenerator(ModelMixin, ConfigMixin):
         Returns:
             torch.Tensor: Generated image of shape [batch_size, out_channels, out_size, out_size]
         """
-        # Apply stem conv
-        if self.stem_conv is not None:
-            stem = self.stem_conv(z)
-        
-        # Handle skip connection
-        init_skip = self.initial_skip_conv(z)
-        if self.stem_conv is not None and init_skip.shape != stem.shape:
-            diff_h = init_skip.shape[2] - stem.shape[2]
-            diff_w = init_skip.shape[3] - stem.shape[3]
-            start_h = diff_h // 2
-            start_w = diff_w // 2
-            init_skip = init_skip[:, :, start_h:start_h + stem.shape[2], start_w:start_w + stem.shape[3]]
-        
-        if self.stem_conv is not None:
-            x = mp_sum([stem, init_skip], w=0.5)
-        else:
-            x = init_skip
+        x = self.initial_skip_conv(z)
         
         for block in self.blocks:
             x = block(x, emb=None)
