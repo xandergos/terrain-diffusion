@@ -47,7 +47,7 @@ def create_models(main_resolved, guide_resolved=None, main_sigma_rel=0.05, guide
     assert os.path.exists(phema_m_dir), f"Error: The phema directory {phema_m_dir} does not exist."
     main_resolved['ema']['checkpoint_folder'] = phema_m_dir
     ema_m = PostHocEMA(model_m, **main_resolved['ema'])
-    ema_m.load_state_dict(torch.load(f"{main_resolved['logging']['save_dir']}/latest_checkpoint/phema.pt", weights_only=True))
+    ema_m.load_state_dict(torch.load(f"{main_resolved['logging']['save_dir']}/latest_checkpoint/phema.pt", weights_only=False))
     ema_m.synthesize_ema_model(sigma_rel=main_sigma_rel).copy_params_from_ema_to_model()
     
     # Apply EMA for guidance model if it exists
@@ -56,7 +56,7 @@ def create_models(main_resolved, guide_resolved=None, main_sigma_rel=0.05, guide
         assert os.path.exists(phema_g_dir), f"Error: The phema directory {phema_g_dir} does not exist."
         guide_resolved['ema']['checkpoint_folder'] = phema_g_dir
         ema_g = PostHocEMA(model_g, **guide_resolved['ema'])
-        ema_g.load_state_dict(torch.load(f"{guide_resolved['logging']['save_dir']}/latest_checkpoint/phema.pt", weights_only=True))
+        ema_g.load_state_dict(torch.load(f"{guide_resolved['logging']['save_dir']}/latest_checkpoint/phema.pt", weights_only=False))
         ema_g.synthesize_ema_model(sigma_rel=guide_sigma_rel, step=guide_ema_step).copy_params_from_ema_to_model()
     
     if save_models:

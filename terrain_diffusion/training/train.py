@@ -13,9 +13,17 @@ import wandb
 from torch.utils.data import DataLoader
 
 from terrain_diffusion.training.registry import build_registry
-from terrain_diffusion.training.utils import SerializableEasyDict as EasyDict, recursive_to
+from terrain_diffusion.training.utils import SerializableEasyDict, recursive_to
 from terrain_diffusion.training.utils import safe_rmtree, set_nested_value
 from terrain_diffusion.training.datasets.long_dataset import LongDataset
+
+
+def _register_safe_globals():
+    """Register all custom classes that are pickled in checkpoints as safe globals."""
+    torch.serialization.add_safe_globals([
+        np.core.multiarray.scalar,
+        SerializableEasyDict,
+    ])
 
 
 @click.command(context_settings=dict(ignore_unknown_options=True, allow_extra_args=True))
@@ -90,7 +98,7 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
     resolved = registry.resolve(config, validate=False)
     
     # Setup state and accelerator
-    state = EasyDict({'epoch': 0, 'step': 0, 'seen': 0})
+    state = SerializableEasyDict({'epoch': 0, 'step': 0, 'seen': 0})
     accelerator = Accelerator(
         mixed_precision=resolved['training']['mixed_precision'],
         gradient_accumulation_steps=resolved['training']['gradient_accumulation_steps'],
@@ -123,7 +131,7 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
         accelerator.register_for_checkpointing(module)
     
     if ckpt_path:
-        torch.serialization.add_safe_globals([np.core.multiarray.scalar])
+        _register_safe_globals()
         accelerator.load_state(ckpt_path)
     
     print(f"Starting training at epoch {state['epoch']}, step {state['step']}")
