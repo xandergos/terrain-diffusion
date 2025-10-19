@@ -53,10 +53,6 @@ def calculate_fid(generator, val_dataset, device, n_samples=50000):
                 take_n = min(images.shape[0], n_samples - processed)
                 images = images[:take_n]
 
-                # Real update (no noise)
-                fid.update(process_images(images[:, :1]), real=True)
-                pbar.update(take_n)
-
                 # Sample random per-channel t in [0, pi/2]
                 num_channels = images.shape[1]
                 t = torch.rand(images.shape[0], num_channels, device=device) * (torch.pi / 2)
@@ -294,6 +290,7 @@ class GANExpTrainer(Trainer):
         with temporary_ema_to_model(self.ema.ema_models[0]):
             self.val_dataset.set_seed(self.config['training']['seed'] + 123)
             fid = calculate_fid(self.generator, self.val_dataset, self.accelerator.device)
+            print(f"FID: {fid}")
         self.generator.train()
         return {'val/fid': fid}
 
