@@ -27,7 +27,8 @@ class MPDumbDiscriminator(ModelMixin, ConfigMixin):
         cond_depth=2,
         channel_mults=[1, 2, 4, 8],
         layers_per_block=2,
-        fourier_channels=64
+        fourier_channels=64,
+        no_padding=True
     ):
         super().__init__()
         self.channels = channels
@@ -39,7 +40,7 @@ class MPDumbDiscriminator(ModelMixin, ConfigMixin):
                       hidden_channels,
                       emb_channels=hidden_channels,
                       mode='dec',
-                      no_padding=True,
+                      no_padding=no_padding,
                       activation='leaky_relu')
             for _ in range(cond_depth)
         ])
