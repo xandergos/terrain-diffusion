@@ -40,7 +40,7 @@ def calculate_fid(generator, val_dataset, config, device, n_samples=50000):
     pbar = tqdm(total=n_samples*2, desc="Calculating FID")
     
     # Process real samples
-    val_loader = DataLoader(val_dataset, batch_size=64, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=64)
     for i, batch in enumerate(val_loader):
         if i * 64 >= n_samples:
             break
