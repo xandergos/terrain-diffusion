@@ -244,7 +244,7 @@ class GANExpTrainer(Trainer):
                 std = fake_images.std(dim=(0, 2, 3))
                 kl_loss = (
                     torch.log(1 / (std + 1e-8)) +
-                    (std**2 + (mean - 1)**2) / (2 * (1**2 + 1e-8)) - 0.5
+                    (std**2 + mean**2) / 2 - 0.5
                 ).mean()
                 total_g_loss = g_loss + kl_loss * self.config['training'].get('kl_weight', 0.0)
                 
