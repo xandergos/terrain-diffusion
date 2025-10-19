@@ -208,12 +208,13 @@ class DecoderDatasetVisualizer:
             ax.clear()
 
         recon_np = recon.cpu().numpy()
-        self.axes[0].imshow(recon_np, cmap='terrain')
+        real_np = real.cpu().numpy()
+        vmin, vmax = real_np.min(), real_np.max()
+        self.axes[0].imshow(recon_np, cmap='terrain', vmin=vmin, vmax=vmax)
         self.axes[0].set_title('Reconstructed (AE from latents)')
         self.axes[0].axis('off')
 
-        real_np = real.cpu().numpy()
-        self.axes[1].imshow(real_np, cmap='terrain')
+        self.axes[1].imshow(real_np, cmap='terrain', vmin=vmin, vmax=vmax)
         self.axes[1].set_title('Real Residual')
         self.axes[1].axis('off')
 

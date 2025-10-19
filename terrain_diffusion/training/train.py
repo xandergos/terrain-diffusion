@@ -132,7 +132,7 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
     
     if ckpt_path:
         _register_safe_globals()
-        accelerator.load_state(ckpt_path)
+        accelerator.load_state(ckpt_path, load_kwargs={"weights_only": False})
     
     print(f"Starting training at epoch {state['epoch']}, step {state['step']}")
     
