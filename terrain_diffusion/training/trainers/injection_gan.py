@@ -176,7 +176,7 @@ class InjectionGANTrainer(Trainer):
 
         pct_fixed = linear_warmup(
             self.config['training'].get('warmup_pct_fixed', 0.95),
-            0.5,
+            self.config['training'].get('pct_fixed', 0.5),
             state['step'],
             self.config['training'].get('burnin_steps', 1)
         )
