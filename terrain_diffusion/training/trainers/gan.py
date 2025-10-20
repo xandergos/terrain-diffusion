@@ -60,7 +60,7 @@ def calculate_fid(generator, val_dataset, config, device, n_samples=50000):
     pbar = tqdm(total=n_samples, desc="Calculating FID")
     
     # Process real and fake samples simultaneously
-    val_loader = DataLoader(val_dataset, batch_size=64)
+    val_loader = DataLoader(val_dataset, batch_size=config['training']['batch_size'])
     generator.eval()
     
     with torch.no_grad():
@@ -69,7 +69,9 @@ def calculate_fid(generator, val_dataset, config, device, n_samples=50000):
                 break
             
             real_images = batch['image'].to(device)
+            real_image_shape = real_images.shape
             batch_size = real_images.shape[0]
+            image_channels = real_images.shape[1]
             real_images = random_crop(real_images, config['training']['crop_size'])
             real_images = process_images(real_images[:, :1])
             
@@ -78,8 +80,9 @@ def calculate_fid(generator, val_dataset, config, device, n_samples=50000):
                           config['training']['latent_size'],
                           device=device)
             if config['training'].get('mode') == 'inject':
-                t = torch.atan(torch.tensor(160.0, device=device, dtype=torch.float32)).view(1, 1, 1, 1).repeat(batch_size, real_images.shape[1])
-                fake_images = generator(z, torch.randn(real_images.shape, device=device), t)[:, :1]
+                t = torch.atan(torch.tensor(160.0, device=device, dtype=torch.float32)).view(1, 1).repeat(batch_size, image_channels)
+                fake_images, _ = generator(z, torch.randn(real_image_shape, device=device), t)
+                fake_images = fake_images[:, :1]
             else:
                 fake_images = generator(z)[:, :1]
             
@@ -220,7 +223,7 @@ class GANTrainer(Trainer):
                         t = sample_t(batch_size, real_images.shape[1])
                         z_img = torch.randn_like(real_images_uncropped)
                         mixed_real = torch.cos(t)[..., None, None] * real_images_uncropped + torch.sin(t)[..., None, None] * z_img
-                        fake_images = self.generator(z, mixed_real, t)
+                        fake_images, _ = self.generator(z, mixed_real, t)
                     else:
                         fake_images = self.generator(z)
                 
@@ -267,9 +270,10 @@ class GANTrainer(Trainer):
                     t = sample_t(batch_size, real_images.shape[1])
                     z_img = torch.randn_like(real_images_uncropped)
                     mixed_real = torch.cos(t)[..., None, None] * real_images_uncropped + torch.sin(t)[..., None, None] * z_img
-                    fake_images = self.generator(z, mixed_real, t)
+                    fake_images, gen_x = self.generator(z, mixed_real, t)
                 else:
                     fake_images = self.generator(z)
+                    gen_x = fake_images
                 
                 fake_pred = self.discriminator(fake_images)
                 g_loss = torch.nn.functional.softplus(real_pred.detach() - fake_pred).mean()
@@ -277,8 +281,8 @@ class GANTrainer(Trainer):
                 real_mean = 0
                 real_std = 1
 
-                mean = fake_images.mean(dim=(0, 2, 3))
-                std = fake_images.std(dim=(0, 2, 3))
+                mean = gen_x.mean(dim=(0, 2, 3))
+                std = gen_x.std(dim=(0, 2, 3))
                 kl_loss = (
                     torch.log(real_std / (std + 1e-8)) +
                     (std**2 + (mean - real_mean)**2) / (2 * (real_std**2 + 1e-8)) - 0.5
