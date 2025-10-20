@@ -77,7 +77,7 @@ class MPInjectionGenerator(ModelMixin, ConfigMixin):
             for i in range(num_layers - 1):
                 part.append(UNetBlock(cout if i == 0 else channels, 
                                              channels, 
-                                             emb_channels=None,
+                                             emb_channels=0,
                                              mode='dec',
                                              resample_mode='keep',
                                              no_padding=no_padding,
@@ -85,7 +85,7 @@ class MPInjectionGenerator(ModelMixin, ConfigMixin):
                 
             part.append(UNetBlock(cout if num_layers == 1 else channels, 
                                          channels, 
-                                         emb_channels=None,
+                                         emb_channels=0,
                                          mode='dec',
                                          resample_mode='up_bilinear' if level != len(model_channel_mults) - 1 else 'keep',
                                          no_padding=no_padding,
