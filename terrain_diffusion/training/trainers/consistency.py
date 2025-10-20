@@ -1,9 +1,17 @@
 import os
 import torch
+from tqdm import tqdm
 from ema_pytorch import PostHocEMA
+from torchmetrics.image.kid import KernelInceptionDistance
 
 from terrain_diffusion.training.trainers.trainer import Trainer
 from terrain_diffusion.models.edm_unet import EDMUnet2D
+from terrain_diffusion.models.edm_autoencoder import EDMAutoencoder
+from terrain_diffusion.data.laplacian_encoder import laplacian_denoise, laplacian_decode
+from terrain_diffusion.training.utils import recursive_to, temporary_ema_to_model
+
+from torch.utils.data import DataLoader
+from terrain_diffusion.training.datasets import LongDataset
 
 
 class ConsistencyTrainer(Trainer):
@@ -31,11 +39,25 @@ class ConsistencyTrainer(Trainer):
         self.model.eval()
         
         self.train_dataset = resolved['train_dataset']
+        # Scheduler and validation dataset (match diffusion trainer wiring)
+        self.scheduler = resolved['scheduler']
+        self.val_dataset = LongDataset(resolved['val_dataset'], shuffle=True)
         self.optimizer = self._get_optimizer(self.model, config)
         
         # Initialize EMA
         resolved['ema']['checkpoint_folder'] = os.path.join(resolved['logging']['save_dir'], 'phema')
         self.ema = PostHocEMA(self.model, **resolved['ema'])
+
+        # Optional autoencoder for base KID evaluation
+        autoencoder_path = self.config.get('evaluation', {}).get('kid_autoencoder_path')
+        if autoencoder_path is not None:
+            ae = EDMAutoencoder.from_pretrained(autoencoder_path)
+            ae.eval()
+            ae.requires_grad_(False)
+            ae = torch.compile(ae)
+            self.autoencoder = ae
+        else:
+            self.autoencoder = None
         
         print(f"Training model with {self.model.count_parameters()} parameters.")
     
@@ -211,7 +233,143 @@ class ConsistencyTrainer(Trainer):
             'max_g_norm': max_g_norm.item()
         }
     
+    def _normalize_and_process_terrain(self, terrain):
+        """Normalize single-channel terrain to [0, 255] uint8 3-channel for KID."""
+        terrain_min = torch.amin(terrain, dim=(1, 2, 3), keepdim=True)
+        terrain_max = torch.amax(terrain, dim=(1, 2, 3), keepdim=True)
+        terrain_range = torch.maximum(terrain_max - terrain_min, torch.tensor(1.0, device=terrain.device))
+        terrain_mid = (terrain_min + terrain_max) / 2
+        terrain_norm = torch.clamp(((terrain - terrain_mid) / terrain_range + 0.5) * 255, 0, 255)
+        terrain_norm = terrain_norm.repeat(1, 3, 1, 1)
+        return terrain_norm.to(torch.uint8)
+
+    def _decode_latents_to_terrain(self, latents, lowfreq_input, autoencoder, scheduler):
+        """Decode latents to terrain using autoencoder and laplacian decoding (base mode)."""
+        latents_std = self.val_dataset.base_dataset.latents_std.to(latents.device)
+        latents_mean = self.val_dataset.base_dataset.latents_mean.to(latents.device)
+        sigma_data = scheduler.config.sigma_data
+        latent = (latents[:, :4] / latents_std + latents_mean) / sigma_data
+        highfreq = autoencoder.decode(latent)[:, :1]
+        highfreq = self.val_dataset.base_dataset.denormalize_residual(
+            highfreq, self.val_dataset.base_dataset.subset_resolutions[0]
+        )
+        lowfreq = self.val_dataset.base_dataset.denormalize_lowfreq(lowfreq_input)
+        highfreq, lowfreq = laplacian_denoise(highfreq, lowfreq, sigma=5)
+        return laplacian_decode(highfreq, lowfreq)
+
+    def _consistency_two_step(self, images, cond_img, conditional_inputs, generator):
+        """2-step consistency sampling producing latents/samples matching decoder outputs."""
+        sigma_data = self.scheduler.config.sigma_data
+        samples = torch.zeros_like(images)
+        t_values = [
+            torch.arctan(self.scheduler.sigmas[0] / sigma_data),
+            torch.tensor(1.1, device=images.device),
+        ]
+        for t_scalar in t_values:
+            t = t_scalar.view(1, 1, 1, 1).expand(images.shape[0], 1, 1, 1)
+            z = torch.randn(images.shape, generator=generator) * sigma_data
+            x_t = torch.cos(t) * samples + torch.sin(t) * z
+            model_input = x_t / sigma_data
+            if cond_img is not None:
+                model_input = torch.cat([model_input, cond_img], dim=1)
+            with torch.no_grad(), self.accelerator.autocast():
+                pred = -self.model(model_input, noise_labels=t.flatten(), conditional_inputs=conditional_inputs)
+            samples = torch.cos(t) * x_t - torch.sin(t) * sigma_data * pred
+        return samples
+
+    def _calculate_decoder_kid(self, data_iter, generator):
+        """KID for decoder models using 2-step consistency sampling."""
+        n_images = self.config['evaluation']['kid_n_images']
+        pbar = tqdm(total=n_images, desc="Calculating Decoder KID")
+        scheduler = self.scheduler
+        with torch.no_grad(), self.accelerator.autocast():
+            kid = KernelInceptionDistance(normalize=True).to(self.accelerator.device)
+            samples_generated = 0
+            while samples_generated < n_images:
+                batch = recursive_to(next(data_iter), device=self.accelerator.device)
+                images = batch['image']
+                cond_img = batch.get('cond_img')
+                conditional_inputs = batch.get('cond_inputs')
+
+                # 2-step consistency sampling
+                samples = self._consistency_two_step(images, cond_img, conditional_inputs, generator)
+
+                # Single-channel decoder evaluation
+                samples = samples[:, :1] / scheduler.config.sigma_data
+                real_samples = images[:, :1] / scheduler.config.sigma_data
+
+                kid.update(self._normalize_and_process_terrain(samples), real=False)
+                kid.update(self._normalize_and_process_terrain(real_samples), real=True)
+
+                samples_generated += images.shape[0]
+                pbar.update(images.shape[0])
+            pbar.close()
+            kid_mean, kid_std = kid.compute()
+            print(f"Final Decoder KID Score (consistency 2-step): {kid_mean.item():.6f} ± {kid_std.item():.6f}")
+            return {
+                'val/kid_mean': kid_mean.item(),
+                'val/kid_std': kid_std.item(),
+            }
+
+    def _calculate_base_kid(self, data_iter, generator):
+        """KID for base models using 2-step consistency sampling and autoencoder decoding."""
+        assert self.autoencoder is not None, "Autoencoder required for base KID evaluation"
+        n_images = self.config['evaluation']['kid_n_images']
+        pbar = tqdm(total=n_images, desc="Calculating KID")
+        scheduler = self.scheduler
+        autoencoder = self.autoencoder.to(self.accelerator.device)
+        with torch.no_grad(), self.accelerator.autocast():
+            kid = KernelInceptionDistance(normalize=True).to(self.accelerator.device)
+            samples_generated = 0
+            while samples_generated < n_images:
+                batch = recursive_to(next(data_iter), device=self.accelerator.device)
+                images = batch['image']
+                cond_img = batch.get('cond_img')
+                conditional_inputs = batch.get('cond_inputs')
+
+                # 2-step consistency sampling
+                samples = self._consistency_two_step(images, cond_img, conditional_inputs, generator)
+
+                # Decode latents to terrain
+                terrain = self._decode_latents_to_terrain(samples, images[:, 4:5], autoencoder, scheduler)
+                real_terrain = self._decode_latents_to_terrain(images, images[:, 4:5], autoencoder, scheduler)
+
+                kid.update(self._normalize_and_process_terrain(terrain), real=False)
+                kid.update(self._normalize_and_process_terrain(real_terrain), real=True)
+
+                samples_generated += images.shape[0]
+                pbar.update(images.shape[0])
+            pbar.close()
+            autoencoder = autoencoder.to('cpu')
+            kid_mean, kid_std = kid.compute()
+            print(f"Final KID Score (consistency 2-step): {kid_mean.item():.6f} ± {kid_std.item():.6f}")
+            return {
+                'val/kid_mean': kid_mean.item(),
+                'val/kid_std': kid_std.item(),
+            }
+
     def evaluate(self):
-        """Consistency models typically don't have separate evaluation."""
-        return {}
+        """Perform evaluation and return metrics using 2-step consistency sampling for KID."""
+        # Build validation dataloader
+        self.val_dataset.set_seed(self.config['training']['seed'] + 638)
+        self.val_dataloader = DataLoader(
+            self.val_dataset,
+            batch_size=self.config['training']['batch_size'],
+            **self.resolved['dataloader_kwargs']
+        )
+
+        generator = torch.Generator(device=self.accelerator.device).manual_seed(self.config['training']['seed'] + 548)
+        val_dataloader_iter = iter(self.val_dataloader)
+
+        # Evaluate with EMA weights
+        with temporary_ema_to_model(self.ema.ema_models[0]):
+            output = {}
+            mode = self.config.get('evaluation', {}).get('mode')
+            if mode == 'base':
+                output.update(self._calculate_base_kid(val_dataloader_iter, generator))
+            elif mode == 'decoder':
+                output.update(self._calculate_decoder_kid(val_dataloader_iter, generator))
+            else:
+                print('No evaluation mode specified, skipping KID calculation')
+            return output
 

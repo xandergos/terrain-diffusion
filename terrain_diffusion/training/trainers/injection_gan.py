@@ -264,7 +264,7 @@ class InjectionGANTrainer(Trainer):
                 g_loss = torch.nn.functional.softplus(real_pred.detach() - fake_pred).mean()
                 
                 mean = fake_images.mean(dim=(0, 2, 3))
-                std = fake_images.std(dim=(0, 2, 3))
+                std = torch.maximum(fake_images.std(dim=(0, 2, 3)), torch.tensor(self.config['training'].get('kl_std_clip', 0.0), device=self.accelerator.device))
                 kl_loss = (
                     torch.log(1 / (std + 1e-8)) +
                     (std**2 + mean**2) / 2 - 0.5
