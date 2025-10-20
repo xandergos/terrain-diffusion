@@ -1,7 +1,7 @@
 import catalogue
 from confection import registry
-from terrain_diffusion.models.mp_dumb_discriminator import MPDumbDiscriminator
-from terrain_diffusion.models.mp_dumb_generator import MPDumbGenerator
+from terrain_diffusion.models.mp_injection_generator import MPInjectionGenerator
+from terrain_diffusion.models.mp_injection_discriminator import MPInjectionDiscriminator
 from terrain_diffusion.training.datasets import *
 from terrain_diffusion.data.laplacian_encoder import *
 from terrain_diffusion.models.mp_discriminator import MPDiscriminator
@@ -14,7 +14,7 @@ from terrain_diffusion.training.trainers.autoencoder import AutoencoderTrainer
 from terrain_diffusion.training.trainers.consistency import ConsistencyTrainer
 from terrain_diffusion.training.trainers.diffusion import DiffusionTrainer
 from terrain_diffusion.training.trainers.gan import GANTrainer
-from terrain_diffusion.training.trainers.gan_exp import GANExpTrainer
+from terrain_diffusion.training.trainers.injection_gan import InjectionGANTrainer
 
 def build_registry():
     registry.scheduler = catalogue.create("confection", "schedulers", entry_points=False)
@@ -24,8 +24,8 @@ def build_registry():
     registry.model.register("unet", func=EDMUnet2D)
     registry.model.register("autoencoder", func=EDMAutoencoder)
     registry.model.register("generator", func=MPGenerator)
-    registry.model.register("dumb_generator", func=MPDumbGenerator)
-    registry.model.register("dumb_discriminator", func=MPDumbDiscriminator)
+    registry.model.register("injection_generator", func=MPInjectionGenerator)
+    registry.model.register("injection_discriminator", func=MPInjectionDiscriminator)
     registry.model.register("discriminator", func=MPDiscriminator)
     
     registry.lr_sched = catalogue.create("confection", "lr_sched", entry_points=False)
@@ -45,7 +45,7 @@ def build_registry():
     registry.trainer.register("consistency", func=lambda: ConsistencyTrainer)
     registry.trainer.register("diffusion", func=lambda: DiffusionTrainer)
     registry.trainer.register("gan", func=lambda: GANTrainer)
-    registry.trainer.register("gan_exp", func=lambda: GANExpTrainer)
+    registry.trainer.register("injection_gan", func=lambda: InjectionGANTrainer)
     
     registry.utils = catalogue.create("confection", "utils", entry_points=False)
     registry.utils.register("create_list", func=lambda *args: list(args))

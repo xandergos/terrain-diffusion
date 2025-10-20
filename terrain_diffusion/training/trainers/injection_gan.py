@@ -1,7 +1,6 @@
 import numpy as np
 import os
 import torch
-from torchvision.transforms.v2.functional import gaussian_blur
 from torchmetrics.image.fid import FrechetInceptionDistance
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -19,7 +18,7 @@ def linear_warmup(start_value, end_value, current_step, total_steps):
     return start_value + (end_value - start_value) * (current_step / total_steps)
 
 
-def calculate_fid(generator, val_dataset, device, n_samples=50000):
+def calculate_fid(generator, val_dataset, config, device, n_samples=50000):
     """Calculate FID score between generated samples and validation dataset."""
     fid = FrechetInceptionDistance(normalize=True).to(device)
     
@@ -38,6 +37,9 @@ def calculate_fid(generator, val_dataset, device, n_samples=50000):
         return images
     
     pbar = tqdm(total=n_samples, desc="Calculating FID")
+    
+    latent_size = config['training']['latent_size']
+    latent_channels = generator.config.latent_channels
 
     # Use the same real images to compute both real and fake statistics
     processed = 0
@@ -49,6 +51,7 @@ def calculate_fid(generator, val_dataset, device, n_samples=50000):
                 if processed >= n_samples:
                     break
                 images = batch['image'].to(device)
+                
                 # Limit to remaining
                 take_n = min(images.shape[0], n_samples - processed)
                 images = images[:take_n]
@@ -61,9 +64,10 @@ def calculate_fid(generator, val_dataset, device, n_samples=50000):
                 t = torch.full((images.shape[0], num_channels), np.arctan(160), device=device)
                 
                 # Form mixed inputs using the same real images and fresh noise
+                latent = torch.randn(images.shape[0], latent_channels, latent_size, latent_size, device=device)
                 z_img = torch.randn_like(images)
                 mixed_input = torch.cos(t)[..., None, None] * images + torch.sin(t)[..., None, None] * z_img
-                fake_images = generator(mixed_input, t)[:, :1]
+                fake_images = generator(latent, mixed_input, t)[:, :1]
 
                 # Crop real images to match the current fake images size if needed
                 h_diff = images.shape[-2] - fake_images.shape[-2]
@@ -79,7 +83,7 @@ def calculate_fid(generator, val_dataset, device, n_samples=50000):
     return float(fid.compute())
 
 
-class GANExpTrainer(Trainer):
+class InjectionGANTrainer(Trainer):
     """Trainer for GAN models."""
     
     def __init__(self, config, resolved, accelerator, state):
@@ -179,6 +183,8 @@ class GANExpTrainer(Trainer):
             
             return t
 
+        latent_size = self.config['training']['latent_size']
+        latent_channels = self.generator.config.latent_channels
         # Train discriminator
         with self.accelerator.accumulate(self.discriminator):
             real_images = batch['image']
@@ -188,20 +194,15 @@ class GANExpTrainer(Trainer):
                 self.discriminator.train()
                 
                 t = sample_t(batch_size, real_images.shape[1])
-                # Sample per-channel t in [0, pi/2] and image-shaped noise for mixing
+                latent = torch.randn(batch_size, latent_channels, latent_size, latent_size, device=self.accelerator.device)
                 z_img = torch.randn_like(real_images)
-                # Mix real images with noise: cos(t)*x + sin(t)*z (for generator input only)
                 mixed_real = torch.cos(t)[..., None, None] * real_images + torch.sin(t)[..., None, None] * z_img
 
                 # Generate fake using mixed input and the same t
                 with torch.no_grad():
-                    fake_images = self.generator(mixed_real, t)
-                
-                if self.config['training'].get('blur_sigma', 0) > 0:
-                    sigma = int(self.config['training']['blur_sigma'])
-                    fake_images = gaussian_blur(fake_images, (1+2*sigma, 1+2*sigma), sigma)
+                    fake_images = self.generator(latent, mixed_real, t)
                     
-                if not self.printed_size:
+fa                if not self.printed_size:
                     print("Fake image size:", fake_images.shape)
                     print("Real image size:", real_images.shape)
                     self.printed_size = True
@@ -247,9 +248,10 @@ class GANExpTrainer(Trainer):
                 self.discriminator.eval()
                 
                 t_g = sample_t(batch_size, real_images_uncropped.shape[1])
+                latent_g = torch.randn(batch_size, latent_channels, latent_size, latent_size, device=self.accelerator.device)
                 z_img_g = torch.randn_like(real_images_uncropped)
                 mixed_real_g = torch.cos(t_g)[..., None, None] * real_images_uncropped + torch.sin(t_g)[..., None, None] * z_img_g
-                fake_images = self.generator(mixed_real_g, t_g)
+                fake_images = self.generator(latent_g, mixed_real_g, t_g)
 
                 fake_pred = self.discriminator(mixed_real_g, fake_images, t_g)
                 g_loss = torch.nn.functional.softplus(real_pred.detach() - fake_pred).mean()
@@ -303,7 +305,7 @@ class GANExpTrainer(Trainer):
         self.generator.eval()
         with temporary_ema_to_model(self.ema.ema_models[0]):
             self.val_dataset.set_seed(self.config['training']['seed'] + 123)
-            fid = calculate_fid(self.generator, self.val_dataset, self.accelerator.device)
+            fid = calculate_fid(self.generator, self.val_dataset, self.config, self.accelerator.device)
             print(f"FID: {fid}")
         self.generator.train()
         return {'val/fid': fid}

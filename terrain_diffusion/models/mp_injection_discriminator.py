@@ -8,13 +8,13 @@ from terrain_diffusion.models.mp_layers import MPConv, MPFourier, mp_concat
 from terrain_diffusion.models.unet_block import UNetBlock
 
 
-class MPDumbDiscriminator(ModelMixin, ConfigMixin):
+class MPInjectionDiscriminator(ModelMixin, ConfigMixin):
     """
     Discriminator that consumes two maps:
     - Conditioning map: real but noisy, larger spatial size than image map
     - Image map: real or fake
 
-    The conditioning map is first passed through no-padding UNetBlocks (as in MPDumbGenerator)
+    The conditioning map is first passed through no-padding UNetBlocks (as in MPInjectionGenerator)
     until its spatial size matches the image map. Then both are concatenated channel-wise and
     processed by a standard encoder-style discriminator similar to MPDiscriminator to output
     a realness prediction.
@@ -23,22 +23,25 @@ class MPDumbDiscriminator(ModelMixin, ConfigMixin):
     def __init__(
         self,
         channels,
-        hidden_channels=32,
+        cond_channels,
         cond_depth=2,
-        channel_mults=[1, 2, 4, 8],
+        image_channels=32,
+        image_channel_mults=[1],
         layers_per_block=2,
         fourier_channels=64,
-        no_padding=True
+        no_padding=True,
+        emb_channels=None
     ):
         super().__init__()
         self.channels = channels
+        emb_channels = emb_channels or image_channels * max(image_channel_mults)
 
         # Conditioning processing
-        self.cond_stem = MPConv(self.channels + 1, hidden_channels, kernel=[1, 1])
+        self.cond_stem = MPConv(self.channels + 1, cond_channels, kernel=[1, 1])
         self.cond_blocks = nn.ModuleList([
-            UNetBlock(hidden_channels,
-                      hidden_channels,
-                      emb_channels=hidden_channels,
+            UNetBlock(cond_channels,
+                      cond_channels,
+                      emb_channels=emb_channels,
                       mode='dec',
                       no_padding=no_padding,
                       activation='leaky_relu')
@@ -46,32 +49,32 @@ class MPDumbDiscriminator(ModelMixin, ConfigMixin):
         ])
         # Per-channel Fourier embeddings of t and linear projection to emb space
         self.fouriers = nn.ModuleList([MPFourier(fourier_channels) for _ in range(self.channels)])
-        self.emb_linear = MPConv(self.channels * fourier_channels, hidden_channels, kernel=[])
+        self.emb_linear = MPConv(self.channels * fourier_channels, emb_channels, kernel=[])
 
         # Discriminator body (encoder-like, similar to MPDiscriminator)
         # No bias channel in discriminator input
-        disc_in_channels = self.channels + hidden_channels
-        self.in_conv = MPConv(disc_in_channels, hidden_channels, kernel=[1, 1])
+        disc_in_channels = self.channels + cond_channels
+        self.in_conv = MPConv(disc_in_channels, image_channels, kernel=[1, 1])
 
         self.blocks = nn.ModuleList()
-        cur_channels = hidden_channels
-        for k, mult in enumerate(channel_mults):
-            out_channels = hidden_channels * mult
+        cur_channels = image_channels
+        for k, mult in enumerate(image_channel_mults):
+            out_channels = image_channels * mult
             for i in range(layers_per_block - 1):
                 self.blocks.append(UNetBlock(
                     cur_channels if i == 0 else out_channels,
                     out_channels,
-                    emb_channels=hidden_channels,
+                    emb_channels=image_channels,
                     mode='enc',
                     activation='leaky_relu'
                 ))
             self.blocks.append(UNetBlock(
                 cur_channels if layers_per_block == 1 else out_channels,
                 out_channels,
-                emb_channels=hidden_channels,
+                emb_channels=image_channels,
                 mode='enc',
                 activation='leaky_relu',
-                resample_mode='down' if k != len(channel_mults) - 1 else 'keep'
+                resample_mode='down' if k != len(image_channel_mults) - 1 else 'keep'
             ))
             cur_channels = out_channels
 
@@ -88,6 +91,7 @@ class MPDumbDiscriminator(ModelMixin, ConfigMixin):
         return x[:, :, top:top + target_h, left:left + target_w]
 
     def forward(self, cond, img, t):
+        t = torch.log(torch.clip(torch.tan(t) * 0.5, 0.002, 80) / 4)
         # Process conditioning map with no-padding blocks to shrink spatial dims
         cond = torch.cat([cond, torch.ones_like(cond[:, :1])], dim=1)
         cond = self.cond_stem(cond)
@@ -118,18 +122,20 @@ class MPDumbDiscriminator(ModelMixin, ConfigMixin):
 
 if __name__ == "__main__":
     # Simple sanity check
-    b, c, h_big, w_big = 2, 6, 12, 12
-    h_small, w_small = 4, 4
-    cond = torch.randn(b, c, h_big, w_big)
-    img = torch.randn(b, c, h_small, w_small)
-    model = MPDumbDiscriminator(
-        channels=c,
-        hidden_channels=32,
-        cond_depth=2,
-        channel_mults=[1],
+    model = MPInjectionDiscriminator(
+        channels=6,
+        cond_channels=64,
+        cond_depth=4,
+        image_channels=128,
+        image_channel_mults=[1],
         layers_per_block=2,
-        fourier_channels=64
+        fourier_channels=64,
+        no_padding=True,
+        emb_channels=128
     )
+    b, c = 2, 6
+    cond = torch.randn(b, c, 20, 20)
+    img = torch.randn(b, c, 4, 4)
     t = torch.rand(b, c) * (torch.pi / 2)
     out = model(cond, img, t)
     print(out.shape)

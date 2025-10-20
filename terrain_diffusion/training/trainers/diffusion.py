@@ -299,8 +299,8 @@ class DiffusionTrainer(Trainer):
                     samples = scheduler.step(model_output, t, samples).prev_sample
                 
                 # Only evaluate first channel
-                samples = samples[:, :1]
-                real_samples = images[:, :1]
+                samples = samples[:, :1] / scheduler.config.sigma_data
+                real_samples = images[:, :1] / scheduler.config.sigma_data
                 
                 # Update KID metric for original samples
                 kid.update(self._normalize_and_process_terrain(samples), real=False)

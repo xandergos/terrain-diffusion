@@ -73,7 +73,10 @@ def calculate_fid(generator, val_dataset, config, device, n_samples=50000):
             fake_images = process_images(fake_images)
             fid.update(fake_images, real=False)
             pbar.update(batch_size)
-    return float(fid.compute())
+    
+    fid = float(fid.compute())
+    print(f"FID: {fid}")
+    return fid
 
 
 class GANTrainer(Trainer):
