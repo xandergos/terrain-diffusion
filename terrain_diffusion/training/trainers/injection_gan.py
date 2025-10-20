@@ -202,7 +202,7 @@ class InjectionGANTrainer(Trainer):
                 with torch.no_grad():
                     fake_images = self.generator(latent, mixed_real, t)
                     
-fa                if not self.printed_size:
+                if not self.printed_size:
                     print("Fake image size:", fake_images.shape)
                     print("Real image size:", real_images.shape)
                     self.printed_size = True
