@@ -117,9 +117,9 @@ class MPInjectionGenerator(ModelMixin, ConfigMixin):
         for block in self.latent_blocks:
             x = block(x, emb=emb)
         
-        image_x = torch.cat([image, torch.ones_like(image[:, :1])], dim=1)
-        image_x = self.image_skip_conv(image_x)
-        x = mp_sum([x, image_x], w=0.5)
+        #image_x = torch.cat([image, torch.ones_like(image[:, :1])], dim=1)
+        #image_x = self.image_skip_conv(image_x)
+        #x = mp_sum([x, image_x], w=0.5)
         for block in self.image_blocks:
             x = block(x, emb=emb)
         
@@ -142,13 +142,13 @@ class MPInjectionGenerator(ModelMixin, ConfigMixin):
                 module.norm_weights()
 
 if __name__ == "__main__":
-    latent = torch.randn(1, 32, 12, 12)
-    image = torch.randn(1, 6, 12, 12)
+    latent = torch.randn(1, 32, 24, 24)
+    image = torch.randn(1, 6, 20, 20)
     t = torch.zeros(1, 6)
     model = MPInjectionGenerator(latent_channels=32, image_channels=6,
                                  model_channels=128,
                                  model_channel_mults=[1, 1],
-                                 layers_per_block=[2, 2], 
+                                 layers_per_block=[4, 4], 
                                  no_padding=True,
                                  fourier_channels=64,
                                  emb_channels=128)
