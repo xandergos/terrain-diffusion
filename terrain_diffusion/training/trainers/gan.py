@@ -18,6 +18,26 @@ def linear_warmup(start_value, end_value, current_step, total_steps):
         return end_value
     return start_value + (end_value - start_value) * (current_step / total_steps)
 
+def random_crop(images, crop_size):
+    """Randomly crop images to a square of size crop_size."""
+    h_diff = images.shape[-2] - crop_size
+    w_diff = images.shape[-1] - crop_size
+    assert h_diff >= 0 and w_diff >= 0
+    if h_diff == 0 and w_diff == 0:
+        return images
+    
+    batch_size = images.shape[0]
+    h_starts = torch.randint(0, h_diff + 1, (batch_size,))
+    w_starts = torch.randint(0, w_diff + 1, (batch_size,))
+    
+    # Crop each image independently
+    cropped = []
+    for i in range(batch_size):
+        h_start = h_starts[i].item()
+        w_start = w_starts[i].item()
+        cropped.append(images[i:i+1, :, h_start:h_start + crop_size, w_start:w_start + crop_size])
+    
+    return torch.cat(cropped, dim=0)
 
 def calculate_fid(generator, val_dataset, config, device, n_samples=50000):
     """Calculate FID score between generated samples and validation dataset."""
@@ -39,40 +59,34 @@ def calculate_fid(generator, val_dataset, config, device, n_samples=50000):
     
     pbar = tqdm(total=n_samples*2, desc="Calculating FID")
     
-    # Process real samples
+    # Process real and fake samples simultaneously
     val_loader = DataLoader(val_dataset, batch_size=64)
-    for i, batch in enumerate(val_loader):
-        if i * 64 >= n_samples:
-            break
-        images = batch['image'].to(device)
-        images = process_images(images[:, :1])
-        fid.update(images, real=True)
-        pbar.update(images.shape[0])
-        
-    # Generate and process fake samples
     generator.eval()
+    
     with torch.no_grad():
-        for i in range(0, n_samples, 64):
-            batch_size = min(64, n_samples - i)
+        for i, batch in enumerate(val_loader):
+            real_images = batch['image'].to(device)
+            batch_size = real_images.shape[0]
+            real_images = random_crop(real_images, config['training']['crop_size'])
+            real_images = process_images(real_images[:, :1])
+            
             z = torch.randn(batch_size, config['generator']['latent_channels'],
                           config['training']['latent_size'], 
                           config['training']['latent_size'],
                           device=device)
-            fake_images = generator(z)[:, :1]
+            if config['training'].get('mode') == 'inject':
+                t = torch.atan(torch.tensor(160.0, device=device, dtype=torch.float32)).view(1, 1, 1, 1).repeat(batch_size, real_images.shape[1])
+                fake_images = generator(z, torch.randn(real_images.shape, device=device), t)[:, :1]
+            else:
+                fake_images = generator(z)[:, :1]
             
             # Crop to match real image size if needed
-            if fake_images.shape[-2:] != val_dataset[0]['image'].shape[-2:]:
-                h_diff = fake_images.shape[-2] - val_dataset[0]['image'].shape[-2]
-                w_diff = fake_images.shape[-1] - val_dataset[0]['image'].shape[-1]
-                h_start = torch.randint(0, h_diff + 1, (1,)).item()
-                w_start = torch.randint(0, w_diff + 1, (1,)).item()
-                fake_images = fake_images[:, :,
-                                       h_start:h_start + val_dataset[0]['image'].shape[-2],
-                                       w_start:w_start + val_dataset[0]['image'].shape[-1]]
-            
+            fake_images = random_crop(fake_images, config['training']['crop_size'])
             fake_images = process_images(fake_images)
+            
             fid.update(fake_images, real=False)
-            pbar.update(batch_size)
+            fid.update(real_images, real=True)
+            pbar.update(real_images.shape[0])
     
     fid = float(fid.compute())
     print(f"FID: {fid}")
@@ -169,6 +183,22 @@ class GANTrainer(Trainer):
         else:
             current_r_gamma = self.final_r_gamma
 
+        pct_fixed = linear_warmup(
+            self.config['training'].get('warmup_pct_fixed', 0.5),
+            self.config['training'].get('pct_fixed', 0.5),
+            state['step'],
+            self.config['training'].get('burnin_steps', 1)
+        )
+        def sample_t(bs, channels):
+            t = torch.rand(bs, channels, device=self.accelerator.device)
+            t = torch.atan(2 * torch.exp(8 * t - 3))
+            
+            # Randomly make half the batch = arctan(160)
+            mask = torch.rand(bs, device=self.accelerator.device) < pct_fixed
+            t[mask] = torch.atan(torch.tensor(160.0, device=self.accelerator.device))
+            
+            return t
+        
         # Train discriminator
         with self.accelerator.accumulate(self.discriminator):
             real_images = batch['image']
@@ -182,29 +212,22 @@ class GANTrainer(Trainer):
                                 self.config['training']['latent_size'], 
                                 self.config['training']['latent_size'],
                                 device=self.accelerator.device)
-                    fake_images = self.generator(z)
+                    if self.config['training'].get('mode') == 'inject':
+                        t = sample_t(batch_size, real_images.shape[1])
+                        z_img = torch.randn_like(real_images)
+                        mixed_real = torch.cos(t)[..., None, None] * real_images + torch.sin(t)[..., None, None] * z_img
+                        fake_images = self.generator(z, mixed_real, t)
+                    else:
+                        fake_images = self.generator(z)
                 
-                if self.config['training'].get('blur_sigma', 0) > 0:
-                    sigma = int(self.config['training']['blur_sigma'])
-                    fake_images = gaussian_blur(fake_images, (1+2*sigma, 1+2*sigma), sigma)
-                    
                 if not self.printed_size:
                     print("Fake image size:", fake_images.shape)
                     print("Real image size:", real_images.shape)
                     self.printed_size = True
                     
-                # crop fake images to match real image size
-                h_diff = fake_images.shape[-2] - real_images.shape[-2]
-                w_diff = fake_images.shape[-1] - real_images.shape[-1]
-                h_starts = torch.randint(0, h_diff + 1, (batch_size,), device=fake_images.device)
-                w_starts = torch.randint(0, w_diff + 1, (batch_size,), device=fake_images.device)
-                fake_images = torch.stack([
-                    fake_images[i, :, h_starts[i]:h_starts[i]+real_images.shape[-2], 
-                            w_starts[i]:w_starts[i]+real_images.shape[-1]]
-                    for i in range(batch_size)
-                ])
-                
-                all_images = torch.cat([real_images, fake_images.detach()], dim=0).detach().requires_grad_(True)
+                real_images = random_crop(real_images, self.config['training']['crop_size'])
+                fake_images = random_crop(fake_images, self.config['training']['crop_size'])
+                all_images = torch.cat([real_images, fake_images], dim=0).detach().requires_grad_(True)
                 pred = self.discriminator(all_images)
                 real_pred = pred[:batch_size]
                 fake_pred = pred[batch_size:]
@@ -235,7 +258,14 @@ class GANTrainer(Trainer):
                             self.config['training']['latent_size'], 
                             self.config['training']['latent_size'],
                             device=self.accelerator.device)
-                fake_images = self.generator(z)
+                
+                if self.config['training'].get('mode') == 'inject':
+                    t = sample_t(batch_size, real_images.shape[1])
+                    z_img = torch.randn_like(real_images)
+                    mixed_real = torch.cos(t)[..., None, None] * real_images + torch.sin(t)[..., None, None] * z_img
+                    fake_images = self.generator(z, mixed_real, t)
+                else:
+                    fake_images = self.generator(z)
                 
                 fake_pred = self.discriminator(fake_images)
                 g_loss = torch.nn.functional.softplus(real_pred.detach() - fake_pred).mean()
