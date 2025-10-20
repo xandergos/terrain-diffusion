@@ -23,7 +23,8 @@ class MPInjectionGenerator(ModelMixin, ConfigMixin):
         block_kwargs=None,
         no_padding=True,
         fourier_channels=64,
-        emb_channels=None
+        emb_channels=None,
+        aux_output=False
     ):
         """
         Args:
@@ -92,8 +93,9 @@ class MPInjectionGenerator(ModelMixin, ConfigMixin):
             
             cout = channels
         
+        self.aux_output = aux_output
         # Final output convolution
-        self.out_conv = MPConv(cout, image_channels, kernel=[1, 1], no_padding=no_padding)
+        self.out_conv = MPConv(cout, image_channels if not aux_output else image_channels * 2, kernel=[1, 1], no_padding=no_padding)
         self.out_gain = nn.Parameter(torch.ones([]))
 
     def forward(self, latents, image, t):
@@ -125,6 +127,11 @@ class MPInjectionGenerator(ModelMixin, ConfigMixin):
         anti_padding = (image.shape[2] - x.shape[2]) // 2
         if anti_padding == 0:
             return image * torch.cos(t[..., None, None]) - x * torch.sin(t[..., None, None])
+        if self.aux_output:
+            p1 = x[:, :x.shape[1]//2]
+            p1 = image[:, :, anti_padding:-anti_padding, anti_padding:-anti_padding] * torch.cos(t[..., None, None]) - p1 * torch.sin(t[..., None, None])
+            p2 = x[:, x.shape[1]//2:]
+            return p1, p2
         return image[:, :, anti_padding:-anti_padding, anti_padding:-anti_padding] * torch.cos(t[..., None, None]) - x * torch.sin(t[..., None, None])
 
 

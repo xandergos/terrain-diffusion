@@ -67,7 +67,7 @@ def calculate_fid(generator, val_dataset, config, device, n_samples=50000):
                 latent = torch.randn(images.shape[0], latent_channels, latent_size, latent_size, device=device)
                 z_img = torch.randn_like(images)
                 mixed_input = torch.cos(t)[..., None, None] * images + torch.sin(t)[..., None, None] * z_img
-                fake_images = generator(latent, mixed_input, t)[:, :1]
+                fake_images, _ = generator(latent, mixed_input, t)[:, :1]
 
                 # Crop real images to match the current fake images size if needed
                 h_diff = images.shape[-2] - fake_images.shape[-2]
@@ -207,7 +207,7 @@ class InjectionGANTrainer(Trainer):
 
                 # Generate fake using mixed input and the same t
                 with torch.no_grad():
-                    fake_images = self.generator(latent, mixed_real, t)
+                    fake_images, _ = self.generator(latent, mixed_real, t)
                     
                 if not self.printed_size:
                     print("Fake image size:", fake_images.shape)
@@ -257,7 +257,7 @@ class InjectionGANTrainer(Trainer):
                 latent_g = torch.randn(batch_size, latent_channels, latent_size, latent_size, device=self.accelerator.device)
                 z_img_g = torch.randn_like(real_images_uncropped)
                 mixed_real_g = torch.cos(t_g)[..., None, None] * real_images_uncropped + torch.sin(t_g)[..., None, None] * z_img_g
-                fake_images = self.generator(latent_g, mixed_real_g, t_g)
+                fake_images, real_images_pred = self.generator(latent_g, mixed_real_g, t_g)
 
                 fake_pred = self.discriminator(fake_images)
                 g_loss = torch.nn.functional.softplus(real_pred.detach() - fake_pred).mean()
@@ -268,7 +268,17 @@ class InjectionGANTrainer(Trainer):
                     torch.log(1 / (std + 1e-8)) +
                     (std**2 + mean**2) / 2 - 0.5
                 ).mean()
-                total_g_loss = g_loss + kl_loss * self.config['training'].get('kl_weight', 0.0)
+                total_g_loss = g_loss + kl_loss * self.config['training'].get('kl_weight', 0.0) * linear_warmup(
+                    self.config['training'].get('kl_warmup_factor', 1.0),
+                    1.0,
+                    state['step'],
+                    self.config['training'].get('burnin_steps', 1)
+                )
+                
+                v_t = torch.cos(t) * z_img - torch.sin(t) * real_images
+                pred_v_t = torch.cos(t) * z_img - torch.sin(t) * real_images_pred
+                diffusion_error = (pred_v_t - v_t).pow(2).mean()
+                total_g_loss = total_g_loss + diffusion_error * self.config['training'].get('diffusion_error_weight', 0.0)
                 
             self.g_optimizer.zero_grad()
             self.accelerator.backward(total_g_loss)
