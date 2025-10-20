@@ -115,14 +115,13 @@ class MPInjectionGenerator(ModelMixin, ConfigMixin):
         for block in self.latent_blocks:
             x = block(x, emb=emb)
         
-        #image_x = torch.cat([image, torch.ones_like(image[:, :1])], dim=1)
-        #image_x = self.image_skip_conv(image_x)
-        #x = mp_sum([x, image_x], w=0.5)
+        image_x = torch.cat([image, torch.ones_like(image[:, :1])], dim=1)
+        image_x = self.image_skip_conv(image_x)
+        x = mp_sum([x, image_x], w=0.5)
         for block in self.image_blocks:
             x = block(x, emb=emb)
         
         x = self.out_conv(x, gain=self.out_gain)
-        return x
         anti_padding = (image.shape[2] - x.shape[2]) // 2
         if anti_padding == 0:
             return image * torch.cos(t[..., None, None]) - x * torch.sin(t[..., None, None])
