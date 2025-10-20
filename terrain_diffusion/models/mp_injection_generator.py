@@ -129,9 +129,9 @@ class MPInjectionGenerator(ModelMixin, ConfigMixin):
             return image * torch.cos(t[..., None, None]) - x * torch.sin(t[..., None, None])
         if self.aux_output:
             p1 = x[:, :x.shape[1]//2]
-            p1 = image[:, :, anti_padding:-anti_padding, anti_padding:-anti_padding] * torch.cos(t[..., None, None]) - p1 * torch.sin(t[..., None, None])
+            #p1 = image[:, :, anti_padding:-anti_padding, anti_padding:-anti_padding] * torch.cos(t[..., None, None]) - p1 * torch.sin(t[..., None, None])
             p2 = x[:, x.shape[1]//2:]
-            return x, p2
+            return p1, p2
         return x
 
 
