@@ -67,7 +67,8 @@ def calculate_fid(generator, val_dataset, config, device, n_samples=50000):
                 latent = torch.randn(images.shape[0], latent_channels, latent_size, latent_size, device=device)
                 z_img = torch.randn_like(images)
                 mixed_input = torch.cos(t)[..., None, None] * images + torch.sin(t)[..., None, None] * z_img
-                fake_images, _ = generator(latent, mixed_input, t)[:, :1]
+                fake_images, _ = generator(latent, mixed_input, t)
+                fake_images = fake_images[:, :1]
 
                 # Crop real images to match the current fake images size if needed
                 h_diff = images.shape[-2] - fake_images.shape[-2]
