@@ -77,7 +77,7 @@ class MPInjectionGenerator(ModelMixin, ConfigMixin):
             for i in range(num_layers - 1):
                 part.append(UNetBlock(cout if i == 0 else channels, 
                                              channels, 
-                                             emb_channels=emb_channels,
+                                             emb_channels=None,
                                              mode='dec',
                                              resample_mode='keep',
                                              no_padding=no_padding,
@@ -85,7 +85,7 @@ class MPInjectionGenerator(ModelMixin, ConfigMixin):
                 
             part.append(UNetBlock(cout if num_layers == 1 else channels, 
                                          channels, 
-                                         emb_channels=emb_channels,
+                                         emb_channels=None,
                                          mode='dec',
                                          resample_mode='up_bilinear' if level != len(model_channel_mults) - 1 else 'keep',
                                          no_padding=no_padding,
@@ -115,13 +115,13 @@ class MPInjectionGenerator(ModelMixin, ConfigMixin):
         x = torch.cat([latents, torch.ones_like(latents[:, :1])], dim=1)
         x = self.initial_skip_conv(x)
         for block in self.latent_blocks:
-            x = block(x, emb=emb)
+            x = block(x, emb=None)
         
         #image_x = torch.cat([image, torch.ones_like(image[:, :1])], dim=1)
         #image_x = self.image_skip_conv(image_x)
         #x = mp_sum([x, image_x], w=0.5)
         for block in self.image_blocks:
-            x = block(x, emb=emb)
+            x = block(x, emb=None)
         
         x = self.out_conv(x, gain=self.out_gain)
         anti_padding = (image.shape[2] - x.shape[2]) // 2
@@ -129,7 +129,7 @@ class MPInjectionGenerator(ModelMixin, ConfigMixin):
             return image * torch.cos(t[..., None, None]) - x * torch.sin(t[..., None, None])
         if self.aux_output:
             p1 = x[:, :x.shape[1]//2]
-            p1 = image[:, :, anti_padding:-anti_padding, anti_padding:-anti_padding] * torch.cos(t[..., None, None]) - p1 * torch.sin(t[..., None, None])
+            #p1 = image[:, :, anti_padding:-anti_padding, anti_padding:-anti_padding] * torch.cos(t[..., None, None]) - p1 * torch.sin(t[..., None, None])
             p2 = x[:, x.shape[1]//2:]
             return p1, p2
         return image[:, :, anti_padding:-anti_padding, anti_padding:-anti_padding] * torch.cos(t[..., None, None]) - x * torch.sin(t[..., None, None])
