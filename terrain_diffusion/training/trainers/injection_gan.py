@@ -226,8 +226,7 @@ class InjectionGANTrainer(Trainer):
                 real_images = real_images[:, :, h_start:h_start+fake_images.shape[-2], w_start:w_start+fake_images.shape[-1]]
                 
                 img_cat = torch.cat([real_images, fake_images.detach()], dim=0).detach().requires_grad_(True)
-                t_cat = torch.cat([t, t], dim=0)
-                pred_cat = self.discriminator(cond_cat, img_cat, t_cat)
+                pred_cat = self.discriminator(img_cat)
                 real_pred, fake_pred = pred_cat[:batch_size], pred_cat[batch_size:]
                 
                 d_loss = torch.nn.functional.softplus(fake_pred - real_pred).mean()
@@ -260,7 +259,7 @@ class InjectionGANTrainer(Trainer):
                 mixed_real_g = torch.cos(t_g)[..., None, None] * real_images_uncropped + torch.sin(t_g)[..., None, None] * z_img_g
                 fake_images = self.generator(latent_g, mixed_real_g, t_g)
 
-                fake_pred = self.discriminator(mixed_real_g, fake_images, t_g)
+                fake_pred = self.discriminator(fake_images)
                 g_loss = torch.nn.functional.softplus(real_pred.detach() - fake_pred).mean()
                 
                 mean = fake_images.mean(dim=(0, 2, 3))

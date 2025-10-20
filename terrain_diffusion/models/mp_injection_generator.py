@@ -56,7 +56,7 @@ class MPInjectionGenerator(ModelMixin, ConfigMixin):
         self.fouriers = nn.ModuleList()
         for _ in range(image_channels):
             self.fouriers.append(MPFourier(fourier_channels))
-        self.emb_linear = MPConv(image_channels * fourier_channels, model_channels, kernel=[])
+        self.emb_linear = MPConv(image_channels * fourier_channels, emb_channels, kernel=[])
         
         self.initial_skip_conv = MPConv(latent_channels + 1, init_channels, kernel=[1, 1])
         self.image_skip_conv = MPConv(image_channels + 1, model_channels * model_channel_mults[-1], kernel=[1, 1])
@@ -122,7 +122,11 @@ class MPInjectionGenerator(ModelMixin, ConfigMixin):
             x = block(x, emb=emb)
         
         x = self.out_conv(x, gain=self.out_gain)
-        return x
+        anti_padding = (image.shape[2] - x.shape[2]) // 2
+        if anti_padding == 0:
+            return image * torch.cos(t[..., None, None]) - x * torch.sin(t[..., None, None])
+        return image[:, :, anti_padding:-anti_padding, anti_padding:-anti_padding] * torch.cos(t[..., None, None]) - x * torch.sin(t[..., None, None])
+
 
     def norm_weights(self):
         """Normalize all the weights in the model."""
