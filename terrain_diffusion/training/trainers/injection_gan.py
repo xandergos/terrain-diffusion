@@ -310,6 +310,7 @@ class InjectionGANTrainer(Trainer):
             'd_loss': d_loss.item(),
             'g_loss': g_loss.item(),
             'kl_loss': kl_loss.item(),
+            'diffusion_error': diffusion_error.item(),
             'r_loss': (r_reg.item() / current_r_gamma) if current_r_gamma > 0 else 0,
             'd_grad_norm': discriminator_grad_norm.item(),
             'g_grad_norm': generator_grad_norm.item(),
