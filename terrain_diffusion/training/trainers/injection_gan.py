@@ -257,7 +257,7 @@ class InjectionGANTrainer(Trainer):
                 latent_g = torch.randn(batch_size, latent_channels, latent_size, latent_size, device=self.accelerator.device)
                 z_img_g = torch.randn_like(real_images_uncropped)
                 mixed_real_g = torch.cos(t_g)[..., None, None] * real_images_uncropped + torch.sin(t_g)[..., None, None] * z_img_g
-                fake_images, real_images_pred = self.generator(latent_g, mixed_real_g, t_g)
+                fake_images, v_t_pred = self.generator(latent_g, mixed_real_g, t_g)
 
                 fake_pred = self.discriminator(fake_images)
                 g_loss = torch.nn.functional.softplus(real_pred.detach() - fake_pred).mean()
@@ -281,7 +281,7 @@ class InjectionGANTrainer(Trainer):
                 w_start = w_diff // 2
                 z_img_cropped = z_img[:, :, h_start:h_start+fake_images.shape[-2], w_start:w_start+fake_images.shape[-1]]
                 v_t = torch.cos(t[..., None, None]) * z_img_cropped - torch.sin(t[..., None, None]) * real_images
-                pred_v_t = torch.cos(t[..., None, None]) * z_img_cropped - torch.sin(t[..., None, None]) * real_images_pred
+                pred_v_t = v_t_pred
                 diffusion_error = (pred_v_t - v_t).pow(2).mean()
                 total_g_loss = total_g_loss + diffusion_error * self.config['training'].get('diffusion_error_weight', 0.0)
                 
