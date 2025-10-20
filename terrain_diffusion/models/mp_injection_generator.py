@@ -108,8 +108,8 @@ class MPInjectionGenerator(ModelMixin, ConfigMixin):
         Returns:
             torch.Tensor: Generated image of shape [batch_size, out_channels, out_size, out_size]
         """
-        t = torch.log(torch.clip(torch.tan(t) * 0.5, 0.002, 80) / 4)
-        emb = torch.cat([fourier(t[:, i]) for i, fourier in enumerate(self.fouriers)], dim=1)
+        c_emb = torch.log(torch.clip(torch.tan(t) * 0.5, 0.002, 80) / 4)
+        emb = torch.cat([fourier(c_emb[:, i]) for i, fourier in enumerate(self.fouriers)], dim=1)
         emb = self.emb_linear(emb)
         
         x = torch.cat([latents, torch.ones_like(latents[:, :1])], dim=1)
