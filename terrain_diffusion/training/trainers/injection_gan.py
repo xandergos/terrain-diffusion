@@ -173,12 +173,19 @@ class InjectionGANTrainer(Trainer):
         else:
             current_r_gamma = self.final_r_gamma
 
+        pct_fixed = linear_warmup(
+            self.config['training'].get('warmup_pct_fixed', 0.95),
+            0.5,
+            state['step'],
+            self.config['training'].get('burnin_steps', 1)
+        )
+                
         def sample_t(bs, channels):
             t = torch.rand(bs, channels, device=self.accelerator.device)
-            t = torch.atan(2 * torch.exp(10 * torch.sqrt(t) - 3))
+            t = torch.atan(2 * torch.exp(10 * t - 3))
             
             # Randomly make half the batch = arctan(160)
-            mask = torch.rand(bs, device=self.accelerator.device) < 0.5
+            mask = torch.rand(bs, device=self.accelerator.device) < pct_fixed
             t[mask] = torch.atan(torch.tensor(160.0, device=self.accelerator.device))
             
             return t
