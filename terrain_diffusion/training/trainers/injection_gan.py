@@ -275,8 +275,13 @@ class InjectionGANTrainer(Trainer):
                     self.config['training'].get('burnin_steps', 1)
                 )
                 
-                v_t = torch.cos(t) * z_img - torch.sin(t) * real_images
-                pred_v_t = torch.cos(t) * z_img - torch.sin(t) * real_images_pred
+                h_diff = real_images.shape[-2] - fake_images.shape[-2]
+                w_diff = real_images.shape[-1] - fake_images.shape[-1]
+                h_start = h_diff // 2
+                w_start = w_diff // 2
+                z_img_cropped = z_img[:, :, h_start:h_start+fake_images.shape[-2], w_start:w_start+fake_images.shape[-1]]
+                v_t = torch.cos(t) * z_img_cropped - torch.sin(t) * real_images
+                pred_v_t = torch.cos(t) * z_img_cropped - torch.sin(t) * real_images_pred
                 diffusion_error = (pred_v_t - v_t).pow(2).mean()
                 total_g_loss = total_g_loss + diffusion_error * self.config['training'].get('diffusion_error_weight', 0.0)
                 
