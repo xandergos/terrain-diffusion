@@ -122,10 +122,7 @@ class MPInjectionGenerator(ModelMixin, ConfigMixin):
             x = block(x, emb=emb)
         
         x = self.out_conv(x, gain=self.out_gain)
-        anti_padding = (image.shape[2] - x.shape[2]) // 2
-        if anti_padding == 0:
-            return image * torch.cos(t[..., None, None]) - x * torch.sin(t[..., None, None])
-        return image[:, :, anti_padding:-anti_padding, anti_padding:-anti_padding] * torch.cos(t[..., None, None]) - x * torch.sin(t[..., None, None])
+        return x
 
     def norm_weights(self):
         """Normalize all the weights in the model."""
