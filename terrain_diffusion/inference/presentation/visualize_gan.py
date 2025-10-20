@@ -58,8 +58,11 @@ def main(ckpt_dir, sigma_rel, latent_size, seed, device, downsample):
         img = pooled.view(B, C, H_out, W_out)
 
     # Prepare normalized channels
-    elev = img[0, 0] * 2435.7434 + -2607.8887
-    elev = torch.sign(elev) * torch.sqrt(torch.abs(elev))
+    mean = [-2633.639460630914, 189.935819107797, 7.339399687579161, 205.22559684753017, 457.59783059226277, 25.97546207333763]
+    std = [2428.9742483056802, 234.03388226663458, 9.7756394724636, 360.7426708787508, 703.1262351033647, 36.3729825977694]
+    img = img * torch.tensor(std, device=device).reshape(1, 6, 1, 1) + torch.tensor(mean, device=device).reshape(1, 6, 1, 1)
+    elev = img[0, 0]
+    #elev = torch.sign(elev) * torch.sqrt(torch.abs(elev))
     others = img[0, 1:]
 
     # Interactive visualization with slider
@@ -111,4 +114,11 @@ def main(ckpt_dir, sigma_rel, latent_size, seed, device, downsample):
 
 
 if __name__ == "__main__":
-    main()
+    main.callback(
+        'checkpoints/gan/latest_checkpoint',
+        0.1,
+        100,
+        21,
+        'cuda',
+        1
+    )
