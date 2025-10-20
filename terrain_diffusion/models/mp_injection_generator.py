@@ -129,10 +129,10 @@ class MPInjectionGenerator(ModelMixin, ConfigMixin):
             return image * torch.cos(t[..., None, None]) - x * torch.sin(t[..., None, None])
         if self.aux_output:
             p1 = x[:, :x.shape[1]//2]
-            #p1 = image[:, :, anti_padding:-anti_padding, anti_padding:-anti_padding] * torch.cos(t[..., None, None]) - p1 * torch.sin(t[..., None, None])
+            p1 = image[:, :, anti_padding:-anti_padding, anti_padding:-anti_padding] * torch.cos(t[..., None, None]) - p1 * torch.sin(t[..., None, None])
             p2 = x[:, x.shape[1]//2:]
             return p1, p2
-        return x
+        return image[:, :, anti_padding:-anti_padding, anti_padding:-anti_padding] * torch.cos(t[..., None, None]) - x * torch.sin(t[..., None, None])
 
 
     def norm_weights(self):
@@ -142,13 +142,13 @@ class MPInjectionGenerator(ModelMixin, ConfigMixin):
                 module.norm_weights()
 
 if __name__ == "__main__":
-    latent = torch.randn(1, 32, 16, 16)
-    image = torch.randn(1, 6, 20, 20)
+    latent = torch.randn(1, 32, 12, 12)
+    image = torch.randn(1, 6, 12, 12)
     t = torch.zeros(1, 6)
     model = MPInjectionGenerator(latent_channels=32, image_channels=6,
                                  model_channels=128,
                                  model_channel_mults=[1, 1],
-                                 layers_per_block=[2, 4], 
+                                 layers_per_block=[2, 2], 
                                  no_padding=True,
                                  fourier_channels=64,
                                  emb_channels=128)
