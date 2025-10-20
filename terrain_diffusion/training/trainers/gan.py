@@ -57,7 +57,7 @@ def calculate_fid(generator, val_dataset, config, device, n_samples=50000):
         images = images.repeat(1, 3, 1, 1)
         return images
     
-    pbar = tqdm(total=n_samples*2, desc="Calculating FID")
+    pbar = tqdm(total=n_samples, desc="Calculating FID")
     
     # Process real and fake samples simultaneously
     val_loader = DataLoader(val_dataset, batch_size=64)
@@ -65,6 +65,9 @@ def calculate_fid(generator, val_dataset, config, device, n_samples=50000):
     
     with torch.no_grad():
         for i, batch in enumerate(val_loader):
+            if pbar.n >= pbar.total:
+                break
+            
             real_images = batch['image'].to(device)
             batch_size = real_images.shape[0]
             real_images = random_crop(real_images, config['training']['crop_size'])
@@ -202,6 +205,7 @@ class GANTrainer(Trainer):
         # Train discriminator
         with self.accelerator.accumulate(self.discriminator):
             real_images = batch['image']
+            real_images_uncropped = real_images
             batch_size = real_images.shape[0]
             
             with self.accelerator.autocast():
@@ -214,8 +218,8 @@ class GANTrainer(Trainer):
                                 device=self.accelerator.device)
                     if self.config['training'].get('mode') == 'inject':
                         t = sample_t(batch_size, real_images.shape[1])
-                        z_img = torch.randn_like(real_images)
-                        mixed_real = torch.cos(t)[..., None, None] * real_images + torch.sin(t)[..., None, None] * z_img
+                        z_img = torch.randn_like(real_images_uncropped)
+                        mixed_real = torch.cos(t)[..., None, None] * real_images_uncropped + torch.sin(t)[..., None, None] * z_img
                         fake_images = self.generator(z, mixed_real, t)
                     else:
                         fake_images = self.generator(z)
@@ -261,8 +265,8 @@ class GANTrainer(Trainer):
                 
                 if self.config['training'].get('mode') == 'inject':
                     t = sample_t(batch_size, real_images.shape[1])
-                    z_img = torch.randn_like(real_images)
-                    mixed_real = torch.cos(t)[..., None, None] * real_images + torch.sin(t)[..., None, None] * z_img
+                    z_img = torch.randn_like(real_images_uncropped)
+                    mixed_real = torch.cos(t)[..., None, None] * real_images_uncropped + torch.sin(t)[..., None, None] * z_img
                     fake_images = self.generator(z, mixed_real, t)
                 else:
                     fake_images = self.generator(z)
