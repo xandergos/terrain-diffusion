@@ -30,9 +30,6 @@ from terrain_diffusion.data.preprocessing.calculate_stds import calculate_stats_
 @click.option('--lowres-sigma', type=float, default=5.0, help='Sigma for Gaussian smoothing of low-resolution images')
 @click.option('--resolution', type=int, default=90, help='Resolution of the input images in meters. Only used for labeling.')
 @click.option('--num-chunks', type=int, default=1, help='Number of chunks to divide the image into for processing')
-@click.option('--landcover-folder', type=str, default=None, help='Path to the folder containing land cover data (optional)')
-@click.option('--watercover-folder', type=str, default=None, help='Path to the folder containing water cover data (optional)')
-@click.option('--koppen-geiger-folder', type=str, default=None, help='Path to the folder containing koppen geiger data (optional)')
 @click.option('--climate-folder', type=str, default=None, help='Path to the folder containing climate data (optional)')
 @click.option('-o', '--output-file', type=str, default='dataset.h5', help='Path to the output HDF5 file')
 @click.option('--num-workers', type=int, default=mp.cpu_count()-1, help='Number of parallel workers for processing')
@@ -48,9 +45,6 @@ def process_base_dataset(
     lowres_sigma,
     resolution,
     num_chunks,
-    landcover_folder,
-    watercover_folder,
-    koppen_geiger_folder,
     climate_folder,
     output_file,
     num_workers,
@@ -70,7 +64,7 @@ def process_base_dataset(
     
     Output HDF5 file will contain datasets organized in groups:
     {resolution}/{chunk_id}/{subchunk_id}/{data_type}
-    Where data_type is one of: residual, lowfreq, landcover, watercover, koppen_geiger, climate
+    Where data_type is one of: residual, lowfreq, climate
     """
     if os.path.exists(output_file):
         print(f"{output_file} already exists. Appending to it.")
@@ -95,11 +89,10 @@ def process_base_dataset(
                     chunk_group = res_group[chunk_id]
                     for subchunk_id in chunk_group.keys():
                         subchunk_group = chunk_group[subchunk_id]
-                        # Delete only non-latent datasets
-                        for data_type in ['residual', 'lowfreq', 'landcover', 'watercover', 
-                                          'climate', 'koppen_geiger']:
-                            if data_type in subchunk_group:
-                                del subchunk_group[data_type]
+                        # Delete existing datasets for selected data types
+                        for key in subchunk_group.keys():
+                            if key not in ['latent']:
+                                del subchunk_group[key]
         
         dataset = ElevationDataset(
             highres_elevation_folder,
@@ -109,9 +102,6 @@ def process_base_dataset(
             lowres_size,
             lowres_sigma,
             num_chunks,
-            landcover_folder,
-            watercover_folder,
-            koppen_geiger_folder,
             climate_folder,
             skip_chunk_ids,
             edge_margin
@@ -128,15 +118,11 @@ def process_base_dataset(
                 for data_type, data in [
                     ('residual', chunk['residual']),
                     ('lowfreq', chunk['lowfreq']),
-                    ('landcover', chunk['landcover']),
-                    ('landcover_mini', chunk['landcover_mini']),
-                    ('watercover', chunk['watercover']),
-                    ('koppen_geiger', chunk['koppen_geiger']),
                     ('climate', chunk['climate'])
                 ]:
-                    if data_type in ['residual', 'landcover', 'watercover']:
+                    if data_type == 'residual':
                         chunk_shape = (128, 128)
-                    elif data_type in ['lowfreq', 'koppen_geiger', 'landcover_mini']:
+                    elif data_type == 'lowfreq':
                         chunk_shape = (32, 32)
                     elif data_type == 'climate':
                         chunk_shape = (1, 32, 32)
@@ -154,7 +140,7 @@ def process_base_dataset(
                     f.flush()
         
         # Calculate stats for residual and climate datasets
-        datasets_to_process = ['residual', 'climate', 'watercover']
+        datasets_to_process = ['residual', 'climate']
         for dataset_name in datasets_to_process:
             means, stds = calculate_stats_welford(res_group, dataset_name, min_stat_landcover_pct)
             
