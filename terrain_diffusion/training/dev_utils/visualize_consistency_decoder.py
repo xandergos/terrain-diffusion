@@ -39,7 +39,10 @@ class DecoderVisualizer:
         
         # Interactive midpoint in t-space (default 1.1); slider operates in s = log(tan(t)) space
         self.midpoint_t = 1.1
-        self._midpoint_s = float(np.log(np.tan(self.midpoint_t)))
+        self._midpoint_s = float(np.tan(self.midpoint_t)) * 0.5
+        
+        # Flag to control whether to apply second timestep
+        self.use_second_timestep = True
         
         # Setup matplotlib figure - single channel (residual)
         self.fig, self.axes = plt.subplots(2, 1, figsize=(8, 8))
@@ -58,8 +61,8 @@ class DecoderVisualizer:
         # Create button axes
         ax_prev = plt.axes([0.1, 0.02, 0.1, 0.04])
         ax_next = plt.axes([0.21, 0.02, 0.1, 0.04])
-        ax_batch_prev = plt.axes([0.4, 0.02, 0.15, 0.04])
-        ax_batch_next = plt.axes([0.56, 0.02, 0.15, 0.04])
+        ax_batch_next = plt.axes([0.4, 0.02, 0.15, 0.04])
+        ax_toggle_t2 = plt.axes([0.57, 0.02, 0.15, 0.04])
         ax_save = plt.axes([0.8, 0.02, 0.1, 0.04])
         # Slider axis (s = log(tan(t)))
         ax_slider = plt.axes([0.1, 0.07, 0.65, 0.03])
@@ -67,18 +70,24 @@ class DecoderVisualizer:
         # Create buttons
         self.btn_prev = Button(ax_prev, 'Previous')
         self.btn_next = Button(ax_next, 'Next')
-        self.btn_batch_prev = Button(ax_batch_prev, 'Previous Batch')
         self.btn_batch_next = Button(ax_batch_next, 'Next Batch')
         self.btn_save = Button(ax_save, 'Save')
-        # Create slider in log-tangent space
-        self.sld_mid_s = Slider(ax_slider, 'log(tan t)', valmin=0.1, valmax=20.0, valinit=self._midpoint_s)
+        self.btn_toggle_t2 = Button(ax_toggle_t2, 'Disable t2')
+        # Create logarithmic slider controlling u = tan(t), label indicates log scale
+        self.sld_mid_s = Slider(
+            ax_slider,
+            'log(tan t)',
+            valmin=float(np.log(0.01)),
+            valmax=float(np.log(20.0)),
+            valinit=float(np.log(self._midpoint_s)),
+        )
         
         # Connect button callbacks
         self.btn_prev.on_clicked(self.prev_image)
         self.btn_next.on_clicked(self.next_image)
-        self.btn_batch_prev.on_clicked(self.prev_batch)
         self.btn_batch_next.on_clicked(self.next_batch)
         self.btn_save.on_clicked(self.save_current)
+        self.btn_toggle_t2.on_clicked(self.toggle_second_timestep)
         self.sld_mid_s.on_changed(self.on_slider_change)
         
     def load_next_batch(self):
@@ -110,7 +119,8 @@ class DecoderVisualizer:
             
             samples = torch.zeros_like(images)
             t0 = np.arctan(self.scheduler.sigmas[0] / self.scheduler.config.sigma_data)
-            for t_val in [t0, self.midpoint_t]:
+            timesteps = [t0] + ([self.midpoint_t] if self.use_second_timestep else [])
+            for t_val in timesteps:
                 t = torch.tensor([t_val], device=images.device).view(1, 1, 1, 1).expand(images.shape[0], 1, 1, 1)
                 z = torch.randn_like(images) * self.scheduler.config.sigma_data
                 x_t = torch.cos(t) * samples + torch.sin(t) * z
@@ -176,13 +186,13 @@ class DecoderVisualizer:
         self.fig.canvas.draw()
 
     def on_slider_change(self, s_val):
-        """Slider callback: update midpoint t from s=log(tan t) and refresh."""
-        # Map slider value s -> t = arctan(exp(s))
-        try:
-            self.midpoint_t = float(np.arctan(np.exp(float(s_val))))
-        except Exception:
-            return
-        self._midpoint_s = float(s_val)
+        """Slider callback: update midpoint t using u=tan(t) from log slider and refresh."""
+        # Map slider value from log space back to linear u = tan(t)
+        u_val = float(np.exp(s_val))
+        self.midpoint_t = float(np.arctan(u_val / 0.5))
+        
+        # Maintain internal s for consistency
+        self._midpoint_s = u_val
         self.compute_reconstructions()
         self.update_display()
         
@@ -217,6 +227,13 @@ class DecoderVisualizer:
             filename = f'decoder_comparison_batch{self.batch_idx}_img{self.current_idx + 1}.png'
             self.fig.savefig(filename, dpi=150, bbox_inches='tight')
             print(f'Saved comparison to {filename}')
+    
+    def toggle_second_timestep(self, event):
+        """Toggle whether to use the second timestep in reconstruction"""
+        self.use_second_timestep = not self.use_second_timestep
+        self.btn_toggle_t2.label.set_text('Enable t2' if not self.use_second_timestep else 'Disable t2')
+        self.compute_reconstructions()
+        self.update_display()
     
     def save_samples(self, num_samples, output_dir='decoder_viz_output'):
         """Save multiple samples to disk (for headless mode)"""

@@ -16,6 +16,7 @@ from ema_pytorch import PostHocEMA
 from torchmetrics.image.kid import KernelInceptionDistance
 
 from terrain_diffusion.models.edm_autoencoder import EDMAutoencoder
+from terrain_diffusion.models.edm_unet import EDMUnet2D
 from terrain_diffusion.training.registry import build_registry
 from terrain_diffusion.training.datasets import LongDataset
 from terrain_diffusion.training.utils import recursive_to
@@ -97,7 +98,7 @@ def evaluate_decoder_kid(model, scheduler, val_dataloader=None, kid_n_images=Non
                     t_values = [init_t, intermediate_t]
                     
                     for t_scalar in t_values:
-                        t = t_scalar.view(1, 1, 1, 1).expand(samples.shape[0], 1, 1, 1).to(images.device)
+                        t = t_scalar.view(1, 1, 1, 1).expand(samples.shape[0], 1, 1, 1).to(device=images.device, dtype=images.dtype)
                         z = torch.randn(samples.shape, generator=generator, device=images.device) * sigma_data
                         x_t = torch.cos(t) * samples + torch.sin(t) * z
                         model_input = x_t / sigma_data
@@ -155,7 +156,7 @@ def main(config_path, n_trials, study_name, storage):
     resolved = registry.resolve(config, validate=False)
 
     # Model and scheduler
-    model = resolved['model']
+    model = EDMUnet2D.from_pretrained(resolved['model']['main_path'])
     scheduler = resolved['scheduler']
 
     # Accelerator
@@ -245,7 +246,7 @@ def main(config_path, n_trials, study_name, storage):
     print(f"Number of trials: {n_trials}")
     print(f"Search range: EMA σ ∈ [{min_ema_sigma}, {max_ema_sigma}]")
     print(f"Search range: EMA step ∈ [{min_ema_step}, {max_ema_step}]")
-    print(f"Search range: intermediate_t ∈ [{min_intermediate_t}, {max_intermediate_t}]")
+    print(f"Search range: intermediate_sigma ∈ [{min_intermediate_sigma}, {max_intermediate_sigma}]")
     
     # Configure Optuna storage
     if storage:
@@ -277,17 +278,9 @@ def main(config_path, n_trials, study_name, storage):
         baseline_params = {
             'ema_sigma': 0.05,
             'ema_step': min_ema_step,
-            'intermediate_t': 1.1,
+            'intermediate_sigma': 2.0,
         }
         print("Enqueuing baseline first trial:", baseline_params)
-        study.enqueue_trial(baseline_params)
-            
-        baseline_params = {
-            'ema_sigma': 0.05,
-            'ema_step': min_ema_step,
-            'intermediate_t': min_intermediate_t,
-        }
-        print("Enqueuing baseline second trial:", baseline_params)
         study.enqueue_trial(baseline_params)
 
     # Run optimization
@@ -297,14 +290,14 @@ def main(config_path, n_trials, study_name, storage):
     best_trial = study.best_trial
     optimal_ema_sigma = float(best_trial.params['ema_sigma'])
     optimal_ema_step = int(best_trial.params['ema_step'])
-    optimal_intermediate_t = float(best_trial.params['intermediate_t'])
+    optimal_intermediate_sigma = float(best_trial.params['intermediate_sigma'])
     optimal_kid = float(best_trial.value)
 
     print("\n" + "=" * 80)
     print("Optimization complete!")
     print(f"Optimal EMA σ: {optimal_ema_sigma:.6f}")
     print(f"Optimal EMA step: {optimal_ema_step}")
-    print(f"Optimal intermediate_t: {optimal_intermediate_t:.6f}")
+    print(f"Optimal intermediate_sigma: {optimal_intermediate_sigma:.6f}")
     print(f"Optimal KID mean: {optimal_kid:.6f}")
     print(f"Best trial: {best_trial.number}")
     print("=" * 80)
@@ -313,7 +306,7 @@ def main(config_path, n_trials, study_name, storage):
     results = {
         'optimal_ema_sigma': optimal_ema_sigma,
         'optimal_ema_step': optimal_ema_step,
-        'optimal_intermediate_t': optimal_intermediate_t,
+        'optimal_intermediate_sigma': optimal_intermediate_sigma,
         'optimal_kid_mean': optimal_kid,
         'best_trial_number': best_trial.number,
         'n_trials': len(study.trials),
@@ -322,7 +315,7 @@ def main(config_path, n_trials, study_name, storage):
                 'number': t.number,
                 'ema_sigma': t.params.get('ema_sigma'),
                 'ema_step': t.params.get('ema_step'),
-                'intermediate_t': t.params.get('intermediate_t'),
+                'intermediate_sigma': t.params.get('intermediate_sigma'),
                 'kid_mean': t.value,
                 'state': t.state.name,
             }
