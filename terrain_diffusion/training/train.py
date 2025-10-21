@@ -182,7 +182,10 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
             # Update progress bar
             postfix = {}
             for k, v in stats_hist.items():
-                postfix[k] = f"{np.mean(v[-10:]):.4f}"
+                if k == 'lr':
+                    postfix[k] = f"{v[-1]:.4e}"
+                else:
+                    postfix[k] = f"{np.mean(v[-10:]):.4f}"
             progress_bar.set_postfix(postfix)
             progress_bar.update(1)
         
@@ -214,7 +217,7 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
             # Add evaluation metrics
             log_values.update(eval_metrics)
             
-            wandb.log(log_values, step=state['epoch'])
+            wandb.log(log_values, step=state['epoch'], commit=True)
             
             # Save checkpoints
             if state['epoch'] % config['logging']['temp_save_epochs'] == 0 and not debug_run:

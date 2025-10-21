@@ -135,7 +135,7 @@ class DecoderDatasetVisualizer:
                 h_down, w_down = H // 8, W // 8
                 latents = F.interpolate(cond_img, size=(h_down, w_down), mode='nearest')
                 decoded = self.model.decode(latents)
-                recon_residual = decoded[:, :1, :, :]
+                recon_residual = decoded[:, :1, :, :] * self.scheduler.config.sigma_data
             else:
                 images = real_image
                 cond_img = self.current_batch.get('cond_img')
