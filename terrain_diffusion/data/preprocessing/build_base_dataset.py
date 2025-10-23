@@ -26,7 +26,7 @@ from terrain_diffusion.data.preprocessing.calculate_stds import calculate_stats_
 @click.option('--highres-elevation-folder', type=str, required=True, help='Path to the folder containing high-resolution elevation files')
 @click.option('--lowres-elevation-file', type=str, required=True, help='Path to the file containing low-resolution elevation data')
 @click.option('--highres-size', type=int, default=4096, help='Size of the high-resolution images')
-@click.option('--lowres-size', type=int, default=128, help='Size of the low-resolution images')
+@click.option('--lowres-size', type=int, default=512, help='Size of the low-resolution images')
 @click.option('--lowres-sigma', type=float, default=5.0, help='Sigma for Gaussian smoothing of low-resolution images')
 @click.option('--resolution', type=int, default=90, help='Resolution of the input images in meters. Only used for labeling.')
 @click.option('--num-chunks', type=int, default=1, help='Number of chunks to divide the image into for processing')
@@ -67,7 +67,10 @@ def process_base_dataset(
     Where data_type is one of: residual, lowfreq, climate
     """
     if os.path.exists(output_file):
-        print(f"{output_file} already exists. Appending to it.")
+        if not overwrite:
+            print(f"{output_file} already exists. Appending to it.")
+        else:
+            print(f"{output_file} already exists. Overwriting it.")
     else:
         print(f"{output_file} does not exist. Creating it and building datasets.")
     
@@ -91,6 +94,7 @@ def process_base_dataset(
                         subchunk_group = chunk_group[subchunk_id]
                         # Delete existing datasets for selected data types
                         for key in subchunk_group.keys():
+                            assert isinstance(key, str), f"Key {key} is not a string"
                             if key not in ['latent']:
                                 del subchunk_group[key]
         
@@ -118,11 +122,12 @@ def process_base_dataset(
                 for data_type, data in [
                     ('residual', chunk['residual']),
                     ('lowfreq', chunk['lowfreq']),
+                    ('lowres_exact', chunk['lowres_exact']),
                     ('climate', chunk['climate'])
                 ]:
                     if data_type == 'residual':
                         chunk_shape = (128, 128)
-                    elif data_type == 'lowfreq':
+                    elif data_type in ['lowfreq', 'lowres_exact']:
                         chunk_shape = (32, 32)
                     elif data_type == 'climate':
                         chunk_shape = (1, 32, 32)

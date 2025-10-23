@@ -192,6 +192,7 @@ def process_single_file_base(
     Returns:
         list: List of dictionaries containing preprocessed chunks and metadata
     """
+    assert highres_size % lowres_size == 0, "Highres size must be divisible by lowres size"
     file = chunk_id + '.tif'
     
     highres_margin = edge_margin * highres_size // lowres_size
@@ -259,7 +260,9 @@ def process_single_file_base(
     else:
         climate = None
     
+    size_ratio = highres_size // lowres_size
     highres_dem = np.sign(highres_dem) * np.sqrt(np.abs(highres_dem))
+    lowres_exact = skimage.measure.block_reduce(highres_dem, (size_ratio, size_ratio), np.median)
     residual, lowfreq = laplacian_encode(highres_dem, lowres_size - edge_margin * 2, lowres_sigma)
     
     highres_chunk_size = (highres_size - highres_margin * 2) // num_chunks
@@ -284,6 +287,7 @@ def process_single_file_base(
                 'residual': residual[..., highres_start_h:highres_end_h, highres_start_w:highres_end_w],
                 'lowfreq': lowfreq[..., lowres_start_h:lowres_end_h, lowres_start_w:lowres_end_w],
                 'climate': climate[..., lowres_start_h:lowres_end_h, lowres_start_w:lowres_end_w] if climate is not None else None,
+                'lowres_exact': lowres_exact[..., lowres_start_h:lowres_end_h, lowres_start_w:lowres_end_w],
                 'pct_land': pct_land,
                 'chunk_id': chunk_id,
                 'subchunk_id': f'chunk_{chunk_h}_{chunk_w}'

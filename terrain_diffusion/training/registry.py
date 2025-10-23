@@ -7,7 +7,7 @@ from terrain_diffusion.data.laplacian_encoder import *
 from terrain_diffusion.models.mp_discriminator import MPDiscriminator
 from terrain_diffusion.models.mp_generator import MPGenerator
 from terrain_diffusion.training.loss import CosineLRScheduler, SqrtLRScheduler, ConstantLRScheduler
-from terrain_diffusion.inference.scheduler.dpmsolver import EDMDPMSolverMultistepScheduler
+from terrain_diffusion.scheduler.dpmsolver import EDMDPMSolverMultistepScheduler
 from terrain_diffusion.models.edm_autoencoder import EDMAutoencoder
 from terrain_diffusion.models.edm_unet import EDMUnet2D
 from terrain_diffusion.training.trainers.autoencoder import AutoencoderTrainer
@@ -37,7 +37,7 @@ def build_registry():
     registry.dataset.register("h5_autoencoder", func=H5AutoencoderDataset)
     registry.dataset.register("h5_latents", func=H5LatentsDataset)
     registry.dataset.register("file_gan", func=FileGANDataset)
-    registry.dataset.register("gan", func=GANDataset)
+    registry.dataset.register("coarse", func=CoarseDataset)
     
     registry.trainer = catalogue.create("confection", "trainers", entry_points=False)
     registry.trainer.register("autoencoder", func=lambda: AutoencoderTrainer)

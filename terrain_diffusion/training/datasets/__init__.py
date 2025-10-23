@@ -5,7 +5,7 @@ from .h5_decoder_terrain_dataset import H5DecoderTerrainDataset
 from .h5_latents_dataset import H5LatentsDataset
 from .long_dataset import LongDataset
 from .file_gan_dataset import FileGANDataset
-from .gan_dataset import GANDataset
+from .coarse_dataset import CoarseDataset
 
 __all__ = [
     'H5AutoencoderDataset',
@@ -13,5 +13,5 @@ __all__ = [
     'H5LatentsDataset',
     'LongDataset',
     'FileGANDataset',
-    'GANDataset'
+    'CoarseDataset'
 ]

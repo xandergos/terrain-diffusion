@@ -148,7 +148,10 @@ class EDMUnet2D(ModelMixin, ConfigMixin):
         if self.noise_linear is not None:
             embeds.append(self.noise_linear(self.noise_fourier(noise_labels)))
         for cond_layer, cond_input in zip(self.conditional_layers, conditional_inputs):
-            embeds.append(cond_layer(cond_input))
+            if isinstance(cond_layer, MPConv):
+                embeds.append(mp_silu(cond_layer(cond_input)))
+            else:
+                embeds.append(cond_layer(cond_input))
         if len(embeds) == 0:
             return None
         emb = mp_sum(embeds, self.conditional_weights)
@@ -176,7 +179,7 @@ class EDMUnet2D(ModelMixin, ConfigMixin):
         x = self.out_conv(x, gain=self.out_gain)
     
         if return_logvar:
-            logvar = self.logvar_linear(self.logvar_fourier(torch.log(torch.tan(noise_labels) * 2))).reshape(-1, 1, 1, 1)
+            logvar = self.logvar_linear(self.logvar_fourier(torch.log(torch.tan(noise_labels) / 8))).reshape(-1, 1, 1, 1)
             return x, logvar
         return x
     

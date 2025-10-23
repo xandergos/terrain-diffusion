@@ -112,7 +112,7 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
         trainer.load_model_checkpoint(model_ckpt_path)
     
     train_dataset = resolved['train_dataset']
-    batch_size = config['training'].get('train_batch_size') or config['training']['batch_size']
+    batch_size = config['training']['batch_size']
 
     dataloader_kwargs = dict(resolved.get('dataloader_kwargs', {}))
     train_dataloader = DataLoader(
