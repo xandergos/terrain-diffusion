@@ -169,9 +169,6 @@ def process_single_file_base(
     lowres_size,
     lowres_sigma,
     num_chunks=1,
-    landcover_folder=None,
-    watercover_folder=None,
-    koppen_geiger_file=None,
     climate_folder=None,
     edge_margin=0,
 ):
@@ -195,6 +192,7 @@ def process_single_file_base(
     Returns:
         list: List of dictionaries containing preprocessed chunks and metadata
     """
+    assert highres_size % lowres_size == 0, "Highres size must be divisible by lowres size"
     file = chunk_id + '.tif'
     
     highres_margin = edge_margin * highres_size // lowres_size
@@ -239,43 +237,6 @@ def process_single_file_base(
     os.makedirs('debug', exist_ok=True)
     plt.imsave(os.path.join('debug', f'highres_dem_{chunk_id}.png'), highres_dem, cmap='gray')
     
-    if landcover_folder is not None:
-        try:
-            landcover = read_raster(os.path.join(landcover_folder, file)).astype(np.int16)
-            assert not np.isnan(landcover).all()
-            landcover_mini = skimage.transform.resize(landcover, (lowres_size, lowres_size), order=0)
-            landcover = skimage.transform.resize(landcover, (highres_size, highres_size), order=0, preserve_range=True)
-            if highres_margin > 0:
-                landcover = landcover[..., highres_margin:-highres_margin, highres_margin:-highres_margin]
-                landcover_mini = landcover_mini[..., edge_margin:-edge_margin, edge_margin:-edge_margin]
-        except Exception:
-            landcover = None
-            landcover_mini = None
-    else:
-        landcover = None
-        landcover_mini = None
-    
-    if watercover_folder is not None:
-        try:
-            watercover = read_raster(os.path.join(watercover_folder, 'landcover_water_' + file)).astype(np.float32)
-            assert not np.isnan(watercover).all()
-            watercover = skimage.transform.resize(watercover, (highres_size, highres_size), order=0, preserve_range=True)
-            if highres_margin > 0:
-                watercover = watercover[..., highres_margin:-highres_margin, highres_margin:-highres_margin]
-        except rasterio.RasterioIOError:
-            watercover = None
-    else:
-        watercover = None
-        
-    if koppen_geiger_file is not None:
-        koppen_geiger = extract_mask_from_tiffs(koppen_geiger_file, bounds).astype(np.int8)
-        assert not np.isnan(koppen_geiger).all()
-        koppen_geiger = skimage.transform.resize(koppen_geiger, (lowres_size, lowres_size), order=0, preserve_range=True)
-        if highres_margin > 0:
-            koppen_geiger = koppen_geiger[..., edge_margin:-edge_margin, edge_margin:-edge_margin]
-    else:
-        koppen_geiger = None
-        
     if climate_folder is not None:
         # Initialize list to store climate data layers
         climate_layers = []
@@ -283,6 +244,7 @@ def process_single_file_base(
         # Extract and process each climate variable
         for i in range(1, 20):
             fname = f'wc2.1_30s_bio_{i}.tif'
+            assert os.path.exists(os.path.join(climate_folder, fname)), f"Climate file {fname} not found in {climate_folder}"
             climate_data = extract_mask_from_tiffs(os.path.join(climate_folder, fname), bounds).astype(np.float32)
             if np.isnan(climate_data).all():
                 climate_data = np.nan * np.ones((lowres_size, lowres_size), dtype=np.float32)
@@ -298,14 +260,11 @@ def process_single_file_base(
     else:
         climate = None
     
+    size_ratio = highres_size // lowres_size
     highres_dem = np.sign(highres_dem) * np.sqrt(np.abs(highres_dem))
-    residual, lowres_dem = laplacian_encode(highres_dem, lowres_size - edge_margin * 2, lowres_sigma)
+    lowres_exact = skimage.measure.block_reduce(highres_dem, (size_ratio, size_ratio), np.median)
+    residual, lowfreq = laplacian_encode(highres_dem, lowres_size - edge_margin * 2, lowres_sigma)
     
-    if landcover_mini is not None and climate is not None:
-        assert climate.shape[-2:] == landcover_mini.shape[-2:] == lowres_dem.shape[-2:], f"Shapes: {climate.shape[-2:]} {landcover_mini.shape[-2:]} {lowres_dem.shape[-2:]}"
-    if landcover is not None and highres_dem is not None:
-        assert landcover.shape[-2:] == highres_dem.shape[-2:], f"Shapes: {landcover.shape[-2:]} {highres_dem.shape[-2:]}"
-        
     highres_chunk_size = (highres_size - highres_margin * 2) // num_chunks
     lowres_chunk_size = (lowres_size - edge_margin * 2) // num_chunks
     chunks_data = []
@@ -322,17 +281,13 @@ def process_single_file_base(
             lowres_end_h = min(lowres_start_h + lowres_chunk_size, lowres_size)
             lowres_end_w = min(lowres_start_w + lowres_chunk_size, lowres_size)
             
-            pct_land = np.mean(lowres_dem[..., lowres_start_h:lowres_end_h, lowres_start_w:lowres_end_w] > 0)
+            pct_land = np.mean(lowfreq[..., lowres_start_h:lowres_end_h, lowres_start_w:lowres_end_w] > 0)
             
             chunks_data.append({
                 'residual': residual[..., highres_start_h:highres_end_h, highres_start_w:highres_end_w],
-                'highfreq': highres_dem[..., highres_start_h:highres_end_h, highres_start_w:highres_end_w],
-                'lowfreq': lowres_dem[..., lowres_start_h:lowres_end_h, lowres_start_w:lowres_end_w],
-                'landcover': landcover[..., highres_start_h:highres_end_h, highres_start_w:highres_end_w] if landcover is not None else None,
-                'landcover_mini': landcover_mini[..., lowres_start_h:lowres_end_h, lowres_start_w:lowres_end_w] if landcover_mini is not None else None,
-                'watercover': watercover[..., highres_start_h:highres_end_h, highres_start_w:highres_end_w] if watercover is not None else None,
-                'koppen_geiger': koppen_geiger[..., lowres_start_h:lowres_end_h, lowres_start_w:lowres_end_w] if koppen_geiger is not None else None,
+                'lowfreq': lowfreq[..., lowres_start_h:lowres_end_h, lowres_start_w:lowres_end_w],
                 'climate': climate[..., lowres_start_h:lowres_end_h, lowres_start_w:lowres_end_w] if climate is not None else None,
+                'lowres_exact': lowres_exact[..., lowres_start_h:lowres_end_h, lowres_start_w:lowres_end_w],
                 'pct_land': pct_land,
                 'chunk_id': chunk_id,
                 'subchunk_id': f'chunk_{chunk_h}_{chunk_w}'
@@ -350,9 +305,6 @@ class ElevationDataset(torch.utils.data.Dataset):
                  lowres_size,
                  lowres_sigma,
                  num_chunks=1,
-                 landcover_folder=None,
-                 watercover_folder=None,
-                 koppen_geiger_folder=None,
                  climate_folder=None,
                  skip_chunk_ids=None,
                  edge_margin=0):
@@ -365,9 +317,6 @@ class ElevationDataset(torch.utils.data.Dataset):
         self.lowres_size = lowres_size
         self.lowres_sigma = lowres_sigma
         self.num_chunks = num_chunks
-        self.landcover_folder = landcover_folder
-        self.watercover_folder = watercover_folder
-        self.koppen_geiger_folder = koppen_geiger_folder
         self.climate_folder = climate_folder
         if skip_chunk_ids is not None:
             skip_chunk_ids = set(str(x) for x in skip_chunk_ids)
@@ -387,8 +336,5 @@ class ElevationDataset(torch.utils.data.Dataset):
                                         self.lowres_size,
                                         self.lowres_sigma,
                                         self.num_chunks, 
-                                        self.landcover_folder, 
-                                        self.watercover_folder,
-                                        self.koppen_geiger_folder,
                                         self.climate_folder,
                                         self.edge_margin)

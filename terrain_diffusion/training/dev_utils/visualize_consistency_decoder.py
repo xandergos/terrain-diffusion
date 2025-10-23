@@ -14,7 +14,7 @@ import matplotlib
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.widgets import Button
+from matplotlib.widgets import Button, Slider
 import yaml
 from confection import Config, registry
 from torch.utils.data import DataLoader
@@ -37,9 +37,16 @@ class DecoderVisualizer:
         self.current_idx = 0
         self.batch_idx = 0
         
-        # Setup matplotlib figure - hardcoded for 2 channels (residual + water)
-        self.fig, self.axes = plt.subplots(2, 2, figsize=(12, 8))
-        self.fig.suptitle('Decoder Reconstruction Comparison (Residual + Water)', fontsize=16)
+        # Interactive midpoint in t-space (default 1.1); slider operates in s = log(tan(t)) space
+        self.midpoint_t = 1.1
+        self._midpoint_s = float(np.tan(self.midpoint_t)) * 0.5
+        
+        # Flag to control whether to apply second timestep
+        self.use_second_timestep = True
+        
+        # Setup matplotlib figure - single channel (residual)
+        self.fig, self.axes = plt.subplots(2, 1, figsize=(8, 8))
+        self.fig.suptitle('Decoder Reconstruction Comparison (Residual)', fontsize=16)
         
         # Add navigation buttons only in interactive mode
         if not headless:
@@ -54,23 +61,34 @@ class DecoderVisualizer:
         # Create button axes
         ax_prev = plt.axes([0.1, 0.02, 0.1, 0.04])
         ax_next = plt.axes([0.21, 0.02, 0.1, 0.04])
-        ax_batch_prev = plt.axes([0.4, 0.02, 0.15, 0.04])
-        ax_batch_next = plt.axes([0.56, 0.02, 0.15, 0.04])
+        ax_batch_next = plt.axes([0.4, 0.02, 0.15, 0.04])
+        ax_toggle_t2 = plt.axes([0.57, 0.02, 0.15, 0.04])
         ax_save = plt.axes([0.8, 0.02, 0.1, 0.04])
+        # Slider axis (s = log(tan(t)))
+        ax_slider = plt.axes([0.1, 0.07, 0.65, 0.03])
         
         # Create buttons
         self.btn_prev = Button(ax_prev, 'Previous')
         self.btn_next = Button(ax_next, 'Next')
-        self.btn_batch_prev = Button(ax_batch_prev, 'Previous Batch')
         self.btn_batch_next = Button(ax_batch_next, 'Next Batch')
         self.btn_save = Button(ax_save, 'Save')
+        self.btn_toggle_t2 = Button(ax_toggle_t2, 'Disable t2')
+        # Create logarithmic slider controlling u = tan(t), label indicates log scale
+        self.sld_mid_s = Slider(
+            ax_slider,
+            'log(tan t)',
+            valmin=float(np.log(0.01)),
+            valmax=float(np.log(20.0)),
+            valinit=float(np.log(self._midpoint_s)),
+        )
         
         # Connect button callbacks
         self.btn_prev.on_clicked(self.prev_image)
         self.btn_next.on_clicked(self.next_image)
-        self.btn_batch_prev.on_clicked(self.prev_batch)
         self.btn_batch_next.on_clicked(self.next_batch)
         self.btn_save.on_clicked(self.save_current)
+        self.btn_toggle_t2.on_clicked(self.toggle_second_timestep)
+        self.sld_mid_s.on_changed(self.on_slider_change)
         
     def load_next_batch(self):
         """Load next batch from dataloader"""
@@ -83,24 +101,27 @@ class DecoderVisualizer:
             self.current_batch = next(self.data_iter)
             self.current_batch = recursive_to(self.current_batch, self.device)
         
-        # Generate reconstructions
+        # Generate reconstructions using current midpoint t
+        self.compute_reconstructions()
+        self.current_idx = 0
+        self.batch_idx += 1
+        
+    def compute_reconstructions(self):
+        """Compute reconstructions for the current batch using self.midpoint_t."""
+        if self.current_batch is None:
+            return
+        
         self.model.eval()
         with torch.no_grad():
             images = self.current_batch['image']
             cond_img = self.current_batch.get('cond_img')
             conditional_inputs = self.current_batch.get('cond_inputs')
             
-            # Prepare input for encoding
-            scaled_clean_images = images
-            if cond_img is not None:
-                scaled_clean_images = torch.cat([scaled_clean_images, cond_img], dim=1)
-            
-            # Encode and decode
             samples = torch.zeros_like(images)
-            
-            for t in [np.arctan(self.scheduler.sigmas[0] / self.scheduler.config.sigma_data), 
-                      1.1]:
-                t = torch.tensor([t], device=images.device).view(1, 1, 1, 1).expand(images.shape[0], 1, 1, 1)
+            t0 = np.arctan(self.scheduler.sigmas[0] / self.scheduler.config.sigma_data)
+            timesteps = [t0] + ([self.midpoint_t] if self.use_second_timestep else [])
+            for t_val in timesteps:
+                t = torch.tensor([t_val], device=images.device).view(1, 1, 1, 1).expand(images.shape[0], 1, 1, 1)
                 z = torch.randn_like(images) * self.scheduler.config.sigma_data
                 x_t = torch.cos(t) * samples + torch.sin(t) * z
                 
@@ -109,30 +130,9 @@ class DecoderVisualizer:
                 else:
                     model_input = x_t / self.scheduler.config.sigma_data
                 pred = -self.model(model_input, noise_labels=t.flatten(), conditional_inputs=conditional_inputs)
-                
                 samples = torch.cos(t) * x_t - torch.sin(t) * self.scheduler.config.sigma_data * pred
-        
-        self.reconstructions = samples / self.scheduler.config.sigma_data
-        self.current_idx = 0
-        self.batch_idx += 1
-        
-    def normalize_for_display(self, tensor, channel_type='residual'):
-        """Normalize tensor for display based on channel type"""
-        # Convert to numpy
-        if isinstance(tensor, torch.Tensor):
-            tensor = tensor.cpu().numpy()
-        
-        if channel_type == 'residual':
-            tensor = tensor
-        elif channel_type == 'water_real':
-            # For water coverage real data: already 0-1, just clamp
-            tensor = np.clip(tensor, 0, 1)
-        elif channel_type == 'water_logits':
-            # For water coverage logits: apply sigmoid to convert to probabilities
-            tensor = 1 / (1 + np.exp(-tensor))  # sigmoid
-            tensor = np.clip(tensor, 0, 1)
             
-        return tensor
+            self.reconstructions = samples / self.scheduler.config.sigma_data
         
     def update_display(self):
         """Update the display with current images"""
@@ -144,33 +144,29 @@ class DecoderVisualizer:
             self.current_idx = 0
             
         # Get current images
-        real_img = self.current_batch['image'][self.current_idx]
+        real_img = self.current_batch['image'][self.current_idx] / self.scheduler.config.sigma_data
         recon_img = self.reconstructions[self.current_idx]
         
         # Clear all axes
         for ax in self.axes.flat:
             ax.clear()
             
-        # Hardcoded for exactly 2 channels: residual (0) and water (1)
-        channel_names = ['Residual', 'Water Coverage']
-        channel_types = ['residual', 'water_real']  # For real images
-        recon_channel_types = ['residual', 'water_real']  # For reconstructions
+        # Single channel: residual (index 0)
+        channel_names = ['Residual']
         
-        for i in range(2):  # Exactly 2 channels
-            # Set vmin/vmax for water coverage channels
-            vmin, vmax = (0, 1) if i == 1 else (None, None)  # Water channel uses 0-1 range
-            
-            # Real image
-            real_channel = self.normalize_for_display(real_img[i], channel_types[i])
-            self.axes[0, i].imshow(real_channel, cmap='viridis', vmin=vmin, vmax=vmax)
-            self.axes[0, i].set_title(f'Real - {channel_names[i]}')
-            self.axes[0, i].axis('off')
-            
-            # Reconstructed image
-            recon_channel = self.normalize_for_display(recon_img[i], recon_channel_types[i])
-            self.axes[1, i].imshow(recon_channel, cmap='viridis', vmin=vmin, vmax=vmax)
-            self.axes[1, i].set_title(f'Reconstruction - {channel_names[i]}')
-            self.axes[1, i].axis('off')
+        vmin, vmax = (torch.min(real_img).item(), torch.max(real_img).item())
+        
+        # Real image
+        real_channel = real_img[0]
+        self.axes[0].imshow(real_channel.cpu().numpy(), cmap='viridis', vmin=vmin, vmax=vmax)
+        self.axes[0].set_title(f'Real - {channel_names[0]}')
+        self.axes[0].axis('off')
+        
+        # Reconstructed image
+        recon_channel = recon_img[0]
+        self.axes[1].imshow(recon_channel.cpu().numpy(), cmap='viridis', vmin=vmin, vmax=vmax)
+        self.axes[1].set_title(f'Reconstruction - {channel_names[0]}')
+        self.axes[1].axis('off')
             
         # Update title with current position
         self.fig.suptitle(f'Decoder Reconstruction - Batch {self.batch_idx}, Image {self.current_idx + 1}/{batch_size}', fontsize=16)
@@ -185,8 +181,20 @@ class DecoderVisualizer:
         self.fig.text(0.5, 0.95, error_text, ha='center', fontsize=12)
         
         plt.tight_layout()
-        plt.subplots_adjust(bottom=0.1, top=0.9)
+        # Leave more space at bottom for slider and buttons
+        plt.subplots_adjust(bottom=0.16, top=0.9)
         self.fig.canvas.draw()
+
+    def on_slider_change(self, s_val):
+        """Slider callback: update midpoint t using u=tan(t) from log slider and refresh."""
+        # Map slider value from log space back to linear u = tan(t)
+        u_val = float(np.exp(s_val))
+        self.midpoint_t = float(np.arctan(u_val / 0.5))
+        
+        # Maintain internal s for consistency
+        self._midpoint_s = u_val
+        self.compute_reconstructions()
+        self.update_display()
         
     def prev_image(self, event):
         """Go to previous image in current batch"""
@@ -219,6 +227,13 @@ class DecoderVisualizer:
             filename = f'decoder_comparison_batch{self.batch_idx}_img{self.current_idx + 1}.png'
             self.fig.savefig(filename, dpi=150, bbox_inches='tight')
             print(f'Saved comparison to {filename}')
+    
+    def toggle_second_timestep(self, event):
+        """Toggle whether to use the second timestep in reconstruction"""
+        self.use_second_timestep = not self.use_second_timestep
+        self.btn_toggle_t2.label.set_text('Enable t2' if not self.use_second_timestep else 'Disable t2')
+        self.compute_reconstructions()
+        self.update_display()
     
     def save_samples(self, num_samples, output_dir='decoder_viz_output'):
         """Save multiple samples to disk (for headless mode)"""

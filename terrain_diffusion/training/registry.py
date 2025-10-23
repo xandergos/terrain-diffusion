@@ -1,11 +1,13 @@
 import catalogue
 from confection import registry
+from terrain_diffusion.models.mp_injection_generator import MPInjectionGenerator
+from terrain_diffusion.models.mp_injection_discriminator import MPInjectionDiscriminator
 from terrain_diffusion.training.datasets import *
 from terrain_diffusion.data.laplacian_encoder import *
 from terrain_diffusion.models.mp_discriminator import MPDiscriminator
 from terrain_diffusion.models.mp_generator import MPGenerator
 from terrain_diffusion.training.loss import CosineLRScheduler, SqrtLRScheduler, ConstantLRScheduler
-from terrain_diffusion.inference.scheduler.dpmsolver import EDMDPMSolverMultistepScheduler
+from terrain_diffusion.scheduler.dpmsolver import EDMDPMSolverMultistepScheduler
 from terrain_diffusion.models.edm_autoencoder import EDMAutoencoder
 from terrain_diffusion.models.edm_unet import EDMUnet2D
 from terrain_diffusion.training.trainers.autoencoder import AutoencoderTrainer
@@ -21,6 +23,8 @@ def build_registry():
     registry.model.register("unet", func=EDMUnet2D)
     registry.model.register("autoencoder", func=EDMAutoencoder)
     registry.model.register("generator", func=MPGenerator)
+    registry.model.register("injection_generator", func=MPInjectionGenerator)
+    registry.model.register("injection_discriminator", func=MPInjectionDiscriminator)
     registry.model.register("discriminator", func=MPDiscriminator)
     
     registry.lr_sched = catalogue.create("confection", "lr_sched", entry_points=False)
@@ -33,7 +37,7 @@ def build_registry():
     registry.dataset.register("h5_autoencoder", func=H5AutoencoderDataset)
     registry.dataset.register("h5_latents", func=H5LatentsDataset)
     registry.dataset.register("file_gan", func=FileGANDataset)
-    registry.dataset.register("gan", func=GANDataset)
+    registry.dataset.register("coarse", func=CoarseDataset)
     
     registry.trainer = catalogue.create("confection", "trainers", entry_points=False)
     registry.trainer.register("autoencoder", func=lambda: AutoencoderTrainer)

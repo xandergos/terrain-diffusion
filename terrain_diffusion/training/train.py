@@ -13,9 +13,17 @@ import wandb
 from torch.utils.data import DataLoader
 
 from terrain_diffusion.training.registry import build_registry
-from terrain_diffusion.training.utils import SerializableEasyDict as EasyDict, recursive_to
+from terrain_diffusion.training.utils import SerializableEasyDict, recursive_to
 from terrain_diffusion.training.utils import safe_rmtree, set_nested_value
 from terrain_diffusion.training.datasets.long_dataset import LongDataset
+
+
+def _register_safe_globals():
+    """Register all custom classes that are pickled in checkpoints as safe globals."""
+    torch.serialization.add_safe_globals([
+        np.core.multiarray.scalar,
+        SerializableEasyDict,
+    ])
 
 
 @click.command(context_settings=dict(ignore_unknown_options=True, allow_extra_args=True))
@@ -90,7 +98,7 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
     resolved = registry.resolve(config, validate=False)
     
     # Setup state and accelerator
-    state = EasyDict({'epoch': 0, 'step': 0, 'seen': 0})
+    state = SerializableEasyDict({'epoch': 0, 'step': 0, 'seen': 0})
     accelerator = Accelerator(
         mixed_precision=resolved['training']['mixed_precision'],
         gradient_accumulation_steps=resolved['training']['gradient_accumulation_steps'],
@@ -104,7 +112,7 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
         trainer.load_model_checkpoint(model_ckpt_path)
     
     train_dataset = resolved['train_dataset']
-    batch_size = config['training'].get('train_batch_size') or config['training']['batch_size']
+    batch_size = config['training']['batch_size']
 
     dataloader_kwargs = dict(resolved.get('dataloader_kwargs', {}))
     train_dataloader = DataLoader(
@@ -123,8 +131,8 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
         accelerator.register_for_checkpointing(module)
     
     if ckpt_path:
-        torch.serialization.add_safe_globals([np.core.multiarray.scalar])
-        accelerator.load_state(ckpt_path)
+        _register_safe_globals()
+        accelerator.load_state(ckpt_path, load_kwargs={"weights_only": False})
     
     print(f"Starting training at epoch {state['epoch']}, step {state['step']}")
     
@@ -174,7 +182,10 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
             # Update progress bar
             postfix = {}
             for k, v in stats_hist.items():
-                postfix[k] = f"{np.mean(v[-10:]):.4f}"
+                if k == 'lr':
+                    postfix[k] = f"{v[-1]:.4e}"
+                else:
+                    postfix[k] = f"{np.mean(v[-10:]):.4f}"
             progress_bar.set_postfix(postfix)
             progress_bar.update(1)
         
@@ -206,7 +217,7 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
             # Add evaluation metrics
             log_values.update(eval_metrics)
             
-            wandb.log(log_values, step=state['epoch'])
+            wandb.log(log_values, step=state['epoch'], commit=True)
             
             # Save checkpoints
             if state['epoch'] % config['logging']['temp_save_epochs'] == 0 and not debug_run:

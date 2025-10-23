@@ -40,12 +40,12 @@ class DiffusionTrainer(Trainer):
         
         autoencoder_path = self.config['evaluation'].get('kid_autoencoder_path')
         if autoencoder_path is not None:
-            autoencoder = EDMAutoencoder.from_pretrained(autoencoder_path)
-            autoencoder.eval()
-            autoencoder.requires_grad_(False)
-            autoencoder = torch.compile(autoencoder)
+            self.autoencoder = EDMUnet2D.from_pretrained(autoencoder_path)
+            self.autoencoder.eval()
+            self.autoencoder.requires_grad_(False)
+            self.autoencoder = torch.compile(self.autoencoder)
         else:
-            autoencoder = None
+            self.autoencoder = None
         
         print(f"Training model with {self.model.count_parameters()} parameters.")
     
@@ -189,16 +189,36 @@ class DiffusionTrainer(Trainer):
         return terrain_norm.to(torch.uint8)
     
     def _decode_latents_to_terrain(self, latents, lowfreq_input, autoencoder, scheduler):
-        """Decode latents to terrain using autoencoder and laplacian decoding."""
+        """Decode latents to terrain using consistency decoder and laplacian decoding."""
+        device = latents.device
+    
         latents_std = self.val_dataset.base_dataset.latents_std.to(latents.device)
         latents_mean = self.val_dataset.base_dataset.latents_mean.to(latents.device)
         sigma_data = scheduler.config.sigma_data
         
-        latent = (latents[:, :4] / latents_std + latents_mean) / sigma_data
-        highfreq = autoencoder.decode(latent)[:, :1]
-        highfreq = self.val_dataset.base_dataset.denormalize_residual(
-            highfreq, self.val_dataset.base_dataset.subset_resolutions[0]
-        )
+        latents = (latents / latents_std + latents_mean) / sigma_data
+        
+        # Build decoder conditioning by upsampling latent channels to target resolution
+        H, W = lowfreq_input.shape[-2]*8, lowfreq_input.shape[-1]*8
+        cond_img = torch.nn.functional.interpolate(latents, size=(H, W), mode='nearest')
+
+        # Two-step consistency update to reconstruct residual (+ optional water)
+        samples = torch.zeros(latents.shape[0], 1, H, W, device=device, dtype=latents.dtype)
+        t0 = torch.atan(scheduler.sigmas[0].to(device) / sigma_data)
+        for t_scalar in (t0,):
+            t = t_scalar.view(1, 1, 1, 1).expand(samples.shape[0], 1, 1, 1)
+            z = torch.randn_like(samples) * sigma_data
+            x_t = torch.cos(t) * samples + torch.sin(t) * z
+            model_input = torch.cat([x_t / sigma_data, cond_img], dim=1)
+            with torch.no_grad():
+                pred = -autoencoder(model_input, noise_labels=t.flatten(), conditional_inputs=[])
+            samples = torch.cos(t) * x_t - torch.sin(t) * sigma_data * pred
+
+        decoded = samples / sigma_data
+        residual = decoded[:, :1]
+
+        # Denormalize and compose terrain
+        highfreq = self.val_dataset.base_dataset.denormalize_residual(residual)
         lowfreq = self.val_dataset.base_dataset.denormalize_lowfreq(lowfreq_input)
         highfreq, lowfreq = laplacian_denoise(highfreq, lowfreq, sigma=5)
         return laplacian_decode(highfreq, lowfreq)
@@ -235,14 +255,21 @@ class DiffusionTrainer(Trainer):
                     cnoise = scheduler.trigflow_precondition_noise(sigma.view(-1).expand(samples.shape[0]))
                     
                     # Get model predictions
-                    x = torch.cat([scaled_input, cond_img], dim=1)
+                    if cond_img is not None:
+                        x = torch.cat([scaled_input, cond_img], dim=1)
+                    else:
+                        x = scaled_input
                     model_output = self.model(x, noise_labels=cnoise, conditional_inputs=conditional_inputs)
                     
                     samples = scheduler.step(model_output, t, samples).prev_sample
                 
                 # Decode latents to terrain
-                terrain = self._decode_latents_to_terrain(samples, images[:, 4:5], autoencoder, scheduler)
-                real_terrain = self._decode_latents_to_terrain(images, images[:, 4:5], autoencoder, scheduler)
+                terrain = self._decode_latents_to_terrain(samples[:, :4], samples[:, 4:5], autoencoder, scheduler)
+                ground_truth = batch.get('ground_truth')
+                if ground_truth is not None:
+                    real_terrain = ground_truth
+                else:
+                    real_terrain = self._decode_latents_to_terrain(images[:, :4], images[:, 4:5], autoencoder, scheduler)
                 
                 # Update KID metric for original terrain
                 kid.update(self._normalize_and_process_terrain(terrain), real=False)
@@ -299,8 +326,8 @@ class DiffusionTrainer(Trainer):
                     samples = scheduler.step(model_output, t, samples).prev_sample
                 
                 # Only evaluate first channel
-                samples = samples[:, :1]
-                real_samples = images[:, :1]
+                samples = samples[:, :1] / scheduler.config.sigma_data
+                real_samples = images[:, :1] / scheduler.config.sigma_data
                 
                 # Update KID metric for original samples
                 kid.update(self._normalize_and_process_terrain(samples), real=False)
@@ -323,10 +350,12 @@ class DiffusionTrainer(Trainer):
     def evaluate(self):
         """Perform evaluation and return metrics."""
         self.val_dataset.set_seed(self.config['training']['seed'] + 638)
+        dl_kwargs = self.resolved['dataloader_kwargs']
+        dl_kwargs['persistent_workers'] = False
         self.val_dataloader = DataLoader(
             self.val_dataset, 
             batch_size=self.config['training']['batch_size'],
-            **self.resolved['dataloader_kwargs']
+            num_workers=self.resolved['dataloader_kwargs']['num_workers'],
         )
         
         validation_stats = {'loss': []}
@@ -372,8 +401,20 @@ class DiffusionTrainer(Trainer):
             
             output = {'val/loss': np.mean(validation_stats['loss'])}
             if self.config['evaluation'].get('mode') == 'base':
+                self.val_dataset.set_seed(self.config['training']['seed'] + 7843)
+                self.val_dataloader = DataLoader(
+                    self.val_dataset, 
+                    batch_size=self.config['evaluation']['kid_batch_size']
+                )
+                val_dataloader_iter = iter(self.val_dataloader)
                 output.update(self._calculate_base_kid(val_dataloader_iter, generator))
             elif self.config['evaluation'].get('mode') == 'decoder':
+                self.val_dataset.set_seed(self.config['training']['seed'] + 7843)
+                self.val_dataloader = DataLoader(
+                    self.val_dataset, 
+                    batch_size=self.config['evaluation']['kid_batch_size']
+                )
+                val_dataloader_iter = iter(self.val_dataloader)
                 output.update(self._calculate_decoder_kid(val_dataloader_iter, generator))
             else:
                 print('No mode specified, skipping KID calculation')

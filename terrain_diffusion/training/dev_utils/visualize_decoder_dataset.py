@@ -28,7 +28,7 @@ import json
 from terrain_diffusion.training.datasets import LongDataset
 from terrain_diffusion.models.edm_autoencoder import EDMAutoencoder
 from terrain_diffusion.models.edm_unet import EDMUnet2D
-from terrain_diffusion.inference.scheduler.dpmsolver import EDMDPMSolverMultistepScheduler
+from terrain_diffusion.scheduler.dpmsolver import EDMDPMSolverMultistepScheduler
 from terrain_diffusion.training.registry import build_registry
 from terrain_diffusion.training.utils import recursive_to
 
@@ -135,7 +135,7 @@ class DecoderDatasetVisualizer:
                 h_down, w_down = H // 8, W // 8
                 latents = F.interpolate(cond_img, size=(h_down, w_down), mode='nearest')
                 decoded = self.model.decode(latents)
-                recon_residual = decoded[:, :1, :, :]
+                recon_residual = decoded[:, :1, :, :] * self.scheduler.config.sigma_data
             else:
                 images = real_image
                 cond_img = self.current_batch.get('cond_img')
@@ -208,12 +208,13 @@ class DecoderDatasetVisualizer:
             ax.clear()
 
         recon_np = recon.cpu().numpy()
-        self.axes[0].imshow(recon_np, cmap='terrain')
+        real_np = real.cpu().numpy()
+        vmin, vmax = real_np.min(), real_np.max()
+        self.axes[0].imshow(recon_np, cmap='terrain', vmin=vmin, vmax=vmax)
         self.axes[0].set_title('Reconstructed (AE from latents)')
         self.axes[0].axis('off')
 
-        real_np = real.cpu().numpy()
-        self.axes[1].imshow(real_np, cmap='terrain')
+        self.axes[1].imshow(real_np, cmap='terrain', vmin=vmin, vmax=vmax)
         self.axes[1].set_title('Real Residual')
         self.axes[1].axis('off')
 

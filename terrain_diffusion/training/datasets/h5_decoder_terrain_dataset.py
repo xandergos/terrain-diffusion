@@ -20,7 +20,8 @@ class H5DecoderTerrainDataset(Dataset):
                  clip_edges=True,
                  split=None,
                  residual_mean=None,
-                 residual_std=None):
+                 residual_std=None,
+                 sigma_data=0.5):
         """
         Args:
             h5_file (str): Path to the HDF5 file containing the dataset.
@@ -34,6 +35,7 @@ class H5DecoderTerrainDataset(Dataset):
             split (str): Split to use. Defaults to None (all splits).
             residual_mean (float): Mean for residual normalization. Defaults to None (will compute).
             residual_std (float): Std for residual normalization. Defaults to None (will compute).
+            sigma_data (float): Data standard deviation. Defaults to 0.5.
         """
         if subset_weights is None:
             subset_weights = [1] * len(pct_land_ranges)
@@ -45,6 +47,7 @@ class H5DecoderTerrainDataset(Dataset):
         self.subset_class_labels = subset_class_labels
         self.eval_dataset = eval_dataset
         self.clip_edges = clip_edges
+        self.sigma_data = sigma_data
         
         # Initialize keys
         num_subsets = len(subset_weights)
@@ -204,7 +207,7 @@ class H5DecoderTerrainDataset(Dataset):
             if rotate_k != 0:
                 data_residual = torch.rot90(data_residual, k=rotate_k, dims=[-2, -1])
                 
-        image = data_residual
+        image = data_residual * self.sigma_data
         
         cond_image = F.interpolate(sampled_latent[None], size=(self.crop_size, self.crop_size), mode='nearest')[0]
         
@@ -216,5 +219,5 @@ class H5DecoderTerrainDataset(Dataset):
         return {'image': image.float(), 'cond_img': cond_image, 'cond_inputs': cond_inputs, 'path': group_path}
         
     def denormalize_residual(self, residual):
-        return (residual * self.residual_std) + self.residual_mean
+        return (residual / self.sigma_data * self.residual_std) + self.residual_mean
 

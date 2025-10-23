@@ -4,6 +4,8 @@ import torch
 from torch.utils.data import Dataset
 import h5py
 
+from terrain_diffusion.data.laplacian_encoder import laplacian_decode
+
 
 class H5LatentsDataset(Dataset):
     """Dataset for training diffusion models to generate terrain latents."""
@@ -20,9 +22,12 @@ class H5LatentsDataset(Dataset):
                  sigma_data=0.5, 
                  clip_edges=True,
                  split=None,
-                 beauty_dist=None,
+                 beauty_dist=True,
                  residual_mean=None,
-                 residual_std=None):
+                 residual_std=None,
+                 cond_input_mean=None,
+                 cond_input_std=None,
+                 with_ground_truth=False):
         """
         Args:
             h5_file (str): Path to the HDF5 file containing the dataset.
@@ -37,8 +42,12 @@ class H5LatentsDataset(Dataset):
             sigma_data (float, optional): Data standard deviation. Defaults to 0.5.
             clip_edges (bool, optional): Whether to clip edges when cropping. Defaults to True.
             split (str, optional): Split to use. Defaults to None (all splits).
-            beauty_dist (list, optional): Weights for sampling beauty scores 1-5. 
-                                        Must sum to 1. Defaults to uniform distribution.
+            beauty_dist (list[bool], optional): Whether to use random beauty distribution for each subset. Defaults to [True] * len(subset_weights).
+            residual_mean (float, optional): Mean for residual normalization. Defaults to None.
+            residual_std (float, optional): Std for residual normalization. Defaults to None.
+            cond_input_mean (list, optional): Mean values for normalizing cond inputs. Defaults to None (will compute).
+            cond_input_std (list, optional): Standard deviation values for normalizing cond inputs. Defaults to None (will compute).
+            with_ground_truth (bool, optional): Whether to include the ground truth in the dataset. Defaults to False.
         """
         self.h5_file = h5_file
         self.crop_size = crop_size
@@ -52,7 +61,8 @@ class H5LatentsDataset(Dataset):
         self.split = split
         self.eval_dataset = eval_dataset
         self.clip_edges = clip_edges
-        self.beauty_dist = beauty_dist or None
+        self.beauty_dist = beauty_dist or [True] * len(subset_weights)
+        self.with_ground_truth = with_ground_truth
         
         num_subsets = len(subset_weights)
         assert len(pct_land_ranges) == len(subset_resolutions) == num_subsets, \
@@ -60,7 +70,7 @@ class H5LatentsDataset(Dataset):
         assert subset_class_labels is None or len(subset_class_labels) == num_subsets, \
             "Number of subset class labels must match number of subsets."
         
-        if beauty_dist is not None:
+        if self.beauty_dist != [False] * len(subset_weights):
             self.keys = [[set() for _ in range(5)] for _ in range(num_subsets)]
         else:
             self.keys = [set() for _ in range(num_subsets)]
@@ -85,13 +95,13 @@ class H5LatentsDataset(Dataset):
                         split_valid = split is None or dset.attrs['split'] == split
     
                         if pct_land_valid and split_valid:
-                            if beauty_dist is not None:
+                            if self.beauty_dist[i]:
                                 beauty_score = float(subchunk_group.attrs['beauty_score'])
                                 beauty_score = max(1, min(5, round(beauty_score))) - 1
                                 self.keys[i][beauty_score].add((chunk_id, res, subchunk_id))
                             else:
-                                self.keys[i].add((chunk_id, res, subchunk_id))
-        if beauty_dist is not None:
+                                self.keys[i][0].add((chunk_id, res, subchunk_id))
+        if self.beauty_dist != [False] * len(subset_weights):
             self.keys = [[list(subkeys) for subkeys in keys] for keys in self.keys]
             print("Using beauty distribution. Have sizes:", [[len(subkeys) for subkeys in keys] for keys in self.keys])
         else:
@@ -100,6 +110,25 @@ class H5LatentsDataset(Dataset):
         
         self.residual_mean = residual_mean
         self.residual_std = residual_std
+        
+        self.cond_input_mean = cond_input_mean or None
+        self.cond_input_std = cond_input_std or None
+        if self.cond_input_mean is None:
+            self.compute_cond_input_stats()
+    
+    def compute_cond_input_stats(self):
+        values = []
+        for i in range(1024):
+            elem = self.__getitem__(i)
+            values.append(elem['cond_inputs'][0])
+        values = torch.stack(values).numpy()
+        self.cond_input_mean = [values[:, :16].mean(), values[:, 16:32].mean(), 
+                                values[:, 32:33].mean(), values[:, 33:34].mean(), values[:, 34:35].mean(), values[:, 35:36].mean(),
+                                values[:, 36:52].mean(), values[:, 52:57].mean()]
+        self.cond_input_std = [values[:, :16].std(), values[:, 16:32].std(), 
+                               values[:, 32:33].std(), values[:, 33:34].std(), values[:, 34:35].std(), values[:, 35:36].std(),
+                               values[:, 36:52].std(), values[:, 52:57].std()]
+        print(f"Computed cond input mean: {self.cond_input_mean}, std: {self.cond_input_std}")
 
     def __len__(self):
         return 100000
@@ -117,13 +146,18 @@ class H5LatentsDataset(Dataset):
         subset_idx = random.choices(range(len(self.subset_weights)), weights=self.subset_weights, k=1)[0]
         class_label = self.subset_class_labels[subset_idx] if self.subset_class_labels is not None else None
         
-        if self.beauty_dist is not None:
-            beauty_score = random.choices(range(5), weights=self.beauty_dist[subset_idx], k=1)[0]
+        if self.beauty_dist[subset_idx]:
+            subset_lens = torch.tensor([len(self.keys[subset_idx][i]) for i in range(5)]).float()
+            baseline_probs = torch.log(subset_lens / subset_lens.sum())
+            histogram_raw = torch.randn(5)
+            histogram = torch.softmax(histogram_raw + baseline_probs, dim=0)
+            beauty_score = random.choices(range(5), weights=histogram.tolist(), k=1)[0]
             index = random.randrange(len(self.keys[subset_idx][beauty_score]))
             chunk_id, res, subchunk_id = self.keys[subset_idx][beauty_score][index]
         else:
-            index = random.randrange(len(self.keys[subset_idx]))
-            chunk_id, res, subchunk_id = self.keys[subset_idx][index]
+            histogram_raw = torch.randn(5)
+            index = random.randrange(len(self.keys[subset_idx][0]))
+            chunk_id, res, subchunk_id = self.keys[subset_idx][0][index]
         
         with h5py.File(self.h5_file, 'r') as f:
             group_path = f"{res}/{chunk_id}/{subchunk_id}"
@@ -178,18 +212,103 @@ class H5LatentsDataset(Dataset):
                 data_lowfreq = torch.rot90(data_lowfreq, k=rotate_k, dims=[-2, -1])
             data_lowfreq = data_lowfreq.float()
             data_lowfreq = (data_lowfreq - LOWFREQ_MEAN) / LOWFREQ_STD * self.sigma_data
-            lowfreq_mean = torch.mean(data_lowfreq) / self.sigma_data
+            
+            if self.with_ground_truth:
+                data_residual = torch.from_numpy(f[f"{group_path}/residual"][li*8:li*8+lh*8, lj*8:lj*8+lw*8])[None]
+                data_residual = data_residual.float()
+                if flip:
+                    data_residual = torch.flip(data_residual, dims=[-1])
+                if rotate_k != 0:
+                    data_residual = torch.rot90(data_residual, k=rotate_k, dims=[-2, -1])
+                ground_truth = laplacian_decode(data_residual, self.denormalize_lowfreq(data_lowfreq / self.sigma_data))
+            
+            #
+            # CONDITIONING DATA
+            #
+            HALO = self.crop_size // 2
+            data_lowres_exact = f[f"{group_path}/lowres_exact"]  # same shape as data_lowfreq
+            H, W = data_lowres_exact.shape
+
+            # Source window (pre-transform coords)
+            si0 = li - HALO
+            sj0 = lj - HALO
+            si1 = li + lh + HALO
+            sj1 = lj + lw + HALO
+
+            # Clip to bounds to avoid loading the whole dataset
+            ri0 = max(0, si0)
+            rj0 = max(0, sj0)
+            ri1 = min(H, si1)
+            rj1 = min(W, sj1)
+
+            # Allocate output and place the read chunk
+            out = np.full((lh + 2*HALO, lw + 2*HALO), np.nan, dtype=np.float32)
+            if ri1 > ri0 and rj1 > rj0:
+                di0 = ri0 - si0
+                dj0 = rj0 - sj0
+                chunk = data_lowres_exact[ri0:ri1, rj0:rj1]  # only load what we need
+                chunk = chunk
+                out[di0:di0 + (ri1 - ri0), dj0:dj0 + (rj1 - rj0)] = chunk
+
+            lowres_exact = torch.from_numpy(out)[None]  # [1, crop_size+64, crop_size+64]
+
+            # Apply same forward transforms as lowfreq to keep alignment
+            if flip:
+                lowres_exact = torch.flip(lowres_exact, dims=[-1])
+            if rotate_k != 0:
+                lowres_exact = torch.rot90(lowres_exact, k=rotate_k, dims=[-2, -1])
+              
+            means = lowres_exact.reshape(1, 4, HALO, 4, HALO).mean(dim=(2, 4))
+            p5 = torch.from_numpy(np.quantile(lowres_exact.reshape(1, 4, HALO, 4, HALO).numpy(), 0.05, axis=(2, 4)))
+            mask = torch.isnan(means).float()
+            climate_means = f[f"{group_path}/climate"][[0, 3, 11, 14], li:li+lh, lj:lj+lw].mean(axis=(1, 2))
+            means = means.nan_to_num(0)
+            p5 = p5.nan_to_num(0)
+            climate_means[np.isnan(climate_means)] = np.random.randn(*climate_means[np.isnan(climate_means)].shape)
+            
+            # Calculate expected values
+            s = data_lowres_exact.shape[0]
+            avail = (s - self.crop_size + 1)**2
+            safe = (s - self.crop_size - 2*HALO + 1)**2
+            corner = HALO**2 * 4
+            edge = avail - safe - corner
+            pct_masked = 1 - (safe * 16 + edge * 12 + corner * 9) / (16 * avail)
+        
+            #means = (means - LOWFREQ_MEAN) / LOWFREQ_STD
+            #p5 = (p5 - LOWFREQ_MEAN) / LOWFREQ_STD
+            climate_means = (climate_means - np.array([16.56, 611.74, 844.66, 382.48])) / np.array([10.15, 440.68, 771.98, 335.62])
+            climate_means = torch.from_numpy(climate_means)
+            
+            mask = (mask - pct_masked) / np.sqrt(pct_masked * (1 - pct_masked))
+            climate_means = climate_means / np.sqrt(1 - pct_masked)
+            p5 = p5 / np.sqrt(1 - pct_masked)
+            means = means / np.sqrt(1 - pct_masked)
+            
+            if self.cond_input_mean is not None:
+                means = (means - self.cond_input_mean[0]) / self.cond_input_std[0]
+                p5 = (p5 - self.cond_input_mean[1]) / self.cond_input_std[1]
+                climate_means[0] = (climate_means[0] - self.cond_input_mean[2]) / self.cond_input_std[2]
+                climate_means[1] = (climate_means[1] - self.cond_input_mean[3]) / self.cond_input_std[3]
+                climate_means[2] = (climate_means[2] - self.cond_input_mean[4]) / self.cond_input_std[4]
+                climate_means[3] = (climate_means[3] - self.cond_input_mean[5]) / self.cond_input_std[5]
+                mask = (mask - self.cond_input_mean[6]) / self.cond_input_std[6]
+                histogram_raw = (histogram_raw - self.cond_input_mean[7]) / self.cond_input_std[7]
+            
+            cond_tensor = torch.cat([means.flatten(), p5.flatten(), climate_means.flatten(), mask.flatten(), histogram_raw, torch.ones(1, dtype=torch.float32)], dim=0)
             
         image = torch.cat([
             sampled_latent,
             data_lowfreq
         ], dim=0)
         
-        cond_inputs = [lowfreq_mean.reshape([]).float()]
+        cond_inputs = [cond_tensor.float()]
         if class_label is not None:
             cond_inputs += [torch.tensor(class_label)]
-            
-        return {'image': image.float(), 'cond_inputs': cond_inputs, 'path': group_path}
+        
+        out = {'image': image.float(), 'cond_inputs': cond_inputs, 'path': group_path}
+        if self.with_ground_truth:
+            out['ground_truth'] = ground_truth
+        return out
 
     def denormalize_residual(self, residual):
         return residual * self.residual_std + self.residual_mean

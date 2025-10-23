@@ -41,7 +41,7 @@ def load_model_from_checkpoint(checkpoint_path, ema_step=None, sigma_rel=None):
             config = json.load(f)
         config['ema']['checkpoint_folder'] = os.path.join(checkpoint_path, '..', 'phema')
         ema = PostHocEMA(model, **config['ema'])
-        ema.load_state_dict(torch.load(os.path.join(checkpoint_path, 'phema.pt'), map_location='cpu', weights_only=True))
+        ema.load_state_dict(torch.load(os.path.join(checkpoint_path, 'phema.pt'), map_location='cpu', weights_only=False))
         ema.gammas = tuple(ema_model.gamma for ema_model in ema.ema_models)
         ema.synthesize_ema_model(sigma_rel=sigma_rel, step=ema_step).copy_params_from_ema_to_model()
     else:
