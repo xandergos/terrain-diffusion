@@ -5,6 +5,7 @@ from torch.utils.data import Dataset
 import h5py
 
 from terrain_diffusion.data.laplacian_encoder import laplacian_decode
+from terrain_diffusion.models.mp_layers import mp_concat
 
 
 class H5LatentsDataset(Dataset):
@@ -27,7 +28,9 @@ class H5LatentsDataset(Dataset):
                  residual_std=None,
                  cond_input_mean=None,
                  cond_input_std=None,
-                 with_ground_truth=False):
+                 cond_input_dropout=0.0,
+                 cond_input_max_noise=0.0,
+                 val_dset=False):
         """
         Args:
             h5_file (str): Path to the HDF5 file containing the dataset.
@@ -47,7 +50,9 @@ class H5LatentsDataset(Dataset):
             residual_std (float, optional): Std for residual normalization. Defaults to None.
             cond_input_mean (list, optional): Mean values for normalizing cond inputs. Defaults to None (will compute).
             cond_input_std (list, optional): Standard deviation values for normalizing cond inputs. Defaults to None (will compute).
-            with_ground_truth (bool, optional): Whether to include the ground truth in the dataset. Defaults to False.
+            cond_input_dropout (float, optional): Probability of dropping out cond input pixels. Defaults to 0.0.
+            cond_input_max_noise (float, optional): Maximum noise for cond input pixels. Defaults to 0.0 (no noise).
+            val_dataset (bool, optional): Whether to include the ground truth in the dataset, and zero noise and dropout. Defaults to False.
         """
         self.h5_file = h5_file
         self.crop_size = crop_size
@@ -62,7 +67,9 @@ class H5LatentsDataset(Dataset):
         self.eval_dataset = eval_dataset
         self.clip_edges = clip_edges
         self.beauty_dist = beauty_dist or [True] * len(subset_weights)
-        self.with_ground_truth = with_ground_truth
+        self.val_dset = val_dset
+        self.cond_input_dropout = cond_input_dropout
+        self.cond_input_max_noise = cond_input_max_noise
         
         num_subsets = len(subset_weights)
         assert len(pct_land_ranges) == len(subset_resolutions) == num_subsets, \
@@ -119,15 +126,15 @@ class H5LatentsDataset(Dataset):
     def compute_cond_input_stats(self):
         values = []
         for i in range(1024):
-            elem = self.__getitem__(i)
+            elem = self.__getitem__(i, _raw_cond_inputs=True)
             values.append(elem['cond_inputs'][0])
         values = torch.stack(values).numpy()
         self.cond_input_mean = [values[:, :16].mean(), values[:, 16:32].mean(), 
                                 values[:, 32:33].mean(), values[:, 33:34].mean(), values[:, 34:35].mean(), values[:, 35:36].mean(),
-                                values[:, 36:52].mean(), values[:, 52:57].mean()]
+                                values[:, 36:52].mean()]
         self.cond_input_std = [values[:, :16].std(), values[:, 16:32].std(), 
                                values[:, 32:33].std(), values[:, 33:34].std(), values[:, 34:35].std(), values[:, 35:36].std(),
-                               values[:, 36:52].std(), values[:, 52:57].std()]
+                               values[:, 36:52].std()]
         print(f"Computed cond input mean: {self.cond_input_mean}, std: {self.cond_input_std}")
 
     def __len__(self):
@@ -137,8 +144,83 @@ class H5LatentsDataset(Dataset):
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
+        
+    def _get_cond_inputs(self, f, group_path, li, lj, lh, lw, flip, rotate_k, histogram_raw, raw=False):
+        """raw = for mean/std calculation, not for training"""
+        HALO = self.crop_size // 2
+        data_lowres_exact = f[f"{group_path}/lowres_exact"]  # same shape as data_lowfreq
+        H, W = data_lowres_exact.shape
 
-    def __getitem__(self, idx):
+        # Source window (pre-transform coords)
+        si0 = li - HALO
+        sj0 = lj - HALO
+        si1 = li + lh + HALO
+        sj1 = lj + lw + HALO
+
+        # Clip to bounds to avoid loading the whole dataset
+        ri0 = max(0, si0)
+        rj0 = max(0, sj0)
+        ri1 = min(H, si1)
+        rj1 = min(W, sj1)
+
+        # Allocate output and place the read chunk
+        out = np.full((lh + 2*HALO, lw + 2*HALO), np.nan, dtype=np.float32)
+        if ri1 > ri0 and rj1 > rj0:
+            di0 = ri0 - si0
+            dj0 = rj0 - sj0
+            chunk = data_lowres_exact[ri0:ri1, rj0:rj1]  # only load what we need
+            chunk = chunk
+            out[di0:di0 + (ri1 - ri0), dj0:dj0 + (rj1 - rj0)] = chunk
+
+        lowres_exact = torch.from_numpy(out)[None]  # [1, crop_size+64, crop_size+64]
+
+        # Apply same forward transforms as lowfreq to keep alignment
+        if flip:
+            lowres_exact = torch.flip(lowres_exact, dims=[-1])
+        if rotate_k != 0:
+            lowres_exact = torch.rot90(lowres_exact, k=rotate_k, dims=[-2, -1])
+          
+        means = lowres_exact.reshape(1, 4, HALO, 4, HALO).mean(dim=(2, 4))
+        p5 = torch.from_numpy(np.quantile(lowres_exact.reshape(1, 4, HALO, 4, HALO).numpy(), 0.05, axis=(2, 4)))
+        mask = 1 - torch.isnan(means).float()
+        climate_means = f[f"{group_path}/climate"][[0, 3, 11, 14], li:li+lh, lj:lj+lw].mean(axis=(1, 2))
+        means = means.nan_to_num(0)
+        p5 = p5.nan_to_num(0)
+        climate_means[np.isnan(climate_means)] = np.random.randn(*climate_means[np.isnan(climate_means)].shape)
+        
+        # apply dropout
+        if not self.val_dset:
+            mask = mask * (torch.rand_like(mask) > self.cond_input_dropout).float()
+            means = means * mask
+            p5 = p5 * mask
+        
+        # apply noise
+        if not raw and not self.val_dset:
+            noise_level = torch.rand(1)
+            means = (means + noise_level * torch.randn_like(means) * self.cond_input_max_noise) / np.sqrt(1 + (noise_level*self.cond_input_max_noise)**2)
+            p5 = (p5 + noise_level * torch.randn_like(p5) * self.cond_input_max_noise) / np.sqrt(1 + (noise_level*self.cond_input_max_noise)**2)
+            noise_level = (noise_level - 0.5) * np.sqrt(12)
+        else:
+            noise_level = torch.rand(1) if not self.val_dset else torch.tensor(-0.5 * np.sqrt(12), dtype=torch.float32)
+    
+        climate_means = torch.from_numpy(climate_means)
+        
+        if self.cond_input_mean is not None:
+            means = (means - self.cond_input_mean[0]) / self.cond_input_std[0]
+            p5 = (p5 - self.cond_input_mean[1]) / self.cond_input_std[1]
+            climate_means[0] = (climate_means[0] - self.cond_input_mean[2]) / self.cond_input_std[2]
+            climate_means[1] = (climate_means[1] - self.cond_input_mean[3]) / self.cond_input_std[3]
+            climate_means[2] = (climate_means[2] - self.cond_input_mean[4]) / self.cond_input_std[4]
+            climate_means[3] = (climate_means[3] - self.cond_input_mean[5]) / self.cond_input_std[5]
+            mask = (mask - self.cond_input_mean[6]) / self.cond_input_std[6]
+        
+        if raw:
+            cond_tensor = torch.cat([means.flatten(), p5.flatten(), climate_means.flatten(), mask.flatten(), histogram_raw, noise_level], dim=0)
+        else:
+            cond_tensor = mp_concat([means.flatten(), p5.flatten(), climate_means.flatten(), mask.flatten(), histogram_raw, noise_level], dim=0)
+        return cond_tensor
+        
+    def __getitem__(self, idx, _raw_cond_inputs=False):
         LOWFREQ_MEAN = -31.4
         LOWFREQ_STD = 38.6
         
@@ -213,7 +295,7 @@ class H5LatentsDataset(Dataset):
             data_lowfreq = data_lowfreq.float()
             data_lowfreq = (data_lowfreq - LOWFREQ_MEAN) / LOWFREQ_STD * self.sigma_data
             
-            if self.with_ground_truth:
+            if self.val_dset:
                 data_residual = torch.from_numpy(f[f"{group_path}/residual"][li*8:li*8+lh*8, lj*8:lj*8+lw*8])[None]
                 data_residual = data_residual.float()
                 if flip:
@@ -222,79 +304,7 @@ class H5LatentsDataset(Dataset):
                     data_residual = torch.rot90(data_residual, k=rotate_k, dims=[-2, -1])
                 ground_truth = laplacian_decode(data_residual, self.denormalize_lowfreq(data_lowfreq / self.sigma_data))
             
-            #
-            # CONDITIONING DATA
-            #
-            HALO = self.crop_size // 2
-            data_lowres_exact = f[f"{group_path}/lowres_exact"]  # same shape as data_lowfreq
-            H, W = data_lowres_exact.shape
-
-            # Source window (pre-transform coords)
-            si0 = li - HALO
-            sj0 = lj - HALO
-            si1 = li + lh + HALO
-            sj1 = lj + lw + HALO
-
-            # Clip to bounds to avoid loading the whole dataset
-            ri0 = max(0, si0)
-            rj0 = max(0, sj0)
-            ri1 = min(H, si1)
-            rj1 = min(W, sj1)
-
-            # Allocate output and place the read chunk
-            out = np.full((lh + 2*HALO, lw + 2*HALO), np.nan, dtype=np.float32)
-            if ri1 > ri0 and rj1 > rj0:
-                di0 = ri0 - si0
-                dj0 = rj0 - sj0
-                chunk = data_lowres_exact[ri0:ri1, rj0:rj1]  # only load what we need
-                chunk = chunk
-                out[di0:di0 + (ri1 - ri0), dj0:dj0 + (rj1 - rj0)] = chunk
-
-            lowres_exact = torch.from_numpy(out)[None]  # [1, crop_size+64, crop_size+64]
-
-            # Apply same forward transforms as lowfreq to keep alignment
-            if flip:
-                lowres_exact = torch.flip(lowres_exact, dims=[-1])
-            if rotate_k != 0:
-                lowres_exact = torch.rot90(lowres_exact, k=rotate_k, dims=[-2, -1])
-              
-            means = lowres_exact.reshape(1, 4, HALO, 4, HALO).mean(dim=(2, 4))
-            p5 = torch.from_numpy(np.quantile(lowres_exact.reshape(1, 4, HALO, 4, HALO).numpy(), 0.05, axis=(2, 4)))
-            mask = torch.isnan(means).float()
-            climate_means = f[f"{group_path}/climate"][[0, 3, 11, 14], li:li+lh, lj:lj+lw].mean(axis=(1, 2))
-            means = means.nan_to_num(0)
-            p5 = p5.nan_to_num(0)
-            climate_means[np.isnan(climate_means)] = np.random.randn(*climate_means[np.isnan(climate_means)].shape)
-            
-            # Calculate expected values
-            s = data_lowres_exact.shape[0]
-            avail = (s - self.crop_size + 1)**2
-            safe = (s - self.crop_size - 2*HALO + 1)**2
-            corner = HALO**2 * 4
-            edge = avail - safe - corner
-            pct_masked = 1 - (safe * 16 + edge * 12 + corner * 9) / (16 * avail)
-        
-            #means = (means - LOWFREQ_MEAN) / LOWFREQ_STD
-            #p5 = (p5 - LOWFREQ_MEAN) / LOWFREQ_STD
-            climate_means = (climate_means - np.array([16.56, 611.74, 844.66, 382.48])) / np.array([10.15, 440.68, 771.98, 335.62])
-            climate_means = torch.from_numpy(climate_means)
-            
-            mask = (mask - pct_masked) / np.sqrt(pct_masked * (1 - pct_masked))
-            climate_means = climate_means / np.sqrt(1 - pct_masked)
-            p5 = p5 / np.sqrt(1 - pct_masked)
-            means = means / np.sqrt(1 - pct_masked)
-            
-            if self.cond_input_mean is not None:
-                means = (means - self.cond_input_mean[0]) / self.cond_input_std[0]
-                p5 = (p5 - self.cond_input_mean[1]) / self.cond_input_std[1]
-                climate_means[0] = (climate_means[0] - self.cond_input_mean[2]) / self.cond_input_std[2]
-                climate_means[1] = (climate_means[1] - self.cond_input_mean[3]) / self.cond_input_std[3]
-                climate_means[2] = (climate_means[2] - self.cond_input_mean[4]) / self.cond_input_std[4]
-                climate_means[3] = (climate_means[3] - self.cond_input_mean[5]) / self.cond_input_std[5]
-                mask = (mask - self.cond_input_mean[6]) / self.cond_input_std[6]
-                histogram_raw = (histogram_raw - self.cond_input_mean[7]) / self.cond_input_std[7]
-            
-            cond_tensor = torch.cat([means.flatten(), p5.flatten(), climate_means.flatten(), mask.flatten(), histogram_raw, torch.ones(1, dtype=torch.float32)], dim=0)
+            cond_tensor = self._get_cond_inputs(f, group_path, li, lj, lh, lw, flip, rotate_k, histogram_raw, _raw_cond_inputs)
             
         image = torch.cat([
             sampled_latent,

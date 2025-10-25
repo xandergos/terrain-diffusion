@@ -252,6 +252,7 @@ class DiffusionTrainer(Trainer):
                         x = torch.cat([scaled_input, cond_img], dim=1)
                     else:
                         x = scaled_input
+                    self.model.eval()
                     model_output = self.model(x, noise_labels=cnoise, conditional_inputs=conditional_inputs)
                     
                     samples = scheduler.step(model_output, t, samples).prev_sample
@@ -314,6 +315,7 @@ class DiffusionTrainer(Trainer):
                     
                     # Get model predictions
                     x = torch.cat([scaled_input, cond_img], dim=1)
+                    self.model.eval()
                     model_output = self.model(x, noise_labels=cnoise, conditional_inputs=conditional_inputs)
                     
                     samples = scheduler.step(model_output, t, samples).prev_sample
