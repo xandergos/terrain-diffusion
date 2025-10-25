@@ -51,15 +51,8 @@ class DiffusionTrainer(Trainer):
     
     def _get_optimizer(self, model, config):
         """Get optimizer based on config settings."""
-        from heavyball.foreach_soap import ForeachSOAP
-        from heavyball.foreach_adamw import ForeachAdamW
-        
         if config['optimizer']['type'] == 'adam':
             optimizer = torch.optim.Adam(model.parameters(), **config['optimizer']['kwargs'])
-        elif config['optimizer']['type'] == 'heavyball-adam':
-            optimizer = ForeachAdamW(model.parameters(), **config['optimizer']['kwargs'])
-        elif config['optimizer']['type'] == 'soap':
-            optimizer = ForeachSOAP(model.parameters(), **config['optimizer']['kwargs'])
         else:
             raise ValueError(f"Invalid optimizer type: {config['optimizer']['type']}")
         return optimizer

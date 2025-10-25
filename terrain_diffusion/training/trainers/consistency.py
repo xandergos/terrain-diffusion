@@ -63,16 +63,9 @@ class ConsistencyTrainer(Trainer):
     
     def _get_optimizer(self, model, config):
         """Get optimizer based on config settings."""
-        from heavyball.foreach_soap import ForeachSOAP
-        from heavyball.foreach_adamw import ForeachAdamW
-        
         opt_config = config['optimizer']
         if opt_config['type'] == 'adam':
             optimizer = torch.optim.Adam(model.parameters(), **opt_config['kwargs'])
-        elif opt_config['type'] == 'heavyball-adam':
-            optimizer = ForeachAdamW(model.parameters(), **opt_config['kwargs'])
-        elif opt_config['type'] == 'soap':
-            optimizer = ForeachSOAP(model.parameters(), **opt_config['kwargs'])
         else:
             raise ValueError(f"Unknown optimizer type: {opt_config['type']}")
         return optimizer

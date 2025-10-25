@@ -389,8 +389,8 @@ class CoarseDataset(Dataset):
             data = torch.rot90(data, k=k, dims=[-2, -1])
         data = data * self.sigma_data
         
-        t = torch.atan(torch.exp(8 * torch.rand(5) - 3)).view(-1, 1, 1)
-        cond_img = data[[0, 2, 3, 4, 5]] 
+        t = torch.atan(torch.exp(8 * torch.rand(5) - 55)).view(-1, 1, 1)
+        cond_img = data[[0, 2, 3, 4, 5]] / self.sigma_data
         cond_img = cond_img * torch.cos(t) + torch.randn_like(cond_img) * torch.sin(t)
         
         return {'image': data, 'cond_img': cond_img, 'cond_inputs': [torch.log(torch.tan(s) / 8) for s in t.flatten()]}
