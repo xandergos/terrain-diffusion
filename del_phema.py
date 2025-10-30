@@ -1,7 +1,7 @@
 import os
 import re
 
-checkpoint_dir = "checkpoints/diffusion_base-128x3/phema"
+checkpoint_dir = "checkpoints/autoencoder_x8/phema"
 
 if os.path.exists(checkpoint_dir):
     for filename in os.listdir(checkpoint_dir):

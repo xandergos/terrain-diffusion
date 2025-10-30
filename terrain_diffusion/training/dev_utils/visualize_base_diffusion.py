@@ -3,10 +3,9 @@
 Visualization script for diffusion model generation with autoencoder decoding.
 
 This script generates samples using a diffusion model and visualizes:
-- Generated latents, lowfreq, and climate channels
-- Decoded terrain (residual + water) from latents using an autoencoder
-- Climate channels (temperature, precipitation, seasonality)
-- Lowfreq and climate mask channels
+- Generated latents and lowfreq
+- Decoded terrain (residual) from latents using an autoencoder
+- Lowfreq channel
 
 The generation process follows the same approach as calc_base_fid.py, supporting
 both standard diffusion models and consistency models.
@@ -60,10 +59,9 @@ class BaseDiffusionVisualizer:
         self.batch_idx = 0
         
         # Setup matplotlib figure
-        # Layout: 2 rows x 4 columns
-        # Row 1: Merged Terrain (Lowfreq + Residual), Water Coverage, Lowfreq, Climate Mask
-        # Row 2: Temperature, Temp Seasonality, Precipitation, Precip Seasonality
-        self.fig, self.axes = plt.subplots(2, 4, figsize=(16, 8))
+        # Layout: 1 row x 2 columns
+        # Row: Merged Terrain (Lowfreq + Residual), Lowfreq
+        self.fig, self.axes = plt.subplots(1, 2, figsize=(12, 6))
         self.fig.suptitle('Diffusion Model Generated Samples', fontsize=16)
         
         # Add navigation buttons only in interactive mode
@@ -160,7 +158,7 @@ class BaseDiffusionVisualizer:
                     samples = torch.cos(t) * x_t - torch.sin(t) * self.scheduler.config.sigma_data * pred
             
             # Process generated samples
-            # samples = [latents (4ch), lowfreq (1ch), climate (4ch), climate_mask (1ch)]
+            # samples = [latents (4ch), lowfreq (1ch)]
             base_dataset = self.dataset.base_dataset if hasattr(self.dataset, 'base_dataset') else self.dataset
             latents_std = base_dataset.latents_std.to(samples.device)
             latents_mean = base_dataset.latents_mean.to(samples.device)
@@ -171,11 +169,9 @@ class BaseDiffusionVisualizer:
             with torch.autocast(device_type="cuda", dtype=self.dtype):
                 decoded = self.ae_model.decode(latent)
             highfreq = decoded[:, :1]
-            watercover = decoded[:, 1:2]
             
-            # Denormalize residual and watercover
+            # Denormalize residual
             highfreq = base_dataset.denormalize_residual(highfreq)
-            watercover = base_dataset.denormalize_watercover(watercover)
             
             # Denormalize lowfreq
             lowfreq = base_dataset.denormalize_lowfreq(samples[:, 4:5])
@@ -186,11 +182,10 @@ class BaseDiffusionVisualizer:
             
             # Store results
             self.merged_terrain = merged_terrain
-            self.watercover = watercover
             
-            # Store generated batch (including climate channels for visualization)
+            # Store generated batch
             self.current_batch = {
-                'image': samples,  # Full generated sample with all channels
+                'image': samples,
                 'path': [f'generated_sample_{i}' for i in range(samples.shape[0])]
             }
             
@@ -211,16 +206,6 @@ class BaseDiffusionVisualizer:
                 tensor = (tensor - tensor_min) / (tensor_max - tensor_min)
             else:
                 tensor = np.zeros_like(tensor)
-        elif channel_type == 'water_logits':
-            raise ValueError("water_logits channel type not supported for display")
-        elif channel_type == 'climate':
-            # For climate channels: normalize to 0-1 for display
-            tensor_min = tensor.min()
-            tensor_max = tensor.max()
-            if tensor_max > tensor_min:
-                tensor = (tensor - tensor_min) / (tensor_max - tensor_min)
-            else:
-                tensor = np.zeros_like(tensor)
         elif channel_type == 'lowfreq':
             # For lowfreq: normalize to 0-1 for display
             tensor_min = tensor.min()
@@ -229,9 +214,6 @@ class BaseDiffusionVisualizer:
                 tensor = (tensor - tensor_min) / (tensor_max - tensor_min)
             else:
                 tensor = np.zeros_like(tensor)
-        elif channel_type == 'mask':
-            # For mask: already 0-1 or binary
-            tensor = np.clip(tensor, 0, 1)
             
         return tensor
         
@@ -247,49 +229,26 @@ class BaseDiffusionVisualizer:
         # Get current data
         image = self.current_batch['image'][self.current_idx]
         merged_terrain = self.merged_terrain[self.current_idx, 0]
-        watercover = self.watercover[self.current_idx, 0]
         path = self.current_batch['path'][self.current_idx]
         
         # Extract components
-        # image = [latents (4ch), lowfreq (1ch), climate (4ch), climate_mask (1ch)]
-        latents = image[:4]
+        # image = [latents (4ch), lowfreq (1ch)]
         lowfreq = image[4]
-        climate = image[5:9]
-        climate_mask = image[9]
         
         # Clear all axes
         for ax in self.axes.flat:
             ax.clear()
             
-        # Row 1: Merged Terrain, Decoded Water, Lowfreq, Climate Mask
+        # Row: Merged Terrain, Lowfreq
         terrain_np = merged_terrain.cpu().numpy() if isinstance(merged_terrain, torch.Tensor) else merged_terrain
         self.axes[0, 0].imshow(terrain_np, cmap='terrain')
         self.axes[0, 0].set_title('Merged Terrain')
         self.axes[0, 0].axis('off')
         
-        water_np = watercover.cpu().numpy() if isinstance(watercover, torch.Tensor) else watercover
-        self.axes[0, 1].imshow(water_np, cmap='Blues', vmin=0, vmax=1)
-        self.axes[0, 1].set_title('Water Coverage')
-        self.axes[0, 1].axis('off')
-        
         lowfreq_np = lowfreq.cpu().numpy() if isinstance(lowfreq, torch.Tensor) else lowfreq
-        self.axes[0, 2].imshow(lowfreq_np, cmap='terrain')
-        self.axes[0, 2].set_title('Lowfreq')
-        self.axes[0, 2].axis('off')
-        
-        mask_np = climate_mask.cpu().numpy() if isinstance(climate_mask, torch.Tensor) else climate_mask
-        self.axes[0, 3].imshow(mask_np, cmap='gray')
-        self.axes[0, 3].set_title('Climate Mask')
-        self.axes[0, 3].axis('off')
-        
-        # Row 2: All climate channels
-        climate_names = ['Temperature', 'Temp Seasonality', 'Precipitation', 'Precip Seasonality']
-        for i in range(4):
-            climate_channel = climate[i]
-            climate_np = climate_channel.cpu().numpy() if isinstance(climate_channel, torch.Tensor) else climate_channel
-            self.axes[1, i].imshow(climate_np, cmap='RdYlBu_r')
-            self.axes[1, i].set_title(climate_names[i])
-            self.axes[1, i].axis('off')
+        self.axes[0, 1].imshow(lowfreq_np, cmap='terrain')
+        self.axes[0, 1].set_title('Lowfreq')
+        self.axes[0, 1].axis('off')
         
         # Update title with current position and path
         self.fig.suptitle(

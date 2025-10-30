@@ -196,9 +196,6 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
         if config.get('evaluation', {}).get('validate_epochs', 0) > 0 and \
            (state['epoch'] + 1) % config['evaluation']['validate_epochs'] == 0:
             eval_metrics = trainer.evaluate()
-        elif config['training'].get('eval_epochs', 0) > 0 and \
-             (state['epoch'] + 1) % config['training']['eval_epochs'] == 0:
-            eval_metrics = trainer.evaluate()
         
         # Logging
         state['epoch'] += 1
