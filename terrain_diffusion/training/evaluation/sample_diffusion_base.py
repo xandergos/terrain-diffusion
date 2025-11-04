@@ -100,10 +100,10 @@ def sample_base_diffusion(
 
                 x = scaled_input
                 if guide_model is None or guidance_scale == 1.0:
-                    model_output = model(x, noise_labels=cnoise, conditional_inputs=cond_inputs or [])
+                    model_output = model(x, noise_labels=cnoise, conditional_inputs=cond_inputs)
                 else:
-                    model_output_m = model(x, noise_labels=cnoise, conditional_inputs=cond_inputs or [])
-                    model_output_g = guide_model(x, noise_labels=cnoise, conditional_inputs=cond_inputs or [])
+                    model_output_m = model(x, noise_labels=cnoise, conditional_inputs=cond_inputs)
+                    model_output_g = guide_model(x, noise_labels=cnoise, conditional_inputs=cond_inputs)
                     model_output = model_output_g + guidance_scale * (model_output_m - model_output_g)
 
                 samples = scheduler.step(model_output, t, samples, generator=generator).prev_sample
@@ -246,7 +246,7 @@ def sample_base_consistency_tiled(
                 model_in = x_t / sigma_data
                 if tile_cond is not None:
                     model_in = torch.cat([model_in, tile_cond], dim=1)
-                pred = -model(model_in, noise_labels=t.flatten(), conditional_inputs=conditional_inputs or [])
+                pred = -model(model_in, noise_labels=t.flatten(), conditional_inputs=conditional_inputs)
                 samples = torch.cos(t) * x_t - torch.sin(t) * sigma_data * pred
 
             out[..., i0:i1, j0:j1] += samples * weights

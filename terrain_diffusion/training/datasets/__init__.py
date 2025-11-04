@@ -6,6 +6,7 @@ from .h5_latents_dataset import H5LatentsDataset
 from .long_dataset import LongDataset
 from .file_gan_dataset import FileGANDataset
 from .coarse_dataset import CoarseDataset
+from .biome_dataset import BiomeDataset
 
 __all__ = [
     'H5AutoencoderDataset',
@@ -13,5 +14,6 @@ __all__ = [
     'H5LatentsDataset',
     'LongDataset',
     'FileGANDataset',
-    'CoarseDataset'
+    'CoarseDataset',
+    'BiomeDataset'
 ]

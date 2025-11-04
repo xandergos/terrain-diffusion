@@ -2,10 +2,12 @@ import catalogue
 from confection import registry
 from terrain_diffusion.models.mp_injection_generator import MPInjectionGenerator
 from terrain_diffusion.models.mp_injection_discriminator import MPInjectionDiscriminator
+from terrain_diffusion.models.perceptron import Perceptron
 from terrain_diffusion.training.datasets import *
 from terrain_diffusion.data.laplacian_encoder import *
 from terrain_diffusion.models.mp_discriminator import MPDiscriminator
 from terrain_diffusion.models.mp_generator import MPGenerator
+from terrain_diffusion.training.datasets.h5_superres_terrain_dataset import H5SuperresTerrainDataset
 from terrain_diffusion.training.loss import CosineLRScheduler, SqrtLRScheduler, ConstantLRScheduler
 from terrain_diffusion.scheduler.dpmsolver import EDMDPMSolverMultistepScheduler
 from terrain_diffusion.models.edm_autoencoder import EDMAutoencoder
@@ -14,6 +16,7 @@ from terrain_diffusion.training.trainers.autoencoder import AutoencoderTrainer
 from terrain_diffusion.training.trainers.consistency import ConsistencyTrainer
 from terrain_diffusion.training.trainers.diffusion import DiffusionTrainer
 from terrain_diffusion.training.trainers.gan import GANTrainer
+from terrain_diffusion.training.trainers.perceptron import PerceptronTrainer
 
 def build_registry():
     registry.scheduler = catalogue.create("confection", "schedulers", entry_points=False)
@@ -26,6 +29,7 @@ def build_registry():
     registry.model.register("injection_generator", func=MPInjectionGenerator)
     registry.model.register("injection_discriminator", func=MPInjectionDiscriminator)
     registry.model.register("discriminator", func=MPDiscriminator)
+    registry.model.register("perceptron", func=Perceptron)
     
     registry.lr_sched = catalogue.create("confection", "lr_sched", entry_points=False)
     registry.lr_sched.register("sqrt", func=SqrtLRScheduler)
@@ -34,16 +38,19 @@ def build_registry():
     
     registry.dataset = catalogue.create("confection", "datasets", entry_points=False)
     registry.dataset.register("h5_decoder_terrain", func=H5DecoderTerrainDataset)
+    registry.dataset.register("h5_superres_terrain", func=H5SuperresTerrainDataset)
     registry.dataset.register("h5_autoencoder", func=H5AutoencoderDataset)
     registry.dataset.register("h5_latents", func=H5LatentsDataset)
     registry.dataset.register("file_gan", func=FileGANDataset)
     registry.dataset.register("coarse", func=CoarseDataset)
+    registry.dataset.register("biome", func=BiomeDataset)
     
     registry.trainer = catalogue.create("confection", "trainers", entry_points=False)
     registry.trainer.register("autoencoder", func=lambda: AutoencoderTrainer)
     registry.trainer.register("consistency", func=lambda: ConsistencyTrainer)
     registry.trainer.register("diffusion", func=lambda: DiffusionTrainer)
     registry.trainer.register("gan", func=lambda: GANTrainer)
+    registry.trainer.register("perceptron", func=lambda: PerceptronTrainer)
     
     registry.utils = catalogue.create("confection", "utils", entry_points=False)
     registry.utils.register("create_list", func=lambda *args: list(args))

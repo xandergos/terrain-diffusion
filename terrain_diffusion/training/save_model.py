@@ -11,6 +11,8 @@ from safetensors.torch import load_model
 from ema_pytorch import PostHocEMA
 from diffusers.configuration_utils import ConfigMixin
 
+from terrain_diffusion.models.perceptron import Perceptron
+
 def load_model_from_checkpoint(checkpoint_path, ema_step=None, sigma_rel=None):
     """
     Load a model from a checkpoint and optionally apply EMA synthesis.
@@ -33,6 +35,8 @@ def load_model_from_checkpoint(checkpoint_path, ema_step=None, sigma_rel=None):
         model = EDMAutoencoder.from_config(EDMAutoencoder.load_config(config_path))
     elif config['_class_name'] == 'MPGenerator':
         model = MPGenerator.from_config(MPGenerator.load_config(config_path))
+    elif config['_class_name'] == 'Perceptron':
+        model = Perceptron.from_config(Perceptron.load_config(config_path))
     else:
         raise ValueError(f'Unknown model class: {config["_class_name"]}')
 

@@ -185,7 +185,8 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
                 if k == 'lr':
                     postfix[k] = f"{v[-1]:.4e}"
                 else:
-                    postfix[k] = f"{np.mean(v[-10:]):.4f}"
+                    mean_length = config['logging'].get('mean_length', 10)
+                    postfix[k] = f"{np.mean(v[-mean_length:]):.4f}"
             progress_bar.set_postfix(postfix)
             progress_bar.update(1)
         

@@ -256,6 +256,8 @@ def main(config_path, guide_config_path, n_trials, study_name, storage):
     sweep_cfg = resolved['sweep']
     min_sigma = float(sweep_cfg['min_ema_sigma'])
     max_sigma = float(sweep_cfg['max_ema_sigma'])
+    min_guide_sigma = sweep_cfg.get('min_guide_ema_sigma', min_sigma)
+    max_guide_sigma = sweep_cfg.get('max_guide_ema_sigma', max_sigma)
     min_guidance_scale = float(sweep_cfg['min_guidance_scale'])
     max_guidance_scale = float(sweep_cfg['max_guidance_scale'])
     min_main_ema_step = int(sweep_cfg['min_main_ema_step'])
@@ -269,14 +271,14 @@ def main(config_path, guide_config_path, n_trials, study_name, storage):
     print(f"Search range: ema_step ∈ [{min_main_ema_step}, {max_main_ema_step}]")
     if guide_model:
         print(f"Search range: guidance_scale ∈ [{min_guidance_scale}, {max_guidance_scale}]")
-        print(f"Search range: guide_σ_rel ∈ [{min_sigma}, {max_sigma}]")
+        print(f"Search range: guide_σ_rel ∈ [{min_guide_sigma}, {max_guide_sigma}]")
         print(f"Search range: guide_ema_step ∈ [{min_guide_ema_step}, {max_guide_ema_step}]")
 
     def objective(trial: optuna.trial.Trial):
         sigma_rel = trial.suggest_float('sigma_rel', min_sigma, max_sigma, log=False)
         ema_step = trial.suggest_int('ema_step', min_main_ema_step, max_main_ema_step, log=True)
         if guide_model:
-            guide_sigma_rel = trial.suggest_float('guide_sigma_rel', min_sigma, max_sigma, log=False)
+            guide_sigma_rel = trial.suggest_float('guide_sigma_rel', min_guide_sigma, max_guide_sigma, log=False)
             guide_ema_step = trial.suggest_int('guide_ema_step', min_guide_ema_step, max_guide_ema_step, log=True) if max_guide_ema_step > min_guide_ema_step else min_guide_ema_step
             guidance_scale = trial.suggest_float('guidance_scale', min_guidance_scale, max_guidance_scale, log=False)
         else:
@@ -341,7 +343,7 @@ def main(config_path, guide_config_path, n_trials, study_name, storage):
     print(f"Search range: σ_rel ∈ [{min_sigma}, {max_sigma}]")
     if guide_model:
         print(f"Search range: guidance_scale ∈ [{min_guidance_scale}, {max_guidance_scale}]")
-        print(f"Search range: guide_σ_rel ∈ [{min_sigma}, {max_sigma}]")
+        print(f"Search range: guide_σ_rel ∈ [{min_guide_sigma}, {max_guide_sigma}]")
         print(f"Search range: guide_ema_step ∈ [{min_guide_ema_step}, {max_guide_ema_step}]")
 
     if storage:

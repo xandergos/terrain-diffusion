@@ -5,7 +5,7 @@ from pyfastnoiselite.pyfastnoiselite import FastNoiseLite, NoiseType, FractalTyp
 import torch
 from terrain_diffusion.inference.perlin_transform import build_quantiles, transform_perlin
 
-def make_synthetic_map_factory(frequency_mult=1.0, seed=None):
+def make_synthetic_map_factory(frequency_mult=[1.0, 1.0, 1.0, 1.0, 1.0], seed=None, drop_water_pct=0.0):
     elev_img = rasterio.open("data/global/wc2.1_10m_elev.tif").read(1)
     temp_img = rasterio.open("data/global/wc2.1_10m_bio_1.tif").read(1)
     temp_std_img = rasterio.open("data/global/wc2.1_10m_bio_4.tif").read(1)
@@ -26,6 +26,7 @@ def make_synthetic_map_factory(frequency_mult=1.0, seed=None):
     temp_std_img = process_image(temp_std_img)
     precip_img = process_image(precip_img)
     precip_std_img = process_image(precip_std_img)
+    
 
     def get_lapse_rate(precip):
         lapse_rate = -6.5 + 0.0015 * precip
@@ -50,7 +51,7 @@ def make_synthetic_map_factory(frequency_mult=1.0, seed=None):
     temp_std_p1 = np.percentile(temp_std_img[valid_mask], 0.1)
     temp_std_p99 = np.percentile(temp_std_img[valid_mask], 99.9)
 
-    def build_synthetic_map(base_image, frequency, octaves, lacunarity, gain, seed):
+    def build_synthetic_map(base_image, frequency, octaves, lacunarity, gain, seed, base_image_mask=None):
         noise = FastNoiseLite(seed=seed)
         noise.noise_type = NoiseType.NoiseType_Perlin
         noise.frequency = frequency
@@ -73,7 +74,10 @@ def make_synthetic_map_factory(frequency_mult=1.0, seed=None):
         # Generate noise for all coordinates
         noise_values = noise.gen_from_coords(coords)
         noise_quantiles = build_quantiles(noise_values.flatten(), n_quantiles=64, eps=1e-4)
-        base_image_quantiles = build_quantiles(base_image.flatten(), n_quantiles=64, eps=1e-4)
+        if base_image_mask is not None:
+            base_image_quantiles = build_quantiles(base_image[base_image_mask].flatten(), n_quantiles=64, eps=1e-4)
+        else:
+            base_image_quantiles = build_quantiles(base_image.flatten(), n_quantiles=64, eps=1e-4)
         
         transform_fn = lambda x: transform_perlin(x, noise_quantiles, base_image_quantiles)
         return noise, transform_fn
@@ -94,11 +98,12 @@ def make_synthetic_map_factory(frequency_mult=1.0, seed=None):
         transformed_values = transform_fn(noise_values)
         return transformed_values.reshape(i2 - i1, j2 - j1)
 
-    synthetic_elev_params = build_synthetic_map(elev_img, 0.05 * frequency_mult, 4, 2.0, 0.5, seed=(seed or random.randint(0, 2**30))+1)
-    synthetic_temp_params = build_synthetic_map(temp_img, 0.05 * frequency_mult, 2, 2.0, 0.5, seed=(seed or random.randint(0, 2**30))+2)
-    synthetic_temp_std_params = build_synthetic_map(temp_std_img, 0.05 * frequency_mult, 4, 2.0, 0.5, seed=(seed or random.randint(0, 2**30))+3)
-    synthetic_precip_params = build_synthetic_map(precip_img, 0.05 * frequency_mult, 4, 2.0, 0.5, seed=(seed or random.randint(0, 2**30))+4)
-    synthetic_precip_std_params = build_synthetic_map(precip_std_img, 0.05 * frequency_mult, 4, 2.0, 0.5, seed=(seed or random.randint(0, 2**30))+5)
+    hist_mask = np.logical_or(np.random.rand(elev_img.shape[0], elev_img.shape[1]) > drop_water_pct, elev_img >= 0)
+    synthetic_elev_params = build_synthetic_map(elev_img, 0.05 * frequency_mult[0], 4, 2.0, 0.5, seed=(seed or random.randint(0, 2**30))+1, base_image_mask=hist_mask)
+    synthetic_temp_params = build_synthetic_map(temp_img, 0.05 * frequency_mult[1], 2, 2.0, 0.5, seed=(seed or random.randint(0, 2**30))+2)
+    synthetic_temp_std_params = build_synthetic_map(temp_std_img, 0.05 * frequency_mult[2], 4, 2.0, 0.5, seed=(seed or random.randint(0, 2**30))+3)
+    synthetic_precip_params = build_synthetic_map(precip_img, 0.05 * frequency_mult[3], 4, 2.0, 0.5, seed=(seed or random.randint(0, 2**30))+4)
+    synthetic_precip_std_params = build_synthetic_map(precip_std_img, 0.05 * frequency_mult[4], 4, 2.0, 0.5, seed=(seed or random.randint(0, 2**30))+5)
 
     def sample_full_synthetic_map(i1, j1, i2, j2):
         synthetic_elev = sample_synthetic_map(*synthetic_elev_params, i1, j1, i2, j2)
