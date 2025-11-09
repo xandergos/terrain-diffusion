@@ -174,7 +174,7 @@ class DiffusionTrainer(Trainer):
         """Normalize terrain to [0, 255] uint8 format for KID calculation."""
         terrain_min = torch.amin(terrain, dim=(1, 2, 3), keepdim=True)
         terrain_max = torch.amax(terrain, dim=(1, 2, 3), keepdim=True)
-        terrain_range = torch.maximum(terrain_max - terrain_min, torch.tensor(1.0))
+        terrain_range = torch.maximum(terrain_max - terrain_min, torch.tensor(1.0, device=terrain.device))
         terrain_mid = (terrain_min + terrain_max) / 2
         
         terrain_norm = torch.clamp(((terrain - terrain_mid) / terrain_range + 0.5) * 255, 0, 255)
@@ -189,7 +189,7 @@ class DiffusionTrainer(Trainer):
         latents_mean = self.val_dataset.base_dataset.latents_mean.to(latents.device)
         sigma_data = scheduler.config.sigma_data
         
-        latents = (latents / latents_std + latents_mean) / sigma_data
+        latents = (latents / latents_std + latents_mean)
         
         # Build decoder conditioning by upsampling latent channels to target resolution
         H, W = lowfreq_input.shape[-2]*8, lowfreq_input.shape[-1]*8
@@ -252,17 +252,16 @@ class DiffusionTrainer(Trainer):
                         x = torch.cat([scaled_input, cond_img], dim=1)
                     else:
                         x = scaled_input
+                    self.model.eval()
                     model_output = self.model(x, noise_labels=cnoise, conditional_inputs=conditional_inputs)
                     
                     samples = scheduler.step(model_output, t, samples).prev_sample
+                    
+                samples = samples / scheduler.config.sigma_data
                 
                 # Decode latents to terrain
                 terrain = self._decode_latents_to_terrain(samples[:, :4], samples[:, 4:5], autoencoder, scheduler)
-                ground_truth = batch.get('ground_truth')
-                if ground_truth is not None:
-                    real_terrain = ground_truth
-                else:
-                    real_terrain = self._decode_latents_to_terrain(images[:, :4], images[:, 4:5], autoencoder, scheduler)
+                real_terrain = batch['ground_truth']
                 
                 # Update KID metric for original terrain
                 kid.update(self._normalize_and_process_terrain(terrain), real=False)
@@ -314,6 +313,7 @@ class DiffusionTrainer(Trainer):
                     
                     # Get model predictions
                     x = torch.cat([scaled_input, cond_img], dim=1)
+                    self.model.eval()
                     model_output = self.model(x, noise_labels=cnoise, conditional_inputs=conditional_inputs)
                     
                     samples = scheduler.step(model_output, t, samples).prev_sample

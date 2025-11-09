@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Script to visualize the effect of signed-sqrt transform on variance vs mean relationship.
+Script to visualize the effect of signed-sqrt transform on standard deviation vs mean relationship.
 Loads 512x512 terrain samples from dataset.h5, performs laplacian decoding to get full images,
 and creates scatter plots comparing the statistics before and after transformation.
 """
@@ -14,13 +14,15 @@ from scipy import stats
 sys.path.insert(0, '/mnt/ntfs2/shared/terrain-diffusion')
 from terrain_diffusion.data.laplacian_encoder import laplacian_decode
 
+GAMMA = 0.5
+
 def signed_sqrt_transform(values):
     """Apply signed sqrt transform to elevation data"""
-    return np.sign(values) * np.sqrt(np.abs(values))
+    return np.sign(values) * np.abs(values)**GAMMA
 
 def inverse_signed_sqrt_transform(values):
     """Invert the signed sqrt transform to get back original elevation"""
-    return np.sign(values) * values * values
+    return np.sign(values) * np.abs(values)**(1/GAMMA)
 
 def load_samples_from_h5(h5_file, num_samples=100, crop_size=512, min_pct_land=0.8):
     """Load random samples from the HDF5 dataset and reconstruct full terrain"""
@@ -86,7 +88,8 @@ def load_samples_from_h5(h5_file, num_samples=100, crop_size=512, min_pct_land=0
                 crop_transformed = np.nan_to_num(crop_transformed, nan=np.nanmean(crop_transformed))
             
             # Inverse transform to get original elevation
-            crop_original = inverse_signed_sqrt_transform(crop_transformed)
+            crop_original = np.sign(crop_transformed) * np.square(crop_transformed)
+            crop_transformed = signed_sqrt_transform(crop_original)
             
             samples_transformed.append(crop_transformed)
             samples_original.append(crop_original)
@@ -94,15 +97,15 @@ def load_samples_from_h5(h5_file, num_samples=100, crop_size=512, min_pct_land=0
     return samples_original, samples_transformed
 
 def compute_stats(samples):
-    """Compute mean and variance for each sample"""
+    """Compute mean and standard deviation for each sample"""
     means = []
-    variances = []
+    stds = []
     
     for sample in samples:
         means.append(np.mean(sample))
-        variances.append(np.var(sample))
+        stds.append(np.std(sample))
     
-    return np.array(means), np.array(variances)
+    return np.array(means), np.array(stds)
 
 def main():
     # Path to dataset
@@ -118,88 +121,108 @@ def main():
     
     # Compute stats for original data (without transform)
     print("Computing statistics for original elevation data (no transform)...")
-    original_means, original_vars = compute_stats(samples_original)
+    original_means, original_stds = compute_stats(samples_original)
     
     # Compute stats for transformed data (with signed-sqrt transform)
     print("Computing statistics for transformed data (signed-sqrt)...")
-    transformed_means, transformed_vars = compute_stats(samples_transformed)
+    transformed_means, transformed_stds = compute_stats(samples_transformed)
     
-    # Create scatter plot
-    print("Creating scatter plot...")
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
-    
-    # Compute log variances
-    original_log_vars = np.log(original_vars)
-    transformed_log_vars = np.log(transformed_vars)
-    
-    # Compute log-log correlation: sign(x) * ln(|x|+1) vs log(variance)
+    # Create plots
+    print("Creating plots...")
+
+    # Compute log standard deviations
+    original_log_stds = np.log(original_stds)
+    transformed_log_stds = np.log(transformed_stds)
+
+    # Compute log-log correlation: sign(x) * ln(|x|+1) vs log(std)
     original_log_means = np.sign(original_means) * np.log(np.abs(original_means) + 1)
     transformed_log_means = np.sign(transformed_means) * np.log(np.abs(transformed_means) + 1)
-    r_loglog_orig = np.corrcoef(original_log_means, original_log_vars)[0, 1]
-    r_loglog_trans = np.corrcoef(transformed_log_means, transformed_log_vars)[0, 1]
-    
-    # Linear regression on (mean, log(variance))
-    slope_orig, intercept_orig, r_orig, p_orig, se_orig = stats.linregress(original_means, original_log_vars)
-    slope_trans, intercept_trans, r_trans, p_trans, se_trans = stats.linregress(transformed_means, transformed_log_vars)
-    
+    r_loglog_orig = np.corrcoef(original_log_means, original_log_stds)[0, 1]
+    r_loglog_trans = np.corrcoef(transformed_log_means, transformed_log_stds)[0, 1]
+
+    # Linear regression on (mean, std)
+    slope_std_orig, intercept_std_orig, r_std_orig, _, _ = stats.linregress(original_means, original_stds)
+    slope_std_trans, intercept_std_trans, r_std_trans, _, _ = stats.linregress(transformed_means, transformed_stds)
+
+    # Linear regression on (mean, log(std))
+    slope_log_orig, intercept_log_orig, r_log_orig, _, _ = stats.linregress(original_means, original_log_stds)
+    slope_log_trans, intercept_log_trans, r_log_trans, _, _ = stats.linregress(transformed_means, transformed_log_stds)
+
+    # Figure 1: Mean vs Std (Original and Transformed)
+    fig1, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+
     # Original data (no transform)
-    ax1.scatter(original_means, original_vars, alpha=0.6, s=50, color='blue', edgecolors='black', linewidth=0.5)
-    
-    # Add regression line (convert back from log space for plotting)
+    ax1.scatter(original_means, original_stds, alpha=0.6, s=50, color='blue', edgecolors='black', linewidth=0.5)
     x_range_orig = np.linspace(original_means.min(), original_means.max(), 100)
-    y_fit_orig = np.exp(slope_orig * x_range_orig + intercept_orig)
-    ax1.plot(x_range_orig, y_fit_orig, 'r-', linewidth=2, label=f'Linear fit (log var)')
-    
+    y_fit_orig = slope_std_orig * x_range_orig + intercept_std_orig
+    ax1.plot(x_range_orig, y_fit_orig, 'r-', linewidth=2, label=f'Linear fit')
     ax1.set_xlabel('Mean Elevation (m)', fontsize=12)
-    ax1.set_ylabel('Variance (m²)', fontsize=12)
-    ax1.set_title(f'Original Elevation Data\n(No Transform)\nCorr(mean, log(var)) = {r_orig:.4f}', fontsize=14, fontweight='bold')
-    ax1.set_yscale('log')
+    ax1.set_ylabel('Standard deviation (m)', fontsize=12)
+    ax1.set_title(f'Original Elevation Data\n(No Transform)\nCorr(mean, std) = {r_std_orig:.4f}', fontsize=14, fontweight='bold')
     ax1.grid(True, alpha=0.3, which='both')
     ax1.set_axisbelow(True)
     ax1.legend(fontsize=10)
-    
+
     # Transformed data (with signed-sqrt)
-    ax2.scatter(transformed_means, transformed_vars, alpha=0.6, s=50, color='orange', edgecolors='black', linewidth=0.5)
-    
-    # Add regression line (convert back from log space for plotting)
+    ax2.scatter(transformed_means, transformed_stds, alpha=0.6, s=50, color='orange', edgecolors='black', linewidth=0.5)
     x_range_trans = np.linspace(transformed_means.min(), transformed_means.max(), 100)
-    y_fit_trans = np.exp(slope_trans * x_range_trans + intercept_trans)
-    ax2.plot(x_range_trans, y_fit_trans, 'r-', linewidth=2, label=f'Linear fit (log var)')
-    
+    y_fit_trans = slope_std_trans * x_range_trans + intercept_std_trans
+    ax2.plot(x_range_trans, y_fit_trans, 'r-', linewidth=2, label=f'Linear fit')
     ax2.set_xlabel('Mean (signed-sqrt m)', fontsize=12)
-    ax2.set_ylabel('Variance ((signed-sqrt m)²)', fontsize=12)
-    ax2.set_title(f'With Signed-Sqrt Transform\n(Dataset Format)\nCorr(mean, log(var)) = {r_trans:.4f}', fontsize=14, fontweight='bold')
-    ax2.set_yscale('log')
+    ax2.set_ylabel('Standard deviation (signed-sqrt m)', fontsize=12)
+    ax2.set_title(f'With Signed-Sqrt Transform\n(Dataset Format)\nCorr(mean, std) = {r_std_trans:.4f}', fontsize=14, fontweight='bold')
     ax2.grid(True, alpha=0.3, which='both')
     ax2.set_axisbelow(True)
     ax2.legend(fontsize=10)
-    
+
     plt.tight_layout()
-    
-    # Save the plot
-    output_path = Path("variance_vs_mean.png")
-    plt.savefig(output_path, dpi=300, bbox_inches='tight')
-    print(f"Saved plot to {output_path}")
+
+    # Figure 2: Mean vs log(Std) (Original and Transformed)
+    fig2, (bx1, bx2) = plt.subplots(1, 2, figsize=(14, 6))
+
+    # Original data (no transform)
+    bx1.scatter(original_means, original_log_stds, alpha=0.6, s=50, color='blue', edgecolors='black', linewidth=0.5)
+    y_fit_log_orig = slope_log_orig * x_range_orig + intercept_log_orig
+    bx1.plot(x_range_orig, y_fit_log_orig, 'r-', linewidth=2, label=f'Linear fit')
+    bx1.set_xlabel('Mean Elevation (m)', fontsize=12)
+    bx1.set_ylabel('log(Standard deviation)', fontsize=12)
+    bx1.set_title(f'Original Elevation Data\n(No Transform)\nCorr(mean, log(std)) = {r_log_orig:.4f}', fontsize=14, fontweight='bold')
+    bx1.grid(True, alpha=0.3)
+    bx1.set_axisbelow(True)
+    bx1.legend(fontsize=10)
+
+    # Transformed data (with signed-sqrt)
+    bx2.scatter(transformed_means, transformed_log_stds, alpha=0.6, s=50, color='orange', edgecolors='black', linewidth=0.5)
+    y_fit_log_trans = slope_log_trans * x_range_trans + intercept_log_trans
+    bx2.plot(x_range_trans, y_fit_log_trans, 'r-', linewidth=2, label=f'Linear fit')
+    bx2.set_xlabel('Mean (signed-sqrt m)', fontsize=12)
+    bx2.set_ylabel('log(Standard deviation) (signed-sqrt m)', fontsize=12)
+    bx2.set_title(f'With Signed-Sqrt Transform\n(Dataset Format)\nCorr(mean, log(std)) = {r_log_trans:.4f}', fontsize=14, fontweight='bold')
+    bx2.grid(True, alpha=0.3)
+    bx2.set_axisbelow(True)
+    bx2.legend(fontsize=10)
+
+    plt.tight_layout()
     
     # Print some statistics
     print("\n=== Statistics Summary ===")
     print(f"Original elevation data (no transform):")
     print(f"  Mean range: [{original_means.min():.2f}, {original_means.max():.2f}] meters")
-    print(f"  Variance range: [{original_vars.min():.2e}, {original_vars.max():.2e}] m²")
-    print(f"  Mean-variance correlation: {np.corrcoef(original_means, original_vars)[0, 1]:.4f}")
-    print(f"  Mean-log(variance) correlation: {r_orig:.4f}")
-    print(f"  Log(mean)-log(variance) correlation: {r_loglog_orig:.4f}")
+    print(f"  Std range: [{original_stds.min():.2e}, {original_stds.max():.2e}] m")
+    print(f"  Mean-std correlation: {np.corrcoef(original_means, original_stds)[0, 1]:.4f}")
+    print(f"  Mean-log(std) correlation: {r_log_orig:.4f}")
+    print(f"  Log(mean)-log(std) correlation: {r_loglog_orig:.4f}")
     
     print(f"\nTransformed data (signed-sqrt):")
     print(f"  Mean range: [{transformed_means.min():.2f}, {transformed_means.max():.2f}]")
-    print(f"  Variance range: [{transformed_vars.min():.2e}, {transformed_vars.max():.2e}]")
-    print(f"  Mean-variance correlation: {np.corrcoef(transformed_means, transformed_vars)[0, 1]:.4f}")
-    print(f"  Mean-log(variance) correlation: {r_trans:.4f}")
-    print(f"  Log(mean)-log(variance) correlation: {r_loglog_trans:.4f}")
+    print(f"  Std range: [{transformed_stds.min():.2e}, {transformed_stds.max():.2e}]")
+    print(f"  Mean-std correlation: {np.corrcoef(transformed_means, transformed_stds)[0, 1]:.4f}")
+    print(f"  Mean-log(std) correlation: {r_log_trans:.4f}")
+    print(f"  Log(mean)-log(std) correlation: {r_loglog_trans:.4f}")
     
-    print(f"\nVariance stabilization effect:")
-    print(f"  Correlation reduction (linear): {np.corrcoef(original_means, original_vars)[0, 1] - np.corrcoef(transformed_means, transformed_vars)[0, 1]:.4f}")
-    print(f"  Correlation reduction (mean-log(var)): {r_orig - r_trans:.4f}")
+    print(f"\nStandard deviation stabilization effect:")
+    print(f"  Correlation reduction (linear): {np.corrcoef(original_means, original_stds)[0, 1] - np.corrcoef(transformed_means, transformed_stds)[0, 1]:.4f}")
+    print(f"  Correlation reduction (mean-log(std)): {r_log_orig - r_log_trans:.4f}")
     print(f"  Correlation reduction (log-log): {r_loglog_orig - r_loglog_trans:.4f}")
     
     plt.show()

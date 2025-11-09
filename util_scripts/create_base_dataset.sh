@@ -3,11 +3,11 @@ python3.11 ./terrain_diffusion/data/preprocessing/build_base_dataset.py  \
     --highres-elevation-folder data/dem_data/ \
     --lowres-elevation-file data/global/ETOPO_2022_v1_30s_N90W180_bed.tif \
     --climate-folder data/global/ \
-    --highres-size 4096 \
-    --lowres-size 512 \
+    --highres-size 2048 \
+    --lowres-size 256 \
     --lowres-sigma 5 \
     --resolution 90 \
-    --num-chunks 2  \
+    --num-chunks 1  \
     --output-file data/dataset.h5 \
     --num-workers 15 \
     --prefetch 1 \

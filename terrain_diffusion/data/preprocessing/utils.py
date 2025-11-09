@@ -93,7 +93,7 @@ def extract_mask_from_tiffs(
                     src_crs=src.crs,
                     dst_transform=dst_transform,
                     dst_crs=dst_crs,
-                    resampling=Resampling.nearest
+                    resampling=Resampling.bilinear
                 )
                 
                 if dst_data.dtype == np.float32:
@@ -204,7 +204,7 @@ def process_single_file_base(
         highres_dem = np.where(highres_dem == 0.0, np.nan, highres_dem)
         highres_dem = highres_dem.astype(np.float32)
         if not np.isnan(highres_dem).all():
-            highres_dem = skimage.transform.resize(highres_dem, (highres_size, highres_size), order=0, preserve_range=True)
+            highres_dem = skimage.transform.resize(highres_dem, (highres_size, highres_size), order=1, preserve_range=True)
         else:
             highres_dem = np.nan * np.ones((highres_size, highres_size), dtype=np.float32)
     else:

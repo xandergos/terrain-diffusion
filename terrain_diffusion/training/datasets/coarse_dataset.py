@@ -261,6 +261,7 @@ class CoarseDataset(Dataset):
                         
                     print("Reading ETOPO data...")
                     data = src.read(1)[start_row:end_row, :]
+                    data = np.sign(data) * np.sqrt(np.abs(data))
                     print("ETOPO data read")
                     
                     row_indices = np.linspace(0, data.shape[0], 10, dtype=int)
@@ -337,14 +338,16 @@ class CoarseDataset(Dataset):
                 stds = np.std(all_gan_data, axis=1)
                 
                 print(f"GAN bands - mean: {means.tolist()}, std: {stds.tolist()}")
-                f.attrs['means'] = means
-                f.attrs['stds'] = stds
+                self.means = means
+                self.stds = stds
+                f.attrs['means'] = self.means
+                f.attrs['stds'] = self.stds
                 f.attrs['band_weights'] = band_widths.astype(np.float32) / np.sum(band_widths).astype(np.float32)
         else:
             with h5py.File(self.h5_file, 'r') as f:
-                means = f.attrs['means']
-                stds = f.attrs['stds']
-                print(f"GAN bands - mean: {means.tolist()}, std: {stds.tolist()}")
+                self.means = f.attrs['means']
+                self.stds = f.attrs['stds']
+                print(f"GAN bands - mean: {self.means.tolist()}, std: {self.stds.tolist()}")
             
     def __len__(self):
         """Return a fixed length (can be adjusted based on needs)"""
@@ -389,7 +392,7 @@ class CoarseDataset(Dataset):
             data = torch.rot90(data, k=k, dims=[-2, -1])
         data = data * self.sigma_data
         
-        t = torch.atan(torch.exp(8 * torch.rand(5) - 55)).view(-1, 1, 1)
+        t = torch.atan(torch.exp(10 * torch.rand(5) - 5)).view(-1, 1, 1)
         cond_img = data[[0, 2, 3, 4, 5]] / self.sigma_data
         cond_img = cond_img * torch.cos(t) + torch.randn_like(cond_img) * torch.sin(t)
         
