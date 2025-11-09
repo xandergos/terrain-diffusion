@@ -69,7 +69,10 @@ def get_relief_map(
     *,
     azimuths: Tuple[float, float, float, float] = (315.0, 45.0, 135.0, 225.0),
     flow_threshold: float = 7,
-    show: bool = True,
+    sigma_large: float = 6.0,
+    sigma_small: float = 1.2,
+    resolution: float=90,
+    rgb: np.ndarray | None = None,
 ) -> Tuple[plt.Figure, plt.Axes]:
     """Plot a GDAL-style shaded relief map using Matplotlib, with optional river overlay.
 
@@ -104,7 +107,7 @@ def get_relief_map(
 
     def compute_hillshade(src: np.ndarray) -> np.ndarray:
         dy, dx = np.gradient(src)
-        dy, dx = dy/15, dx/15
+        dy, dx = dy/(15 * resolution/90), dx/(15 * resolution/90)
         slope_rad = np.pi / 2.0 - np.arctan(np.hypot(dx, dy))
         aspect_rad = np.arctan2(dy, -dx)
         az_rad = np.deg2rad(azimuth_deg)
@@ -116,8 +119,6 @@ def get_relief_map(
         return np.clip(hs, 0.0, 1.0).astype(np.float32)
 
     # Multi-scale hillshade: emphasize large landforms, suppress pixel-scale roughness
-    sigma_large = 6.0  # px
-    sigma_small = 1.2  # px
     elev_large = gaussian_filter(elev_f32, sigma=sigma_large)
     elev_small = gaussian_filter(elev_f32, sigma=sigma_small)
 
@@ -127,12 +128,14 @@ def get_relief_map(
     hillshade = np.power(hillshade, 0.85)  # gentle gamma to lift broad features
 
     # Colorize elevation; this will be used where biome is unknown
-    vmin, vmax = float(np.nanmin(elev)), float(np.nanmax(elev))
-    if not np.isfinite(vmin) or not np.isfinite(vmax) or vmax == vmin:
-        vmin, vmax = 0.0, 1.0
-    norm = (elev - vmin) / (vmax - vmin + 1e-8)
-    cmap = plt.get_cmap("terrain")
-    rgb = cmap(np.clip(norm, 0.0, 1.0))[..., :3].astype(np.float32)
+    if rgb is None:
+        land_elev = np.maximum(0, elev)
+        vmin, vmax = float(np.nanmin(land_elev)), float(np.nanmax(land_elev))
+        if not np.isfinite(vmin) or not np.isfinite(vmax) or vmax == vmin:
+            vmin, vmax = 0.0, 1.0
+        norm = (land_elev - vmin) / (vmax - vmin + 1e-8)
+        cmap = plt.get_cmap("terrain")
+        rgb = cmap(np.clip(norm**0.7, 0.0, 1.0))[..., :3].astype(np.float32)
 
     # Base RGB: prefer biome colors when available, otherwise elevation colormap
     base_rgb = rgb
@@ -163,6 +166,23 @@ def get_relief_map(
                 + river_alpha * river_color[None, :]
             )
 
+    # Ocean coloring: fade from light blue (coast) to dark blue (deep ocean)
+    ocean_mask = elev_f32 < 0.0
+    if np.any(ocean_mask):
+        depth = -elev_f32  # positive depth below sea level
+        max_depth = 10_000.0
+        if max_depth > 0.0:
+            t = np.zeros_like(elev_f32, dtype=np.float32)
+            t[ocean_mask] = np.clip(depth[ocean_mask] / max_depth, 0.0, 1.0)
+            # Bias toward deeper blue sooner near the coast
+            t = t ** 0.7
+            t3 = t[..., None]
+            # More saturated blues
+            coast_color = np.array([0.68, 0.88, 1.00], dtype=np.float32)  # lighter, bluer coast
+            deep_color = np.array([0.00, 0.10, 0.45], dtype=np.float32)   # deeper blue
+            ocean_rgb = (1.0 - t3) * coast_color + t3 * deep_color
+            shaded_rgb = np.where(ocean_mask[..., None], ocean_rgb, shaded_rgb)
+            
     return shaded_rgb
 
 

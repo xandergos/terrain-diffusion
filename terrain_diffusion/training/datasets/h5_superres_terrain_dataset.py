@@ -23,7 +23,8 @@ class H5SuperresTerrainDataset(Dataset):
                  split=None,
                  residual_mean=None,
                  residual_std=None,
-                 sigma_data=0.5):
+                 sigma_data=0.5,
+                 max_noise=0.03):
         """
         Args:
             h5_file (str): Path to the HDF5 file containing the dataset.
@@ -37,6 +38,7 @@ class H5SuperresTerrainDataset(Dataset):
             residual_mean (float): Mean for residual normalization. Defaults to None (will compute).
             residual_std (float): Std for residual normalization. Defaults to None (will compute).
             sigma_data (float): Data standard deviation. Defaults to 0.5.
+            max_noise (float): Max noise to add to cond image. Defaults to 0.03
         """
         if subset_weights is None:
             subset_weights = [1] * len(pct_land_ranges)
@@ -48,6 +50,7 @@ class H5SuperresTerrainDataset(Dataset):
         self.subset_class_labels = subset_class_labels
         self.eval_dataset = eval_dataset
         self.sigma_data = sigma_data
+        self.max_noise = max_noise
 
         # Initialize keys
         num_subsets = len(subset_weights)
@@ -192,14 +195,19 @@ class H5SuperresTerrainDataset(Dataset):
 
         # Target image scaled for EDM parameterization
         image = (data_residual * self.sigma_data).float()
-
+        
         # Conditioning image: residual downsampled by 2x, then resized back to crop size
-        cond_image = F.interpolate(data_residual[None], size=(self.crop_size, self.crop_size), mode='area')[0].float()
+        cond_image = F.interpolate(data_residual[None], 
+                                   size=(self.crop_size//2, self.crop_size//2), mode='area').float()
+        noise_vec = torch.randn_like(cond_image)
+        noise_level = torch.rand(1)[0]
+        cond_image = F.interpolate(cond_image + noise_vec * noise_level * self.max_noise, size=(self.crop_size, self.crop_size), mode='nearest')[0].float()
 
         if class_label is not None:
             cond_inputs = [torch.tensor(class_label)]
         else:
             cond_inputs = []
+        cond_inputs += [noise_level]
 
         return {'image': image, 'cond_img': cond_image, 'cond_inputs': cond_inputs, 'path': group_path}
 

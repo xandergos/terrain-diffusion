@@ -3,17 +3,19 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from ema_pytorch import PostHocEMA
+from tqdm import tqdm
 
 from terrain_diffusion.training.trainers.trainer import Trainer
 from terrain_diffusion.training.datasets import LongDataset
-from terrain_diffusion.training.utils import temporary_ema_to_model
+from terrain_diffusion.training.utils import temporary_ema_to_model, recursive_to
 
 
 class PerceptronTrainer(Trainer):
-    """Trainer for simple categorical climate prediction (classification).
+    """Trainer for simple prediction with selectable loss.
 
-    Assumes inputs are shaped (B, C) and targets are shaped (B,) with class indices.
-    Uses CrossEntropyLoss on logits produced by the model.
+    - For 'cce' (categorical cross entropy): targets are LongTensor shape (B,) with class indices,
+      and model outputs logits of shape (B, num_classes).
+    - For 'mse' or 'mae': targets are FloatTensor of shape (B, C), and model outputs predictions of shape (B, C).
     """
 
     def __init__(self, config, resolved, accelerator, state):
@@ -28,7 +30,21 @@ class PerceptronTrainer(Trainer):
 
         # Optimizer and loss
         self.optimizer = self._build_optimizer(self.model, config)
-        self.criterion = torch.nn.CrossEntropyLoss()
+        self.loss_type = config['training'].get('loss', 'cce').lower()
+        if self.loss_type == 'cce':
+            self.criterion = torch.nn.CrossEntropyLoss()
+        elif self.loss_type == 'mse':
+            self.criterion = torch.nn.MSELoss()
+        elif self.loss_type == 'mae':
+            self.criterion = torch.nn.L1Loss()
+        elif self.loss_type == 'high_mae':
+            def high_mae(x, y):
+                high_score = 0.1 * torch.abs(x - y) * (torch.abs(x - y) > 0.0).float()
+                low_score = 0.9 * torch.abs(x - y) * (torch.abs(x - y) <= 0.0).float()
+                return (high_score + low_score).float().mean()
+            self.criterion = high_mae
+        else:
+            raise ValueError(f"Unknown loss type: {self.loss_type}. Expected one of ['cce', 'mse', 'mae'].")
 
         # EMA for checkpointing/eval parity with other trainers
         resolved['ema']['checkpoint_folder'] = os.path.join(resolved['logging']['save_dir'], 'phema')
@@ -84,19 +100,25 @@ class PerceptronTrainer(Trainer):
         return self.model
 
     def train_step(self, state, batch):
-        """One optimization step using CrossEntropy over logits.
+        """One optimization step using the configured loss.
 
         Expects batch to contain:
         - 'x': FloatTensor of shape (B, C)
-        - 'y': LongTensor of shape (B,)
+        - 'y':
+            * LongTensor of shape (B,) for 'cce'
+            * FloatTensor of shape (B, C) for 'mse'/'mae'
         """
         x = batch['x']
         y = batch['y']
 
+        self.model.train()
         with self.accelerator.accumulate(self.model):
             with self.accelerator.autocast():
-                logits = self.model(x)
-                loss = self.criterion(logits, y)
+                outputs = self.model(x)
+                if self.loss_type == 'cce':
+                    loss = self.criterion(outputs, y.long())
+                else:
+                    loss = self.criterion(outputs.float(), y.float())
 
             # Update train counters and LR
             batch_size = x.shape[0]
@@ -122,17 +144,93 @@ class PerceptronTrainer(Trainer):
         if self.accelerator.is_main_process:
             self.ema.update()
 
+        metrics = {}
         with torch.no_grad():
-            preds = logits.argmax(dim=1)
-            acc = (preds == y).float().mean().item()
+            if self.loss_type == 'cce':
+                preds = outputs.argmax(dim=1)
+                acc = (preds == y.long()).float().mean().item()
+                metrics['acc'] = acc
+            else:
+                # Report regression metrics for convenience
+                mae_val = torch.nn.functional.l1_loss(outputs.float(), y.float(), reduction='mean').item()
+                mse_val = torch.nn.functional.mse_loss(outputs.float(), y.float(), reduction='mean').item()
+                metrics['mae'] = mae_val
+                metrics['mse'] = mse_val
 
         return {
             'loss': loss.item(),
-            'acc': acc,
+            **metrics,
             'lr': lr,
             'grad_norm': grad_norm.item(),
         }
 
     def evaluate(self):
-        """Evaluate on validation set; report mean loss and accuracy using EMA weights."""
-        pass
+        """Evaluate on validation set; report mean loss/metrics using EMA weights and eval() mode."""
+        # Reuse training dataset for evaluation
+        val_dataset = LongDataset(self.train_dataset, shuffle=True)
+        val_dataset.set_seed(self.config['training'].get('seed', 0) + 638)
+        batch_size = self.config['training']['batch_size']
+        dataloader_kwargs = dict(self.resolved.get('dataloader_kwargs', {}))
+        val_loader = DataLoader(val_dataset, batch_size=batch_size, **dataloader_kwargs)
+        val_iter = iter(val_loader)
+        
+        # Number of samples to process
+        eval_cfg = self.config.get('evaluation', {})
+        total_samples = eval_cfg.get('validation_steps', batch_size * 1024)
+        
+        processed = 0
+        losses = []
+        correct = 0
+        total = 0
+        mae_vals, mse_vals = [], []
+        
+        with temporary_ema_to_model(self.ema.ema_models[0]):
+            self.model.eval()
+            pbar = tqdm(total=total_samples, desc="Validation")
+            while processed < total_samples:
+                batch = recursive_to(next(val_iter), device=self.accelerator.device)
+                x, y = batch['x'], batch['y']
+                
+                with torch.no_grad(), self.accelerator.autocast():
+                    outputs = self.model(x)
+                    if self.loss_type == 'cce':
+                        loss = self.criterion(outputs, y.long())
+                    else:
+                        loss = self.criterion(outputs.float(), y.float())
+                
+                losses.append(loss.item())
+                if self.loss_type == 'cce':
+                    preds = outputs.argmax(dim=1)
+                    correct += (preds == y.long()).sum().item()
+                    total += y.shape[0]
+                else:
+                    mae_vals.append(torch.nn.functional.l1_loss(outputs.float(), y.float(), reduction='mean').item())
+                    mse_vals.append(torch.nn.functional.mse_loss(outputs.float(), y.float(), reduction='mean').item())
+                
+                inc = min(x.shape[0], total_samples - processed)
+                processed += inc
+                pbar.update(inc)
+                pbar.set_postfix(loss=f"{np.mean(losses):.4f}")
+            pbar.close()
+        
+        metrics = {'val/loss': float(np.mean(losses)) if len(losses) > 0 else 0.0}
+        if self.loss_type == 'cce':
+            if total > 0:
+                metrics['val/acc'] = correct / total
+        else:
+            if len(mae_vals) > 0:
+                metrics['val/mae'] = float(np.mean(mae_vals))
+            if len(mse_vals) > 0:
+                metrics['val/mse'] = float(np.mean(mse_vals))
+        
+        # Print final results
+        if self.loss_type == 'cce':
+            acc_str = f", acc: {metrics.get('val/acc', 0.0):.4f}" if 'val/acc' in metrics else ""
+            print(f"Validation - loss: {metrics['val/loss']:.4f}{acc_str}")
+        else:
+            mae_str = f", mae: {metrics.get('val/mae', 0.0):.4f}" if 'val/mae' in metrics else ""
+            mse_str = f", mse: {metrics.get('val/mse', 0.0):.4f}" if 'val/mse' in metrics else ""
+            print(f"Validation - loss: {metrics['val/loss']:.4f}{mae_str}{mse_str}")
+        
+        torch.cuda.empty_cache()
+        return metrics

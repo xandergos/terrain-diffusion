@@ -275,9 +275,11 @@ class ConsistencyTrainer(Trainer):
         sigma_data = self.scheduler.config.sigma_data
         samples = torch.zeros_like(images)
         t_values = [
-            torch.arctan(self.scheduler.sigmas[0].to(images.device) / sigma_data),
-            torch.tensor(1.1, device=images.device),
+            torch.arctan(self.scheduler.sigmas[0].to(images.device) / sigma_data)
         ]
+        inter_t = self.config['evaluation'].get('inter_t', 1.1)
+        if inter_t is not None:
+            t_values += [torch.tensor(inter_t, device=images.device)]
         for t_scalar in t_values:
             t = t_scalar.view(1, 1, 1, 1).expand(images.shape[0], 1, 1, 1).to(images.device)
             z = torch.randn(images.shape, generator=generator, device=images.device) * sigma_data

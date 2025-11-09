@@ -5,7 +5,7 @@ import torch
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Button
 
-from terrain_diffusion.inference.world_pipeline import WorldPipeline, plot_channels_slider, normalize_tensor
+from terrain_diffusion.inference.world_pipeline import WorldPipeline, plot_channels_slider
 from terrain_diffusion.inference.relief_map import get_relief_map
 
 BIOME_LEGEND = {
@@ -43,6 +43,15 @@ BIOME_LEGEND = {
 }
 
 
+def _to_numpy_f32(x) -> np.ndarray:
+    """Convert torch.Tensor or array-like to numpy float32 on CPU without copying unnecessarily."""
+    if isinstance(x, np.ndarray):
+        return x.astype(np.float32, copy=False)
+    if isinstance(x, torch.Tensor):
+        return x.detach().cpu().to(torch.float32).numpy()
+    return np.asarray(x, dtype=np.float32)
+
+
 def start_explorer(hdf5_file: str, seed: int, coarse_window: int = 64, device: str | None = None, **kwargs) -> None:
     if device is None:
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -52,7 +61,7 @@ def start_explorer(hdf5_file: str, seed: int, coarse_window: int = 64, device: s
         cj0, cj1 = -coarse_window, coarse_window
 
         # Coarse elevation (signed-sqrt -> meters)
-        coarse_elev_ss = normalize_tensor(world.coarse[:, ci0:ci1, cj0:cj1], dim=0)[0]
+        coarse_elev_ss = world.coarse[0, ci0:ci1, cj0:cj1]
         coarse_elev_m = torch.sign(coarse_elev_ss) * torch.square(coarse_elev_ss)
         coarse_np = coarse_elev_m.detach().cpu().numpy()
 
@@ -127,6 +136,40 @@ def start_explorer(hdf5_file: str, seed: int, coarse_window: int = 64, device: s
                 fig.canvas.draw_idle()
                 return
             
+            # Export a tiff of last_elev
+            try:
+                import tifffile
+                # If you want to change the filename dynamically, modify the string below
+                output_path = f"elev_export.tif"
+                data_to_save = _to_numpy_f32(last_elev)
+                tifffile.imwrite(output_path, data_to_save.astype(np.float32))
+                print(f"Exported last_elev as {output_path}")
+            except ImportError:
+                print("tifffile package is required for TIFF export. Please install it with 'pip install tifffile'.")
+            except Exception as e:
+                print(f"Error exporting TIFF: {e}")
+                
+            # Also export a Unity-compatible RAW heightmap (16-bit little-endian, normalized 0..1)
+            try:
+                raw_path = "elev_export.raw"
+                data_np = _to_numpy_f32(last_elev)
+                mask = np.isfinite(data_np)
+                if np.any(mask):
+                    vmin = float(np.min(data_np[mask]))
+                    vmax = float(np.max(data_np[mask]))
+                    if vmax > vmin:
+                        norm = (data_np - vmin) / (vmax - vmin)
+                    else:
+                        norm = np.zeros_like(data_np, dtype=np.float32)
+                else:
+                    norm = np.zeros_like(data_np, dtype=np.float32)
+                norm[~mask] = 0.0
+                raw_u16_le = (np.clip(norm, 0.0, 1.0) * 65535.0 + 0.5).astype('<u2')
+                raw_u16_le.tofile(raw_path)
+                print(f"Exported RAW (16-bit little-endian) as {raw_path} with shape {raw_u16_le.shape}. vmin={vmin}, vmax={vmax}")
+            except Exception as e:
+                print(f"Error exporting RAW: {e}")
+                
             relief_rgb = get_relief_map(last_elev, None, last_biome, None)
             relief_rgb[last_elev <= 0] = np.nan
             im_relief.set_data(relief_rgb)
@@ -156,7 +199,7 @@ def start_explorer(hdf5_file: str, seed: int, coarse_window: int = 64, device: s
             j1, j2 = center_j_90 - half, center_j_90 + half
 
             # Fetch elevation at 90 m resolution
-            region_dict = world.get_90(i1, j1, i2, j2, with_biome=False, with_color=False)
+            region_dict = world.get_90(i1, j1, i2, j2, with_biome=False, with_color=True)
             elev = region_dict['elev']
             biome = region_dict['biome']
             climate = region_dict['climate']
@@ -224,8 +267,8 @@ def start_explorer(hdf5_file: str, seed: int, coarse_window: int = 64, device: s
 
 if __name__ == '__main__':
     with NamedTemporaryFile(suffix='.h5') as tmp_file:
-        start_explorer('world_big.h5', 1, device='cuda', coarse_window=76,
-                    drop_water_pct=0.0,
-                    frequency_mult=[0.7, 0.7, 0.7, 0.7, 0.7],
+        start_explorer('world_mid.h5', 1, device='cuda', coarse_window=64,
+                    drop_water_pct=0.5,
+                    frequency_mult=[1.0, 1.0, 1.0, 1.0, 1.0],
                     cond_snr=[1.0, 1.0, 1.0, 1.0, 1.0],
                     log_mode='debug')

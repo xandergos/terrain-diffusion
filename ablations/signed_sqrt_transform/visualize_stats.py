@@ -14,13 +14,15 @@ from scipy import stats
 sys.path.insert(0, '/mnt/ntfs2/shared/terrain-diffusion')
 from terrain_diffusion.data.laplacian_encoder import laplacian_decode
 
+GAMMA = 0.5
+
 def signed_sqrt_transform(values):
     """Apply signed sqrt transform to elevation data"""
-    return np.sign(values) * np.sqrt(np.abs(values))
+    return np.sign(values) * np.abs(values)**GAMMA
 
 def inverse_signed_sqrt_transform(values):
     """Invert the signed sqrt transform to get back original elevation"""
-    return np.sign(values) * values * values
+    return np.sign(values) * np.abs(values)**(1/GAMMA)
 
 def load_samples_from_h5(h5_file, num_samples=100, crop_size=512, min_pct_land=0.8):
     """Load random samples from the HDF5 dataset and reconstruct full terrain"""
@@ -86,7 +88,8 @@ def load_samples_from_h5(h5_file, num_samples=100, crop_size=512, min_pct_land=0
                 crop_transformed = np.nan_to_num(crop_transformed, nan=np.nanmean(crop_transformed))
             
             # Inverse transform to get original elevation
-            crop_original = inverse_signed_sqrt_transform(crop_transformed)
+            crop_original = np.sign(crop_transformed) * np.square(crop_transformed)
+            crop_transformed = signed_sqrt_transform(crop_original)
             
             samples_transformed.append(crop_transformed)
             samples_original.append(crop_original)

@@ -49,37 +49,37 @@ def download_cell_data(image, cell: Tuple[float, float, float, float], output_di
     ]
     
     try:
+        # MERIT elevations fit safely in Int16; export native grid without resampling.
+        # Do any resampling/reprojection offline after download.
+        image_to_export = image
+        
         # Save to local file
         filename = f"{image_name}_{cell_index}.tif" if image_name else f"cell_{cell_index}.tif"
         filepath = os.path.join(output_dir, filename)
         temp_filepath = filepath + ".tmp"
         
         if os.path.exists(filepath):
-            print(f"File {filepath} already exists")
             return filepath
         
         # Get download URL
-        url = image.getDownloadURL({
+        url = image_to_export.getDownloadURL({
             'region': region,
-            'crs': 'EPSG:4326',
-            'crs_transform': crs_transform,  # snake_case here
             'format': 'GEO_TIFF',
             'filePerBand': False,
-            'maxPixels': 1e9
+            'maxPixels': 1e9,
+            'formatOptions': {
+                'cloudOptimized': False,
+                'compression': 'LZW'
+            }
         })
         
         # Download the file to temp location
-        response = requests.get(url, stream=True)
+        response = requests.get(url, stream=True, timeout=10)
         response.raise_for_status()
         
-        try:
-            with open(temp_filepath, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
-        except Exception as e:
-            print(f"Error downloading cell {cell_index}. Retrying in 60 seconds: {e}")
-            time.sleep(60)
-            raise
+        with open(temp_filepath, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
         
         # Move temp file to final location
         os.rename(temp_filepath, filepath)
@@ -118,7 +118,7 @@ def calculate_land_percentage(cell: Tuple[float, float, float, float], resolutio
 @click.option('--image', type=str, help='Image to export. Options: "dem" or "landcover" or "gtopo')
 @click.option('--output_dir', type=str, default="terrain_data", help='Directory where the exported data will be saved')
 @click.option('--output_size', type=int, default=4096, help='Output size of the image in pixels')
-@click.option('--output_resolution', type=int, default=90, help='Output resolution of the image in meters')
+@click.option('--output_resolution', type=float, default=90, help='Output resolution of the image in meters')
 @click.option('--land_threshold', type=float, default=0.1, help='Required land coverage percentage per export cell (Default 0.1%)')
 def download_data_cli(image, output_dir, output_size, output_resolution, land_threshold):
     """

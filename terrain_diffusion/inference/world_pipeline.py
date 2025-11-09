@@ -247,6 +247,15 @@ def plot_channels_slider(data, cmap=None, channel_names=None):
     plt.show()
     return fig, ax, slider
     
+MOCK = False
+
+def normalize_tensor(tensor, dim=0):
+    idx_num = [slice(None)] * tensor.ndim
+    idx_den = [slice(None)] * tensor.ndim
+    idx_num[dim] = slice(None, -1)
+    idx_den[dim] = slice(-1, None)
+    return tensor[tuple(idx_num)] / tensor[tuple(idx_den)]
+
 class WorldPipeline:
     def __init__(self, 
                  hdf5_file, 
@@ -258,17 +267,36 @@ class WorldPipeline:
                  coarse_model="checkpoints/models/diffusion_coarse",
                  base_model="checkpoints/models/consistency_base-192x3",
                  decoder_model="checkpoints/models/consistency_decoder-64x3",
+                 superres_model="checkpoints/models/consistency_superres-32x2",
                  biome_classifier_model="checkpoints/models/biome_classifier",
+                 color_pred_model="checkpoints/color_pred/latest_checkpoint/saved_model",
                  **kwargs):
         self.kwargs = kwargs
         self.device = device
-        self.tile_store = HDF5TileStore(hdf5_file, mode=mode, compression=compression, compression_opts=compression_opts)
+        self.tile_store = HDF5TileStore(hdf5_file, mode=mode, compression=compression, compression_opts=compression_opts, tile_cache_size=100)
         self.seed = seed or random.randint(0, 2**31-1)
         
         self.log_mode = kwargs.get('log_mode', 'info')
         
-        self.synthetic_map_factory = make_synthetic_map_factory(seed=self.seed, frequency_mult=self.kwargs.get('frequency_mult', [1.5, 3, 3, 3, 3]), drop_water_pct=0.5)
-        self.biome_classifier = Perceptron.from_pretrained(biome_classifier_model)
+        self.synthetic_map_factory = make_synthetic_map_factory(seed=self.seed, frequency_mult=self.kwargs.get('frequency_mult', [1.5, 3, 3, 3, 3]), 
+                                                                drop_water_pct=kwargs.get('drop_water_pct', 0.5))
+        if biome_classifier_model is not None:
+            try:
+                self.biome_classifier = Perceptron.from_pretrained(biome_classifier_model)
+            except Exception as e:
+                print(f"Error loading biome classifier: {e}")
+                self.biome_classifier = None
+        else:
+            self.biome_classifier = None
+            
+        if color_pred_model is not None:
+            try:
+                self.color_pred = Perceptron.from_pretrained(color_pred_model)
+            except Exception as e:
+                print(f"Error loading color predictor: {e}")
+                self.color_pred = None
+        else:
+            self.color_pred = None
         
         # Create coarse perlin
         self.coarse_model = EDMUnet2D.from_pretrained(coarse_model).to(device)
@@ -280,6 +308,22 @@ class WorldPipeline:
         self.decoder_model = EDMUnet2D.from_pretrained(decoder_model).to(device)
         self.residual_90 = self._get_residual_90_map()
         
+        self.superres_model = EDMUnet2D.from_pretrained(superres_model).to(device)
+        self.residual_45 = self._get_double_resolution_map(self.residual_90, 90)
+        self.residual_22 = self._get_double_resolution_map(self.residual_45, 45)
+        self.residual_11 = self._get_double_resolution_map(self.residual_22, 22)
+        
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
+
+    def close(self):
+        """Release resources associated with this pipeline."""
+        self.tile_store.close()
+
     def _get_coarse_map(self):
         TILE_SIZE = 64
         TILE_STRIDE = TILE_SIZE//2
@@ -327,10 +371,7 @@ class WorldPipeline:
                                                shape=(7, None, None),
                                                f=f,
                                                output_window=output_window)
-        
-        norm_tensor = normalize_infinite_tensor(self.tile_store, "coarse_map", tensor, TILE_SIZE)
-        tensor.mark_for_cleanup()
-        return norm_tensor
+        return tensor
         
     def _get_latent_map(self):
         TILE_SIZE = 64
@@ -385,6 +426,8 @@ class WorldPipeline:
         def f(ctx, sample, cond_img, t, seed_offset=0):
             if self.log_mode == 'debug':
                 print(f"Latent f at {ctx}")
+            if MOCK:
+                return torch.ones((6, TILE_SIZE, TILE_SIZE))
             if sample is None:
                 sample = torch.zeros((1, 5, TILE_SIZE, TILE_SIZE), device=self.device)
             else:
@@ -428,12 +471,9 @@ class WorldPipeline:
                                                 output_window=output_window,
                                                 args=(tensor, self.coarse,),
                                                 args_windows=(output_window, coarse_window,))
-            tensor.mark_for_cleanup()
             tensor = next_tensor
         
-        norm_tensor = normalize_infinite_tensor(self.tile_store, "latent_map", tensor, TILE_SIZE)
-        tensor.mark_for_cleanup()
-        return norm_tensor
+        return tensor
     
     def _get_residual_90_map(self):
         TILE_SIZE = 512
@@ -443,12 +483,15 @@ class WorldPipeline:
         weight_window = linear_weight_window(TILE_SIZE, 'cpu', torch.float32)
         
         t_list = [torch.atan(scheduler.sigmas[0] / scheduler.config.sigma_data)]
-        #t_list += [torch.arctan(torch.tensor(0.075) / 0.5)]
+        t_list += [torch.arctan(torch.tensor(0.075) / 0.5)]
         def f(ctx, latents):
             if self.log_mode == 'debug':
                 print(f"Residual f at {ctx}")
+            if MOCK:
+                return torch.ones((2, TILE_SIZE, TILE_SIZE))
             sample = torch.zeros((1, 1, TILE_SIZE, TILE_SIZE), device=self.device)
-            latents = latents[:4].view(1, 4, TILE_SIZE//8, TILE_SIZE//8)
+            # Lazily normalize latent conditioning (first 5 channels are data, last is weight)
+            latents = (latents[:-1] / latents[-1:])[:4].view(1, 4, TILE_SIZE//8, TILE_SIZE//8)
             upsampled_latents = torch.nn.functional.interpolate(latents, size=(TILE_SIZE, TILE_SIZE), mode='nearest').to(self.device)
             
             for i, t in enumerate(t_list):
@@ -466,7 +509,7 @@ class WorldPipeline:
             return torch.cat([sample[0] * weight_window[None], weight_window[None]], dim=0)
         
         output_window = TensorWindow(size=(2, TILE_SIZE, TILE_SIZE), stride=(2, TILE_STRIDE, TILE_STRIDE))
-        input_window = TensorWindow(size=(5, TILE_SIZE//8, TILE_SIZE//8), stride=(5, TILE_STRIDE//8, TILE_STRIDE//8))
+        input_window = TensorWindow(size=(6, TILE_SIZE//8, TILE_SIZE//8), stride=(6, TILE_STRIDE//8, TILE_STRIDE//8))
         
         tensor = self.tile_store.get_or_create("init_residual_90_map",
                                                shape=(2, None, None),
@@ -475,153 +518,301 @@ class WorldPipeline:
                                                args=(self.latents,),
                                                args_windows=(input_window,))
             
-        norm_tensor = normalize_infinite_tensor(self.tile_store, "residual_90_map", tensor, TILE_SIZE)
-        tensor.mark_for_cleanup()
-        return norm_tensor
+        return tensor
     
-    def get_90(self, i1, j1, i2, j2):
+    def _get_double_resolution_map(self, prev_tensor, prev_res):
+        TILE_SIZE = 512
+        TILE_STRIDE = TILE_SIZE//2
+        
+        scheduler = EDMDPMSolverMultistepScheduler(sigma_min=0.002, sigma_max=80, sigma_data=0.5)
+        weight_window = linear_weight_window(TILE_SIZE, 'cpu', torch.float32)
+        
+        t_list = [torch.arctan(torch.tensor(80.0) / 0.5)]
+        t_list += [torch.arctan(torch.tensor(0.5) / 0.5)]
+        def f(ctx, lowres):
+            if self.log_mode == 'debug':
+                print(f"Residual({prev_res}->{prev_res//2}) f at {ctx}")
+            if MOCK:
+                return torch.ones((2, TILE_SIZE, TILE_SIZE))
+            
+            noise_level = torch.tensor([1.0], device=self.device)
+            
+            # Lazily normalize low-resolution input (value / weight)
+            lowres = (lowres[:1] / lowres[1:2]).view(1, 1, TILE_SIZE//2, TILE_SIZE//2)
+            upsampled_latents = torch.nn.functional.interpolate(lowres, size=(TILE_SIZE, TILE_SIZE), mode='nearest').to(self.device)
+            sample = torch.clone(upsampled_latents) * scheduler.config.sigma_data
+            
+            lowres_noisy = lowres.to(self.device) + torch.randn(lowres.shape, device=self.device) * noise_level * 0.03
+            upsampled_latents_noisy = torch.nn.functional.interpolate(lowres_noisy, size=(TILE_SIZE, TILE_SIZE), mode='nearest').to(self.device)
+            
+            for i, t in enumerate(t_list):
+                noise = torch.as_tensor(gaussian_noise_patch(self.seed + 1537 + i, ctx[1]*TILE_STRIDE, ctx[2]*TILE_STRIDE, TILE_SIZE, TILE_SIZE, 
+                                                            channels=1, tile_h=TILE_SIZE, tile_w=TILE_SIZE))[None]
+                t = t.view(1, 1, 1, 1).to(self.device)
+                z = noise.to(self.device) * scheduler.config.sigma_data
+                x_t = torch.cos(t) * sample + torch.sin(t) * z
+                model_in = (x_t / scheduler.config.sigma_data).to(self.device)
+                model_in = torch.cat([model_in, upsampled_latents_noisy], dim=1)
+                pred = -self.superres_model(model_in, noise_labels=t.flatten(), conditional_inputs=[noise_level])
+                sample = torch.cos(t) * x_t - torch.sin(t) * scheduler.config.sigma_data * pred
+                
+            sample = sample.cpu() / scheduler.config.sigma_data
+            return torch.cat([sample[0] * weight_window[None], weight_window[None]], dim=0)
+        
+        output_window = TensorWindow(size=(2, TILE_SIZE, TILE_SIZE), stride=(2, TILE_STRIDE, TILE_STRIDE))
+        input_window = TensorWindow(size=(2, TILE_SIZE//2, TILE_SIZE//2), stride=(2, TILE_STRIDE//2, TILE_STRIDE//2))
+        
+        tensor = self.tile_store.get_or_create(f"init_residual_{prev_res//2}_map",
+                                               shape=(2, None, None),
+                                               f=f,
+                                               output_window=output_window,
+                                               args=(prev_tensor,),
+                                               args_windows=(input_window,))
+            
+        return tensor
+    
+    @torch.no_grad()
+    def get_90(self, i1, j1, i2, j2, with_climate=True, with_biome=True, with_color=True):
         LOWFREQ_MEAN = -31.4
         LOWFREQ_STD = 38.6
         RESIDUAL_MEAN = 0.0
         RESIDUAL_STD = 1.1678
         
-        # Elevation at 90m
-        residual = self.residual_90[0, i1:i2, j1:j2] * RESIDUAL_STD + RESIDUAL_MEAN
-        lowfreq = self.latents[4, i1//8:i2//8, j1//8:j2//8] * LOWFREQ_STD + LOWFREQ_MEAN
-        residual, lowfreq = laplacian_denoise(residual, lowfreq, sigma=5)
-        elev = laplacian_decode(residual, lowfreq)
+        # Elevation at 90m with minimal internal padding to avoid tile seams
+        sigma = 5
+        kernel_size = (int(sigma * 2) // 2) * 2 + 1
+        pad_lr = kernel_size // 2  # padding in low-res (latents) pixels
+        scale = 8
+        pad_hr = pad_lr * scale    # corresponding padding in 90m pixels
 
-        # Climate from coarse map (channels 2:6 are: temp_mean, temp_std, precip_mean, precip_std)
-        # Coarse resolution is 256 x 90m per pixel. To support partial pixels, we
-        # load an expanded coarse crop, upsample by 256x (nearest), then crop.
-        def ceil_div(a: int, b: int) -> int:
-            return -((-a) // b)
+        pi1, pj1 = i1 - pad_hr, j1 - pad_hr
+        pi2, pj2 = i2 + pad_hr, j2 + pad_hr
 
-        ci1 = i1 // 256
-        cj1 = j1 // 256
-        ci2 = ceil_div(i2, 256)
-        cj2 = ceil_div(j2, 256)
+        # Lazily normalize residual and lowfreq from unnormalized infinite tensors
+        residual_init = self.residual_90[:, pi1:pi2, pj1:pj2]
+        residual_p = (residual_init[0] / residual_init[1]) * RESIDUAL_STD + RESIDUAL_MEAN
+        latents_init = self.latents[:, pi1//scale:pi2//scale, pj1//scale:pj2//scale]
+        latents_norm = latents_init[:-1] / latents_init[-1:]
+        lowfreq_p = latents_norm[4] * LOWFREQ_STD + LOWFREQ_MEAN
 
-        # Slice climate channels at coarse resolution
-        coarse_window_size = 15
-        coarse_padding = (coarse_window_size - 1) // 2 + 1
-        # elev, p5, temp_mean, temp_std, precip_mean, precip_std, mask
-        coarse_map = self.coarse[:, ci1-coarse_padding:ci2+coarse_padding, cj1-coarse_padding:cj2+coarse_padding]
-        coarse_elev_denorm = torch.sign(coarse_map[0]) * torch.square(torch.maximum(torch.zeros_like(coarse_map[0]), coarse_map[0]))
-        temp_baseline, beta = local_baseline_temperature_torch(coarse_map[2], coarse_elev_denorm, win=coarse_window_size, fallback_threshold=0.02)
-        
-        # Upsample to 90m grid
-        coarse_up = torch.nn.functional.interpolate(coarse_map[None], scale_factor=256, mode='bicubic')[0]
-        temp_baseline_up = torch.nn.functional.interpolate(temp_baseline[None], scale_factor=256, mode='bicubic')[0]
-        beta_up = torch.nn.functional.interpolate(beta[None], scale_factor=256, mode='bicubic')[0]
-        
-        temp_baseline_up = temp_baseline_up[:, 256:-256, 256:-256]
-        beta_up = beta_up[:, 256:-256, 256:-256]
+        residual_p, lowfreq_p = laplacian_denoise(residual_p, lowfreq_p, sigma=sigma)
+        elev_p = laplacian_decode(residual_p, lowfreq_p)
 
-        # Crop to requested region (account for coarse padding in upsampled grid)
-        oi1 = i1 - (ci1 - coarse_padding) * 256
-        oj1 = j1 - (cj1 - coarse_padding) * 256
-        oi2 = oi1 + (i2 - i1)
-        oj2 = oj1 + (j2 - j1)
-        coarse_up = coarse_up[:, oi1:oi2, oj1:oj2]
-        
-        temp_realistic = temp_baseline_up[0] + beta_up[0] * torch.square(torch.maximum(elev, torch.zeros_like(elev)))
-        climate = torch.stack([temp_realistic, coarse_up[3], coarse_up[4], coarse_up[5], beta_up[0]])
-        
-        biome_in_mean = torch.tensor([687.1005, 14.652394, 688.7267, 795.926, 66.63564])
-        biome_in_std = torch.tensor([875.3516, 10.713884, 461.52255, 730.29474, 35.284668])
-        biome_in_img = torch.cat([elev[None], climate[0:4]], dim=0).permute(1, 2, 0).view(-1, 5)
-        biome_map = self.biome_classifier((biome_in_img - biome_in_mean.view(1, 5)) / biome_in_std.view(1, 5))
-        #biome_map = torch.argmax(biome_map, dim=1).reshape(i2 - i1, j2 - j1)
-        
-        temp = 0.3
-        idx = torch.distributions.Categorical(logits=biome_map / temp).sample()
-        biome_map = idx.reshape(i2 - i1, j2 - j1)
+        oi, oj = i1 - pi1, j1 - pj1
+        h, w = i2 - i1, j2 - j1
+        elev = elev_p[oi:oi + h, oj:oj + w]
 
+        if with_climate:
+            # Climate from coarse map (channels 2:6 are: temp_mean, temp_std, precip_mean, precip_std)
+            # Coarse resolution is 256 x 90m per pixel. To support partial pixels, we
+            # load an expanded coarse crop, upsample by 256x (nearest), then crop.
+            def ceil_div(a: int, b: int) -> int:
+                return -((-a) // b)
+
+            ci1 = i1 // 256
+            cj1 = j1 // 256
+            ci2 = ceil_div(i2, 256)
+            cj2 = ceil_div(j2, 256)
+
+            # Slice climate channels at coarse resolution
+            coarse_window_size = 15
+            coarse_padding = (coarse_window_size - 1) // 2 + 1
+            # elev, p5, temp_mean, temp_std, precip_mean, precip_std, mask
+            coarse_init = self.coarse[:, ci1-coarse_padding:ci2+coarse_padding, cj1-coarse_padding:cj2+coarse_padding]
+            coarse_map = coarse_init[:-1] / coarse_init[-1:]
+            coarse_elev_denorm = torch.sign(coarse_map[0]) * torch.square(torch.maximum(torch.zeros_like(coarse_map[0]), coarse_map[0]))
+            temp_baseline, beta = local_baseline_temperature_torch(coarse_map[2], coarse_elev_denorm, win=coarse_window_size, fallback_threshold=0.02)
+            
+            # Upsample to 90m grid
+            coarse_up = torch.nn.functional.interpolate(coarse_map[None], scale_factor=256, mode='bicubic')[0]
+            temp_baseline_up = torch.nn.functional.interpolate(temp_baseline[None], scale_factor=256, mode='bicubic')[0]
+            beta_up = torch.nn.functional.interpolate(beta[None], scale_factor=256, mode='bicubic')[0]
+            
+            temp_baseline_up = temp_baseline_up[:, 256:-256, 256:-256]
+            beta_up = beta_up[:, 256:-256, 256:-256]
+
+            # Crop to requested region (account for coarse padding in upsampled grid)
+            oi1 = i1 - (ci1 - coarse_padding) * 256
+            oj1 = j1 - (cj1 - coarse_padding) * 256
+            oi2 = oi1 + (i2 - i1)
+            oj2 = oj1 + (j2 - j1)
+            coarse_up = coarse_up[:, oi1:oi2, oj1:oj2]
+            
+            temp_realistic = temp_baseline_up[0] + beta_up[0] * torch.square(torch.maximum(elev, torch.zeros_like(elev)))
+            climate = torch.stack([temp_realistic, coarse_up[3], coarse_up[4], coarse_up[5], beta_up[0]])
+        else:
+            climate = None
+        
+        if with_biome or with_color:
+            if climate is None:
+                raise ValueError("Climate is required to compute biome")
+            biome_in_mean = torch.tensor([687.1005, 14.652394, 688.7267, 795.926, 66.63564])
+            biome_in_std = torch.tensor([875.3516, 10.713884, 461.52255, 730.29474, 35.284668])
+            biome_in_img = torch.cat([elev[None], climate[0:4]], dim=0).permute(1, 2, 0).view(-1, 5)
+            if with_biome:
+                biome_map = self.biome_classifier((biome_in_img - biome_in_mean.view(1, 5)) / biome_in_std.view(1, 5))
+                #biome_map = torch.argmax(biome_map, dim=1).reshape(i2 - i1, j2 - j1)
+                
+                temp = 0.3
+                idx = torch.distributions.Categorical(logits=biome_map / temp).sample()
+                biome_map = idx.reshape(i2 - i1, j2 - j1)
+            else:
+                biome_map = None
+            if with_color:
+                # Enable dropout
+                self.color_pred.train()
+                color_map = self.color_pred((biome_in_img - biome_in_mean.view(1, 5)) / biome_in_std.view(1, 5))
+                color_map = color_map.reshape(i2 - i1, j2 - j1, 3)
+            else:
+                color_map = None
+        else:
+            biome_map = None
+            color_map = None
         return {
             'elev': elev,
             'climate': climate,
             'biome': biome_map,
+            'color': color_map,
         }
     
-#if __name__ == '__main__':
-#    
-#    
-#    with NamedTemporaryFile(suffix='.h5') as tmp_file:
-#        # prev = 
-#        x = WorldPipeline('temp.h5', device='cuda', seed=854)
-#    
-#        start_time = time.time()
-#        elev, climate = x.get_90(-128*24, -128*0, -128*8, 128*16)
-#        adj = np.maximum(elev.numpy(), 0)
-#        adj[adj == 0] = np.nan
-#        end_time = time.time()
-#        print(f"Time taken: {end_time - start_time} seconds")
-#        adj = adj**2
-#        
-#        #adj = smooth_river_bumps(adj)
-#        adj_new = fill_depressions_priority_flood(adj, epsilon=0.03, max_raise=2000)
-#        #adj_new = adj
-#        adj_diff = adj_new - adj
-#        
-#        flow = plot_flow_indicator(adj_new, max_pool_kernel=4)
-#        
-#        full_map = torch.cat([torch.as_tensor(adj_new)[None], climate], dim=0)
-#        
-#        pred_temp = (climate[0] + climate[4] * torch.as_tensor(adj_new))[None]
-#        full_map = torch.cat([torch.as_tensor(adj_new)[None], pred_temp, climate[1:]], dim=0)
-#        
-#        biome_in_mean = [687.1005, 14.652394, 688.7267, 795.926, 66.63564]
-#        biome_in_std = [875.3516, 10.713884, 461.52255, 730.29474, 35.284668]
-#        
-#        orig_size = full_map.shape[1:]
-#        biome_map = biome_class((full_map.permute(1, 2, 0)[:, :, :5].view(-1, 5) - torch.tensor(biome_in_mean)[None]) / torch.tensor(biome_in_std)[None])
-#        biome_map = torch.argmax(biome_map, dim=1).reshape(*orig_size)
-#        
-#        # INSERT_YOUR_CODE
-#        # Convert biome_map to RGB
-#        biome_rgb_lut = np.array([
-#            [0, 0, 0],         # index 0 (unused, possibly "background" or "no class")
-#            [0, 0, 255],       # 1:  Af   Tropical, rainforest
-#            [0, 120, 255],     # 2:  Am   Tropical, monsoon
-#            [70, 170, 250],    # 3:  Aw   Tropical, savannah
-#            [255, 0, 0],       # 4:  BWh  Arid, desert, hot
-#            [255, 150, 150],   # 5:  BWk  Arid, desert, cold
-#            [245, 165, 0],     # 6:  BSh  Arid, steppe, hot
-#            [255, 220, 100],   # 7:  BSk  Arid, steppe, cold
-#            [255, 255, 0],     # 8:  Csa  Temperate, dry summer, hot summer
-#            [200, 200, 0],     # 9:  Csb  Temperate, dry summer, warm summer
-#            [150, 150, 0],     #10:  Csc  Temperate, dry summer, cold summer
-#            [150, 255, 150],   #11:  Cwa  Temperate, dry winter, hot summer
-#            [100, 200, 100],   #12:  Cwb  Temperate, dry winter, warm summer
-#            [50, 150, 50],     #13:  Cwc  Temperate, dry winter, cold summer
-#            [200, 255, 80],    #14:  Cfa  Temperate, no dry season, hot summer
-#            [100, 255, 80],    #15:  Cfb  Temperate, no dry season, warm summer
-#            [50, 200, 0],      #16:  Cfc  Temperate, no dry season, cold summer
-#            [255, 0, 255],     #17:  Dsa  Cold, dry summer, hot summer
-#            [200, 0, 200],     #18:  Dsb  Cold, dry summer, warm summer
-#            [150, 50, 150],    #19:  Dsc  Cold, dry summer, cold summer
-#            [150, 100, 150],   #20:  Dsd  Cold, dry summer, very cold winter
-#            [170, 175, 255],   #21:  Dwa  Cold, dry winter, hot summer
-#            [90, 120, 220],    #22:  Dwb  Cold, dry winter, warm summer
-#            [75, 80, 180],     #23:  Dwc  Cold, dry winter, cold summer
-#            [50, 0, 135],      #24:  Dwd  Cold, dry winter, very cold winter
-#            [0, 255, 255],     #25:  Dfa  Cold, no dry season, hot summer
-#            [55, 200, 255],    #26:  Dfb  Cold, no dry season, warm summer
-#            [0, 125, 125],     #27:  Dfc  Cold, no dry season, cold summer
-#            [0, 70, 95],       #28:  Dfd  Cold, no dry season, very cold winter
-#            [178, 178, 178],   #29:  ET   Polar, tundra
-#            [102, 102, 102],   #30:  EF   Polar, frost
-#        ], dtype=np.uint8)
-#        
-#        # biome_map values are indices 0-30, map to RGB
-#        biome_map_np = biome_map.cpu().numpy()
-#        biome_rgb = biome_rgb_lut[biome_map_np]
-#        
-#        basic_climate = torch.cat([pred_temp, climate[1:4]], dim=0)
-#        flow_up = skimage.transform.resize(flow, (elev.shape[0], elev.shape[1]), order=0)
-#        rm = get_relief_map(elev, basic_climate, biome_map, flow_up, flow_threshold=10)
-#        
-#        # Plot with a slider to switch channels
-#        plot_channels_slider([flow] + [x for x in full_map] + [biome_rgb, adj_diff, rm])
-#        
+    @torch.no_grad()
+    def get_45(self, i1, j1, i2, j2):
+        LOWFREQ_MEAN = -31.4
+        LOWFREQ_STD = 38.6
+        RESIDUAL_MEAN = 0.0
+        RESIDUAL_STD = 1.1678
+        
+        # Elevation at 90m with minimal internal padding to avoid tile seams
+        sigma = 5
+        kernel_size = (int(sigma * 2) // 2) * 2 + 1
+        pad_lr = kernel_size // 2  # padding in low-res (latents) pixels
+        scale = 16
+        pad_hr = pad_lr * scale    # corresponding padding in 45m pixels
+
+        pi1, pj1 = i1 - pad_hr, j1 - pad_hr
+        pi2, pj2 = i2 + pad_hr, j2 + pad_hr
+
+        # Lazily normalize residual and lowfreq from unnormalized infinite tensors
+        residual_init = self.residual_45[:, pi1:pi2, pj1:pj2]
+        residual_p = (residual_init[0] / residual_init[1]) * RESIDUAL_STD + RESIDUAL_MEAN
+        latents_init = self.latents[:, pi1//scale:pi2//scale, pj1//scale:pj2//scale]
+        latents_norm = latents_init[:-1] / latents_init[-1:]
+        lowfreq_p = latents_norm[4] * LOWFREQ_STD + LOWFREQ_MEAN
+
+        residual_p, lowfreq_p = laplacian_denoise(residual_p, lowfreq_p, sigma=sigma)
+        elev_p = laplacian_decode(residual_p, lowfreq_p)
+
+        oi, oj = i1 - pi1, j1 - pj1
+        h, w = i2 - i1, j2 - j1
+        elev = elev_p[oi:oi + h, oj:oj + w]
+
+        return {
+            'elev': elev
+        }
+    
+    def get_22(self, i1, j1, i2, j2):
+        LOWFREQ_MEAN = -31.4
+        LOWFREQ_STD = 38.6
+        RESIDUAL_MEAN = 0.0
+        RESIDUAL_STD = 1.1678
+        
+        # Elevation at 90m with minimal internal padding to avoid tile seams
+        sigma = 5
+        kernel_size = (int(sigma * 2) // 2) * 2 + 1
+        pad_lr = kernel_size // 2  # padding in low-res (latents) pixels
+        scale = 32
+        pad_hr = pad_lr * scale    # corresponding padding in 45m pixels
+
+        pi1, pj1 = i1 - pad_hr, j1 - pad_hr
+        pi2, pj2 = i2 + pad_hr, j2 + pad_hr
+
+        # Lazily normalize residual and lowfreq from unnormalized infinite tensors
+        residual_init = self.residual_22[:, pi1:pi2, pj1:pj2]
+        residual_p = (residual_init[0] / residual_init[1]) * RESIDUAL_STD + RESIDUAL_MEAN
+        latents_init = self.latents[:, pi1//scale:pi2//scale, pj1//scale:pj2//scale]
+        latents_norm = latents_init[:-1] / latents_init[-1:]
+        lowfreq_p = latents_norm[4] * LOWFREQ_STD + LOWFREQ_MEAN
+
+        residual_p, lowfreq_p = laplacian_denoise(residual_p, lowfreq_p, sigma=sigma)
+        elev_p = laplacian_decode(residual_p, lowfreq_p)
+
+        oi, oj = i1 - pi1, j1 - pj1
+        h, w = i2 - i1, j2 - j1
+        elev = elev_p[oi:oi + h, oj:oj + w]
+
+        return {
+            'elev': elev
+        }
+        
+    def get_11(self, i1, j1, i2, j2):
+        LOWFREQ_MEAN = -31.4
+        LOWFREQ_STD = 38.6
+        RESIDUAL_MEAN = 0.0
+        RESIDUAL_STD = 1.1678
+        
+        # Elevation at 90m with minimal internal padding to avoid tile seams
+        sigma = 5
+        kernel_size = (int(sigma * 2) // 2) * 2 + 1
+        pad_lr = kernel_size // 2  # padding in low-res (latents) pixels
+        scale = 64
+        pad_hr = pad_lr * scale    # corresponding padding in 45m pixels
+
+        pi1, pj1 = i1 - pad_hr, j1 - pad_hr
+        pi2, pj2 = i2 + pad_hr, j2 + pad_hr
+
+        # Lazily normalize residual and lowfreq from unnormalized infinite tensors
+        residual_init = self.residual_11[:, pi1:pi2, pj1:pj2]
+        residual_p = (residual_init[0] / residual_init[1]) * RESIDUAL_STD + RESIDUAL_MEAN
+        latents_init = self.latents[:, pi1//scale:pi2//scale, pj1//scale:pj2//scale]
+        latents_norm = latents_init[:-1] / latents_init[-1:]
+        lowfreq_p = latents_norm[4] * LOWFREQ_STD + LOWFREQ_MEAN
+
+        residual_p, lowfreq_p = laplacian_denoise(residual_p, lowfreq_p, sigma=sigma)
+        elev_p = laplacian_decode(residual_p, lowfreq_p)
+
+        oi, oj = i1 - pi1, j1 - pj1
+        h, w = i2 - i1, j2 - j1
+        elev = elev_p[oi:oi + h, oj:oj + w]
+
+        return {
+            'elev': elev
+        }
+        
+    
+if __name__ == '__main__':
+    
+    
+    with NamedTemporaryFile(suffix='.h5') as tmp_file:
+        x = WorldPipeline('world_big.h5', device='cuda', seed=1, log_mode='debug',
+                    drop_water_pct=0.0,
+                    frequency_mult=[0.7, 0.7, 0.7, 0.7, 0.7],
+                    cond_snr=[1.0, 1.0, 1.0, 1.0, 1.0],)
+    
+        residual_11 = x.residual_11[:, 8192:8192+4096, 12288:12288+4096]
+        residual_11 = residual_11[0] / residual_11[1]
+        plt.imshow(residual_11.detach().cpu().numpy())
+        plt.show()
+        
+        res_11 = x.get_11(8192, 12288, 8192+4096, 12288+4096)['elev']**2
+        plt.imshow(res_11.detach().cpu().numpy())
+        plt.show()
+        
+        try:
+            raw_path = "elev_export.raw"
+            data_np = res_11.detach().cpu().numpy()
+            mask = np.isfinite(data_np)
+            if np.any(mask):
+                vmin = float(np.min(data_np[mask]))
+                vmax = float(np.max(data_np[mask]))
+                if vmax > vmin:
+                    norm = (data_np - vmin) / (vmax - vmin)
+                else:
+                    norm = np.zeros_like(data_np, dtype=np.float32)
+            else:
+                norm = np.zeros_like(data_np, dtype=np.float32)
+            norm[~mask] = 0.0
+            raw_u16_le = (np.clip(norm, 0.0, 1.0) * 65535.0 + 0.5).astype('<u2')
+            raw_u16_le.tofile(raw_path)
+            print(f"Exported RAW (16-bit little-endian) as {raw_path} with shape {raw_u16_le.shape}. vmin={vmin}, vmax={vmax}")
+        except Exception as e:
+            print(f"Error exporting RAW: {e}")
