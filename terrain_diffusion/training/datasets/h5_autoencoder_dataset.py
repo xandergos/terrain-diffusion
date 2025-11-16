@@ -15,10 +15,10 @@ class H5AutoencoderDataset(Dataset):
                  subset_resolutions, 
                  subset_weights=None,
                  subset_class_labels=None,
-                 eval_dataset=False,
                  split=None,
                  residual_mean=None,
-                 residual_std=None):
+                 residual_std=None,
+                 signed_sqrt=True):
         """
         Args:
             h5_file (str): Path to the HDF5 file containing the dataset.
@@ -27,9 +27,9 @@ class H5AutoencoderDataset(Dataset):
             subset_resolutions (list): Resolutions to filter subsets by.
             subset_weights (list): Weights for each subset. Default is None (uniform sampling).
             subset_class_labels (list): Class labels for each subset. Defaults to None.
-            eval_dataset (bool): Whether to use deterministic transforms. Defaults to False.
             split (str): Split to use. Defaults to None (all splits).
             sigma_data (float): Data standard deviation. Defaults to 0.5.
+            signed_sqrt (bool): Whether to use signed sqrt transform. Defaults to True. If False, the transform is inverted at runtime.
         """
         if subset_weights is None:
             subset_weights = [1] * len(pct_land_ranges)
@@ -39,7 +39,7 @@ class H5AutoencoderDataset(Dataset):
         self.subset_resolutions = subset_resolutions
         self.subset_weights = subset_weights
         self.subset_class_labels = subset_class_labels
-        self.eval_dataset = eval_dataset
+        self.signed_sqrt = signed_sqrt
         
         # Initialize keys
         num_subsets = len(subset_weights)
@@ -75,6 +75,7 @@ class H5AutoencoderDataset(Dataset):
         
         self.residual_mean = residual_mean
         self.residual_std = residual_std
+        self.rng = torch.Generator()
         if self.residual_mean is None or self.residual_std is None:
             self.calculate_stats()
         
@@ -135,44 +136,58 @@ class H5AutoencoderDataset(Dataset):
         return max(len(keys) for keys in self.keys)
     
     def set_seed(self, seed):
-        random.seed(seed)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
+        self.rng = torch.Generator()
+        self.rng.manual_seed(int(seed))
 
     def __getitem__(self, index):
-        subset_idx = random.choices(range(len(self.subset_weights)), weights=self.subset_weights, k=1)[0]
-        index = random.randrange(len(self.keys[subset_idx]))
+        subset_weights_tensor = torch.tensor(self.subset_weights, dtype=torch.float32)
+        subset_idx = torch.multinomial(subset_weights_tensor, 1, generator=self.rng).item()
+        index = torch.randint(len(self.keys[subset_idx]), (1,), generator=self.rng).item()
         class_label = self.subset_class_labels[subset_idx] if self.subset_class_labels is not None else None
         
         chunk_id, res, subchunk_id = self.keys[subset_idx][index]
         with h5py.File(self.h5_file, 'r') as f:
             group_path = f"{res}/{chunk_id}/{subchunk_id}"
-            res_group = f[str(res)]
             
             # Get crop indices
             dset = f[f"{group_path}/residual"]
             data_shape = dset.shape
             
-            if not self.eval_dataset:
-                # Ensure i and j are multiples of 8 by first dividing by 8, then multiplying back
-                max_i = (data_shape[-2] - self.crop_size) // 8
-                max_j = (data_shape[-1] - self.crop_size) // 8
-                i = random.randint(0, max_i) * 8
-                j = random.randint(0, max_j) * 8
-            else:
-                # Center crop, ensuring it's aligned to 8-pixel boundaries
-                i = ((data_shape[-2] - self.crop_size) // 16) * 8
-                j = ((data_shape[-1] - self.crop_size) // 16) * 8
-            h, w = self.crop_size, self.crop_size
+            effective_crop_size = self.crop_size
+            if not self.signed_sqrt:
+                effective_crop_size += 80
+            
+            # Ensure i and j are multiples of 8 by first dividing by 8, then multiplying back
+            max_i = (data_shape[-2] - effective_crop_size) // 8
+            max_j = (data_shape[-1] - effective_crop_size) // 8
+            i = torch.randint(0, max_i + 1, (1,), generator=self.rng).item() * 8
+            j = torch.randint(0, max_j + 1, (1,), generator=self.rng).item() * 8
+            h, w = effective_crop_size, effective_crop_size
             
             # Load residual data (elevation)
             residual_data = torch.from_numpy(dset[i:i+h, j:j+w])[None]
-            residual_data = (residual_data - self.residual_mean) / self.residual_std
+            
+            if not self.signed_sqrt:
+                from terrain_diffusion.data.laplacian_encoder import laplacian_decode, laplacian_encode
+                lowfreq_data = torch.from_numpy(f[f"{group_path}/lowfreq"][i//8:i//8+h//8, j//8:j//8+w//8])[None]
+                full_terrain = laplacian_decode(residual_data, lowfreq_data)
+                full_terrain = np.sign(full_terrain) * np.abs(full_terrain)**2
+                residual_data, _ = laplacian_encode(full_terrain, effective_crop_size//8, sigma=5)
+                
+                # Central crop residual_data to self.crop_size
+                crop_h, crop_w = residual_data.shape[-2], residual_data.shape[-1]
+                target_h, target_w = self.crop_size, self.crop_size
+                start_i = (crop_h - target_h) // 2
+                start_j = (crop_w - target_w) // 2
+                residual_data = residual_data[..., start_i:start_i+target_h, start_j:start_j+target_w]
+            
+            if self.residual_mean is not None:
+                residual_data = (residual_data - self.residual_mean) / self.residual_std
             
             data = residual_data.float()
             
         # Apply transforms
-        transform_idx = random.randrange(8) if not self.eval_dataset else 0
+        transform_idx = torch.randint(8, (1,), generator=self.rng).item()
         flip = (transform_idx // 4) == 1
         rotate_k = transform_idx % 4
             

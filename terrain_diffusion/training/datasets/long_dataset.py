@@ -11,6 +11,7 @@ class LongDataset(Dataset):
         self.shuffle = shuffle
         self.seed = seed or random.randint(0, 2 ** 32 - 1)
         self._internal_epoch = 0
+        self._last_position = None
         self._reset_order()
 
     def __len__(self):
@@ -22,6 +23,7 @@ class LongDataset(Dataset):
     def set_seed(self, seed):
         self.seed = seed
         self._internal_epoch = 0
+        self._last_position = None
         self._reset_order()
     
     def _reset_order(self):
@@ -32,11 +34,14 @@ class LongDataset(Dataset):
             self.order = np.arange(len(self.base_dataset))
         self.base_seeds = rng.integers(0, 2 ** 32 - 1, size=len(self.base_dataset))
         self._internal_epoch += 1
+        self._last_position = None
 
     def __getitem__(self, index):
-        if index % len(self.base_dataset) == 0 and self.shuffle:
+        position = index % len(self.base_dataset)
+        if self.shuffle and self._last_position is not None and position <= self._last_position:
             self._reset_order()
-        if hasattr(self.base_dataset, 'set_seed'):
-            self.base_dataset.set_seed(int(self.base_seeds[index % len(self.base_dataset)]))
-        return self.base_dataset[int(self.order[index % len(self.base_dataset)])]
+        self._last_position = position
+        
+        self.base_dataset.set_seed(int(self.base_seeds[position]))
+        return self.base_dataset[int(self.order[position])]
 

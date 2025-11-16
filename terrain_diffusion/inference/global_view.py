@@ -73,7 +73,7 @@ def view_world(hdf5_file: str, seed: int, coarse_i0: int, coarse_j0: int, coarse
                 js = j0 + oj * stride
                 w = w_out * stride
 
-                region = world.get_90(is_, js, is_ + h, js + w, with_climate=False, with_biome=False)
+                region = world.get_90(is_, js, is_ + h, js + w, with_climate=False)
                 elev = region['elev'].detach().cpu().numpy()
                 elev = np.sign(elev) * elev**2
 

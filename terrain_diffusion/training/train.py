@@ -186,7 +186,7 @@ def main(ctx, config_path, ckpt_path, model_ckpt_path, debug_run, resume_id, ove
                     postfix[k] = f"{v[-1]:.4e}"
                 else:
                     mean_length = config['logging'].get('mean_length', 10)
-                    postfix[k] = f"{np.mean(v[-mean_length:]):.4f}"
+                    postfix[k] = f"{np.nanmean(v[-mean_length:]):.4f}"
             progress_bar.set_postfix(postfix)
             progress_bar.update(1)
         

@@ -15,7 +15,7 @@ import torch.nn.functional as F
 
 @click.command()
 @click.option('--dataset', required=True, help='Path to base HDF5 dataset containing highfreq/lowfreq')
-@click.option('--resolution', type=int, required=True, help='Resolution of the input images in meters')
+@click.option('--resolution', type=int, required=True, help='Resolution group of the input images in meters')
 @click.option('--encoder', 'encoder_model_path', required=True, help='Path to encoder model checkpoint')
 @click.option('--use-fp16', is_flag=True, help='Use FP16 for encoding', default=False)
 @click.option('--compile-model', is_flag=True, help='Compile the model', default=False)

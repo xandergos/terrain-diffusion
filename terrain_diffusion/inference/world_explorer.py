@@ -156,9 +156,9 @@ def start_explorer(hdf5_file: str, seed: int, coarse_window: int = 64, device: s
             j1, j2 = center_j_90 - half, center_j_90 + half
 
             # Fetch elevation at 90 m resolution
-            region_dict = world.get_90(i1, j1, i2, j2, with_biome=False, with_color=False)
+            region_dict = world.get_90(i1, j1, i2, j2)
             elev = region_dict['elev']
-            biome = region_dict['biome']
+            biome = None
             climate = region_dict['climate']
             elev = np.sign(elev) * elev**2
             #elev[elev == 0.0] = np.nan
@@ -224,8 +224,10 @@ def start_explorer(hdf5_file: str, seed: int, coarse_window: int = 64, device: s
 
 if __name__ == '__main__':
     with NamedTemporaryFile(suffix='.h5') as tmp_file:
-        start_explorer('world_big.h5', 1, device='cuda', coarse_window=76,
-                    drop_water_pct=0.0,
-                    frequency_mult=[0.7, 0.7, 0.7, 0.7, 0.7],
-                    cond_snr=[1.0, 1.0, 1.0, 1.0, 1.0],
-                    log_mode='debug')
+        start_explorer(
+            'world_mc.h5', device='cuda', seed=1, log_mode='debug', coarse_window=76,
+            drop_water_pct=0.5,
+            frequency_mult=[1.3, 1.3, 1.3, 1.3, 1.3],
+            cond_snr=[0.5, 0.5, 0.5, 0.5, 0.5],
+            mode="a",
+        )

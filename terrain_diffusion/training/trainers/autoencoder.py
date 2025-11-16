@@ -11,7 +11,7 @@ from ema_pytorch import PostHocEMA
 from terrain_diffusion.training.trainers.trainer import Trainer
 from terrain_diffusion.training.datasets import LongDataset
 from terrain_diffusion.models.edm_autoencoder import EDMAutoencoder
-from terrain_diffusion.training.utils import temporary_ema_to_model
+from terrain_diffusion.training.utils import recursive_to, temporary_ema_to_model
 
 
 class AutoencoderTrainer(Trainer):
@@ -37,7 +37,7 @@ class AutoencoderTrainer(Trainer):
         self.perceptual_loss = lpips.LPIPS(net='alex', spatial=True)
         
         # Loss weights
-        self.mse_weight = config['training'].get('mse_weight', 1.0)
+        self.mae_weight = config['training'].get('mae_weight', 1.0)
         self.perceptual_weight = config['training'].get('perceptual_weight', 1.0)
         
         # Initialize EMA
@@ -59,13 +59,11 @@ class AutoencoderTrainer(Trainer):
     
     def get_accelerate_modules(self):
         """Returns modules that need to be passed to accelerator.prepare."""
-        return (self.model, self.optimizer, 
-                self.val_dataloader, self.perceptual_loss)
+        return (self.model, self.optimizer, self.perceptual_loss)
     
     def set_prepared_modules(self, prepared_modules):
         """Set the modules returned from accelerator.prepare back into the trainer."""
-        self.model, self.optimizer, \
-            self.val_dataloader, self.perceptual_loss = prepared_modules
+        self.model, self.optimizer, self.perceptual_loss = prepared_modules
         # Move EMA to device after models are prepared
         self.ema = self.ema.to(self.accelerator.device)
     
@@ -99,8 +97,8 @@ class AutoencoderTrainer(Trainer):
     
     def _calculate_loss(self, reconstruction, reference):
         """Calculate MSE + perceptual loss."""
-        # MSE loss
-        mse_loss = torch.nn.functional.mse_loss(reconstruction, reference)
+        # MAE loss
+        mae_loss = torch.nn.functional.l1_loss(reconstruction, reference)
         
         # Perceptual loss with normalization
         ref_min = torch.amin(reference, dim=(1, 2, 3), keepdim=True)
@@ -120,9 +118,9 @@ class AutoencoderTrainer(Trainer):
         ).mean()
         
         # Weighted combination
-        total_loss = self.mse_weight * mse_loss + self.perceptual_weight * perceptual_loss
+        total_loss = self.mae_weight * mae_loss + self.perceptual_weight * perceptual_loss
         
-        return total_loss, mse_loss, perceptual_loss
+        return total_loss, mae_loss, perceptual_loss
     
     def train_step(self, state, batch):
         """Perform one training step."""
@@ -144,7 +142,7 @@ class AutoencoderTrainer(Trainer):
                 decoded_x, logvar = self.model.decode(z, include_logvar=True)
 
                 # Calculate reconstruction losses
-                recon_loss, mse_loss, perceptual_loss = self._calculate_loss(decoded_x, scaled_clean_images)
+                recon_loss, mae_loss, perceptual_loss = self._calculate_loss(decoded_x, scaled_clean_images)
                 
                 # KL loss
                 ndz_logvars = z_logvars[:, :self.model.config.latent_channels]
@@ -173,7 +171,7 @@ class AutoencoderTrainer(Trainer):
         
         stats['loss'] = total_loss.item()
         stats['recon_loss'] = recon_loss.item()
-        stats['mse_loss'] = mse_loss.item()
+        stats['mae_loss'] = mae_loss.item()
         stats['perceptual_loss'] = perceptual_loss.item()
         stats['kl_loss'] = kl_loss.item()
         stats['lr'] = lr
@@ -197,7 +195,7 @@ class AutoencoderTrainer(Trainer):
         
         with torch.no_grad(), self.accelerator.autocast(), temporary_ema_to_model(self.ema.ema_models[0]):
             while pbar.n < pbar.total:
-                batch = next(val_dataloader_iter)
+                batch = recursive_to(next(val_dataloader_iter), device=self.accelerator.device)
                 images = batch['image']
                 cond_img = batch.get('cond_img')
                 conditional_inputs = batch.get('cond_inputs')
@@ -212,7 +210,7 @@ class AutoencoderTrainer(Trainer):
                 decoded_x = self.model.decode(z)
 
                 # Calculate reconstruction losses
-                recon_loss, mse_loss, perceptual_loss = self._calculate_loss(decoded_x, scaled_clean_images)
+                recon_loss, mae_loss, perceptual_loss = self._calculate_loss(decoded_x, scaled_clean_images)
                 
                 ndz_logvars = z_logvars[:, :self.model.config.latent_channels]
                 ndz_means = z_means[:, :self.model.config.latent_channels]
@@ -221,7 +219,7 @@ class AutoencoderTrainer(Trainer):
 
                 validation_stats['loss'].append(total_loss.item())
                 validation_stats['recon_loss'].append(recon_loss.item())
-                validation_stats['mse_loss'].append(mse_loss.item())
+                validation_stats['mae_loss'].append(mae_loss.item())
                 validation_stats['perceptual_loss'].append(perceptual_loss.item())
                 validation_stats['kl_loss'].append(kl_loss.item())
                 

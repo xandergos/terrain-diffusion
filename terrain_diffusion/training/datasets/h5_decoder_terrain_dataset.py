@@ -1,10 +1,8 @@
-import random
 import torch
 from torch.utils.data import Dataset
 from tqdm import tqdm
 import h5py
 import torch.nn.functional as F
-import numpy as np
 
 
 class H5DecoderTerrainDataset(Dataset):
@@ -83,6 +81,7 @@ class H5DecoderTerrainDataset(Dataset):
         
         self.residual_mean = residual_mean
         self.residual_std = residual_std
+        self.rng = torch.Generator()
         if self.residual_mean is None or self.residual_std is None:
             self.calculate_stats()
             
@@ -101,7 +100,8 @@ class H5DecoderTerrainDataset(Dataset):
         running_m2 = None
 
         for _ in tqdm(range(num_samples), desc="Calculating stats"):
-            sample = self.__getitem__(random.randrange(len(self)))
+            sample_idx = torch.randint(len(self), (1,), generator=self.rng).item()
+            sample = self.__getitem__(sample_idx)
             x = sample['image']
             if not torch.is_tensor(x):
                 x = torch.as_tensor(x)
@@ -144,16 +144,16 @@ class H5DecoderTerrainDataset(Dataset):
         return max(len(keys) for keys in self.keys)
     
     def set_seed(self, seed):
-        random.seed(seed)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
+        self.rng = torch.Generator()
+        self.rng.manual_seed(int(seed))
 
     def __getitem__(self, index):
         # Draw a random subset based on subset weights
-        subset_idx = random.choices(range(len(self.subset_weights)), weights=self.subset_weights, k=1)[0]
+        subset_weights_tensor = torch.tensor(self.subset_weights, dtype=torch.float32)
+        subset_idx = torch.multinomial(subset_weights_tensor, 1, generator=self.rng).item()
         class_label = self.subset_class_labels[subset_idx] if self.subset_class_labels is not None else None
         
-        index = random.randrange(len(self.keys[subset_idx]))
+        index = torch.randint(len(self.keys[subset_idx]), (1,), generator=self.rng).item()
         chunk_id, res, subchunk_id = self.keys[subset_idx][index]
         
         with h5py.File(self.h5_file, 'r') as f:
@@ -170,11 +170,11 @@ class H5DecoderTerrainDataset(Dataset):
         
             if not self.eval_dataset:
                 if self.clip_edges:
-                    i = random.randint(1, latent_shape[2] - self.crop_size // 8 - 1)
-                    j = random.randint(1, latent_shape[3] - self.crop_size // 8 - 1)
+                    i = torch.randint(1, (latent_shape[2] - self.crop_size // 8 - 1) + 1, (1,), generator=self.rng).item()
+                    j = torch.randint(1, (latent_shape[3] - self.crop_size // 8 - 1) + 1, (1,), generator=self.rng).item()
                 else:
-                    i = random.randint(0, latent_shape[2] - self.crop_size // 8)
-                    j = random.randint(0, latent_shape[3] - self.crop_size // 8)
+                    i = torch.randint(0, (latent_shape[2] - self.crop_size // 8) + 1, (1,), generator=self.rng).item()
+                    j = torch.randint(0, (latent_shape[3] - self.crop_size // 8) + 1, (1,), generator=self.rng).item()
             else:
                 i = (latent_shape[2] - self.crop_size // 8) // 2
                 j = (latent_shape[3] - self.crop_size // 8) // 2
@@ -182,7 +182,7 @@ class H5DecoderTerrainDataset(Dataset):
             h = w = self.crop_size // 8
             li, lj, lh, lw = i*8, j*8, h*8, w*8
                 
-            transform_idx = random.randrange(8) if not self.eval_dataset else 0
+            transform_idx = torch.randint(8, (1,), generator=self.rng).item() if not self.eval_dataset else 0
             flip = (transform_idx // 4) == 1
             rotate_k = transform_idx % 4
             
@@ -197,7 +197,8 @@ class H5DecoderTerrainDataset(Dataset):
             assert data_latent.shape[-1] > 0, f"Latent crop is empty. i: {i}, j: {j}, h: {h}, w: {w}"
             latent_channels = data_latent.shape[0]
             means, logvars = data_latent[:latent_channels//2], data_latent[latent_channels//2:]
-            sampled_latent = torch.randn_like(means) * (logvars * 0.5).exp() + means
+            noise = torch.randn(means.shape, generator=self.rng, device=means.device, dtype=means.dtype)
+            sampled_latent = noise * (logvars * 0.5).exp() + means
             
             # Load residual data
             data_residual = torch.from_numpy(f[f"{group_path}/residual"][li:li+lh, lj:lj+lw])[None]

@@ -8,14 +8,11 @@ from accelerate import Accelerator
 from confection import Config, registry
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from collections import defaultdict
 import optuna
-import matplotlib.pyplot as plt
-from optuna.exceptions import TrialPruned
-import math
 
 from ema_pytorch import PostHocEMA
 from torchmetrics.image.kid import KernelInceptionDistance
+from torchmetrics.image.fid import FrechetInceptionDistance
 
 from terrain_diffusion.models.edm_autoencoder import EDMAutoencoder
 from terrain_diffusion.training.registry import build_registry
@@ -25,36 +22,6 @@ from terrain_diffusion.training.utils import recursive_to
 #autoencoder = EDMAutoencoder.from_pretrained("checkpoints/models/autoencoder_x8").to('cuda')
 #autoencoder.eval()
 #autoencoder.requires_grad_(False)
-
-def scale_score(
-    model_output: torch.Tensor,   
-    sample: torch.Tensor,
-    sigma: torch.Tensor, 
-    sigma_data: float,   
-    alpha: float = 1.5,  
-):
-    v_t = -sigma_data * model_output
-    
-    # Make sigma broadcast to sample shape if needed
-    if not torch.is_tensor(sigma):
-        sigma = torch.tensor(sigma, dtype=sample.dtype, device=sample.device)
-    while sigma.ndim < sample.ndim:
-        sigma = sigma.view(*sigma.shape, *([1] * (sample.ndim - sigma.ndim)))
-
-    sigma_data = torch.as_tensor(sigma_data, dtype=sample.dtype, device=sample.device)
-
-    t = torch.atan(sigma / sigma_data)
-    cos_t = torch.cos(t)
-    sin_t = torch.sin(t)
-
-    x0_pred = sample * cos_t - v_t * sin_t
-    noise_pred = sample * sin_t + v_t * cos_t
-
-    x0_alpha = sample + alpha * (x0_pred - sample)
-
-    v_t_alpha = noise_pred * cos_t - x0_alpha * sin_t
-
-    return v_t_alpha / -sigma_data
 
 def _normalize_uint8_three_channel(images: torch.Tensor) -> torch.Tensor:
     """Normalize single-channel images to uint8 [0, 255] repeated to 3 channels."""
@@ -74,36 +41,19 @@ def _get_weights(size):
     distance_x = 1 - (1 - epsilon) * torch.clamp(torch.abs(x - mid).float() / mid, 0, 1)
     return (distance_y * distance_x)[None, None, :, :]
     
-def evaluate_decoder_kid(model, g_model=None, guidance_scale=1.0, score_scaling=1.0, scheduler=None, val_dataloader=None, kid_n_images=None, kid_scheduler_steps=None, accelerator=None, trial=None, check_interval=None, prune_probability_threshold=None, tile_size=128):
-    """Compute KID for the decoder using diffusion sampling on the validation set, with optional interim pruning."""
-    pbar = tqdm(total=kid_n_images, desc="Calculating Decoder KID")
-    kid = KernelInceptionDistance(normalize=True,).to(accelerator.device)
+def evaluate_decoder_kid(model, g_model=None, guidance_scale=1.0, scheduler=None, val_dataloader=None, kid_n_images=None, kid_scheduler_steps=None, accelerator=None, tile_size=128, metric='kid'):
+    """Compute image metric (KID or FID) for the decoder using diffusion sampling on the validation set.
+    Returns a single float score."""
+    metric = (metric or 'kid').lower()
+    pbar = tqdm(total=kid_n_images, desc=f"Calculating Decoder {metric.upper()}")
+    if metric == 'kid':
+        image_metric = KernelInceptionDistance(normalize=True,).to(accelerator.device)
+    elif metric == 'fid':
+        image_metric = FrechetInceptionDistance(normalize=True,).to(accelerator.device)
+    else:
+        raise ValueError(f"Unknown metric '{metric}'. Expected 'kid' or 'fid'.")
     generator = torch.Generator(device=accelerator.device).manual_seed(548)
     val_dataloader_iter = iter(val_dataloader)
-
-    def _norm_cdf(z):
-        return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
-
-    def _maybe_prune(cur_mean, cur_std):
-        if trial is None or prune_probability_threshold is None:
-            return False
-        study = trial.study
-        if study is None:
-            return False
-        for t in study.get_trials(deepcopy=False, states=(optuna.trial.TrialState.COMPLETE,)):
-            if t.number == trial.number:
-                continue
-            other_mean = t.value
-            other_std = t.user_attrs.get('kid_std')
-            if other_mean is None or other_std is None:
-                continue
-            denom = math.sqrt(cur_std * cur_std + float(other_std) * float(other_std))
-            z = -(cur_mean - float(other_mean)) / denom
-            p_cur_less = _norm_cdf(z)
-            if p_cur_less < prune_probability_threshold:
-                return True
-                #raise TrialPruned(f"Pruned at {pbar.n} images (KID={cur_mean:0.6f}): P(cur < trial {t.number})={p_cur_less:.4f} < {prune_probability_threshold}")
-        return False
 
     weights = _get_weights(tile_size).to(accelerator.device)
     with torch.no_grad(), accelerator.autocast():
@@ -138,8 +88,6 @@ def evaluate_decoder_kid(model, g_model=None, guidance_scale=1.0, score_scaling=
                             model_output_m = model(model_input, noise_labels=cnoise, conditional_inputs=[])
                             model_output_g = g_model(model_input, noise_labels=cnoise, conditional_inputs=[])
                             model_output = model_output_g + guidance_scale * (model_output_m - model_output_g)
-                        model_output = scale_score(model_output, samples, sigma, scheduler.config.sigma_data, alpha=score_scaling)
-
                         samples = scheduler.step(model_output, t, samples).prev_sample
                     
                     _real = images[..., i*tile_size//2:(i+2)*tile_size//2, j*tile_size//2:(j+2)*tile_size//2]
@@ -153,24 +101,18 @@ def evaluate_decoder_kid(model, g_model=None, guidance_scale=1.0, score_scaling=
             samples = output
 
 
-            kid.update(_normalize_uint8_three_channel(samples / scheduler.config.sigma_data), real=False)
-            kid.update(_normalize_uint8_three_channel(images / scheduler.config.sigma_data), real=True)
+            image_metric.update(_normalize_uint8_three_channel(samples / scheduler.config.sigma_data), real=False)
+            image_metric.update(_normalize_uint8_three_channel(images / scheduler.config.sigma_data), real=True)
 
             pbar.update(images.shape[0])
 
-            # Interim pruning checks
-            if check_interval and (pbar.n % check_interval == 0 or pbar.n >= pbar.total):
-                cur_mean_t, cur_std_t = kid.compute()
-                cur_mean = float(cur_mean_t.item())
-                cur_std = float(cur_std_t.item())
-                if trial is not None:
-                    trial.report(cur_mean, step=pbar.n)
-                if _maybe_prune(cur_mean, cur_std):
-                    return cur_mean_t.item(), cur_std_t.item()
-
     pbar.close()
-    kid_mean, kid_std = kid.compute()
-    return kid_mean.item(), kid_std.item()
+    if metric == 'kid':
+        kid_mean, _ = image_metric.compute()
+        return kid_mean.item()
+    else:
+        fid = image_metric.compute()
+        return fid.item()
 
 
 @click.command()
@@ -236,24 +178,23 @@ def main(config_path, guide_config_path, n_trials, study_name, storage):
     kid_scheduler_steps = int(config['sweep']['kid_scheduler_steps'])
     tile_size = int(config['sweep']['tile_size'])
     
-    # Pruning parameters
-    intermediate_steps = int(config['sweep'].get('intermediate_steps', 1024))
-    prune_probability_threshold = float(config['sweep'].get('prune_probability_threshold', 0.05))
+    # Metric selection
+    metric_name = str(config['sweep'].get('metric', 'kid')).lower()
+    if metric_name not in ('kid', 'fid'):
+        raise ValueError(f"Invalid sweep metric '{metric_name}'. Expected 'kid' or 'fid'.")
 
     min_sigma = config['sweep']['min_ema_sigma']
     max_sigma = config['sweep']['max_ema_sigma']
     min_guidance_scale = config['sweep']['min_guidance_scale']
     max_guidance_scale = config['sweep']['max_guidance_scale']
-    min_score_scaling = config['sweep']['min_score_scaling']
-    max_score_scaling = config['sweep']['max_score_scaling']
     min_guide_ema_step = config['sweep']['min_ema_step']
     max_guide_ema_step = config['sweep']['max_ema_step']
 
     print(f"Loaded config from: {config_path}")
     print(f"Using PHEMA folder: {phema_folder}")
+    print(f"Sweeping metric: {metric_name.upper()}")
     print(f"Search range: σ_rel ∈ [{min_sigma}, {max_sigma}]")
     print(f"Search range: guidance_scale ∈ [{min_guidance_scale}, {max_guidance_scale}]")
-    print(f"Search range: score_scaling ∈ [{min_score_scaling}, {max_score_scaling}]")
 
     # Objective function
     def objective(trial):
@@ -266,13 +207,9 @@ def main(config_path, guide_config_path, n_trials, study_name, storage):
             guide_sigma_rel = None
             guide_ema_step = None
             guidance_scale = None
-        if min_score_scaling == max_score_scaling:
-            score_scaling = min_score_scaling
-        else:
-            score_scaling = trial.suggest_float('score_scaling', min_score_scaling, max_score_scaling, log=False)
 
         print("\n" + "=" * 80)
-        print(f"Trial {trial.number}: Evaluating σ_rel = {sigma_rel:.6f}, guide_σ_rel = {guide_sigma_rel:.6f}, guide_ema_step = {guide_ema_step}, guidance_scale = {guidance_scale:.6f}, score_scaling = {score_scaling:.6f}")
+        print(f"Trial {trial.number}: Evaluating σ_rel = {sigma_rel:.6f}, guide_σ_rel = {guide_sigma_rel:.6f}, guide_ema_step = {guide_ema_step}, guidance_scale = {guidance_scale:.6f}")
         print("=" * 80)
 
         ema_model = ema.synthesize_ema_model(sigma_rel=sigma_rel, step=None)
@@ -286,40 +223,33 @@ def main(config_path, guide_config_path, n_trials, study_name, storage):
             LongDataset(val_dataset, shuffle=True, seed=958),
             batch_size=config['sweep']['batch_size']
         )
-        kid_mean, kid_std = evaluate_decoder_kid(
+        metric_score = evaluate_decoder_kid(
             model=model,
             g_model=guide_model,
             guidance_scale=guidance_scale,
-            score_scaling=score_scaling,
             scheduler=scheduler,
             val_dataloader=val_dataloader,
             kid_n_images=kid_n_images,
             kid_scheduler_steps=kid_scheduler_steps,
             accelerator=accelerator,
-            trial=trial,
-            check_interval=intermediate_steps,
-            prune_probability_threshold=prune_probability_threshold,
             tile_size=tile_size,
+            metric=metric_name,
         )
         del val_dataloader
-
-        # Store std on trial for future pruning comparisons
-        trial.set_user_attr('kid_std', float(kid_std))
-
-        print(f"Result: KID mean = {kid_mean:.6f} (std = {kid_std:.6f})")
-        return kid_mean
+        print(f"Result: {metric_name.upper()} = {metric_score:.6f}")
+        return metric_score
 
     # Study setup
     if study_name is None:
-        study_name = f"decoder_kid_sweep_{os.path.basename(save_dir)}"
+        study_name = f"decoder_{metric_name}_sweep_{os.path.basename(save_dir)}"
 
     print("\n" + "=" * 80)
     print("Starting Bayesian Optimization with Optuna")
     print(f"Study name: {study_name}")
     print(f"Number of trials: {n_trials}")
+    print(f"Sweeping metric: {metric_name.upper()}")
     print(f"Search range: σ_rel ∈ [{min_sigma}, {max_sigma}]")
     print(f"Search range: guidance_scale ∈ [{min_guidance_scale}, {max_guidance_scale}]")
-    print(f"Search range: score_scaling ∈ [{min_score_scaling}, {max_score_scaling}]")
     print(f"Search range: guide_σ_rel ∈ [{min_sigma}, {max_sigma}]")
     print(f"Search range: guide_ema_step ∈ [{min_guide_ema_step}, {max_guide_ema_step}]")
     # Configure Optuna storage
@@ -351,7 +281,6 @@ def main(config_path, guide_config_path, n_trials, study_name, storage):
     if baseline_first and len(study.trials) == 0:
         baseline_params = {
             'sigma_rel': 0.05,
-            'score_scaling': 1.0,
         }
         if guide_model:
             baseline_params.update({
@@ -366,7 +295,6 @@ def main(config_path, guide_config_path, n_trials, study_name, storage):
             
         baseline_params = {
             'sigma_rel': 0.05,
-            'score_scaling': 1.4,
         }
         if guide_model:
             baseline_params.update({
@@ -387,8 +315,7 @@ def main(config_path, guide_config_path, n_trials, study_name, storage):
     optimal_guide_sigma = float(best_trial.params['guide_sigma_rel'])
     optimal_guide_ema_step = int(best_trial.params['guide_ema_step'])
     optimal_guidance_scale = float(best_trial.params['guidance_scale'])
-    optimal_score_scaling = float(best_trial.params['score_scaling'])
-    optimal_kid = float(best_trial.value)
+    optimal_score = float(best_trial.value)
 
     print("\n" + "=" * 80)
     print("Optimization complete!")
@@ -396,19 +323,18 @@ def main(config_path, guide_config_path, n_trials, study_name, storage):
     print(f"Optimal guide_σ_rel: {optimal_guide_sigma:.6f}")
     print(f"Optimal guide_ema_step: {optimal_guide_ema_step}")
     print(f"Optimal guidance_scale: {optimal_guidance_scale}")
-    print(f"Optimal score_scaling: {optimal_score_scaling}")
-    print(f"Optimal KID mean: {optimal_kid:.6f}")
+    print(f"Optimal {metric_name.upper()}: {optimal_score:.6f}")
     print(f"Best trial: {best_trial.number}")
     print("=" * 80)
 
     # Save results
     results = {
+        'metric': metric_name,
         'optimal_sigma_rel': optimal_sigma,
         'optimal_guide_sigma_rel': optimal_guide_sigma,
         'optimal_guide_ema_step': optimal_guide_ema_step,
         'optimal_guidance_scale': optimal_guidance_scale,
-        'optimal_score_scaling': optimal_score_scaling,
-        'optimal_kid_mean': optimal_kid,
+        'optimal_score': optimal_score,
         'best_trial_number': best_trial.number,
         'n_trials': len(study.trials),
         'all_trials': [
@@ -418,8 +344,7 @@ def main(config_path, guide_config_path, n_trials, study_name, storage):
                 'guide_sigma_rel': t.params.get('guide_sigma_rel'),
                 'guide_ema_step': t.params.get('guide_ema_step'),
                 'guidance_scale': t.params.get('guidance_scale'),
-                'score_scaling': t.params.get('score_scaling'),
-                'kid_mean': t.value,
+                'score': t.value,
                 'state': t.state.name,
             }
             for t in study.trials

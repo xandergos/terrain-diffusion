@@ -197,11 +197,11 @@ def process_single_file_base(
     
     highres_margin = edge_margin * highres_size // lowres_size
     
-    highres_path = os.path.join(highres_elevation_folder, file)
+    highres_path = os.path.join(highres_elevation_folder, 'dem_' + file)
     if os.path.exists(highres_path):
         highres_dem, new_bounds = read_raster(highres_path, include_bounds=True)
         bounds = new_bounds
-        highres_dem = np.where(highres_dem == 0.0, np.nan, highres_dem)
+        highres_dem = np.where(highres_dem < -1000, np.nan, highres_dem)
         highres_dem = highres_dem.astype(np.float32)
         if not np.isnan(highres_dem).all():
             highres_dem = skimage.transform.resize(highres_dem, (highres_size, highres_size), order=1, preserve_range=True)

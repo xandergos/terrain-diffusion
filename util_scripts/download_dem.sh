@@ -1,5 +1,5 @@
 #!/bin/bash
-python3.11 ./terrain_diffusion/data/downloading/data.py \
+python3.11 -m terrain_diffusion.data.downloading.data \
     --image dem \
     --output_dir data/dem_data \
     --output_size 2048 \

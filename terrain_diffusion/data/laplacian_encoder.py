@@ -44,7 +44,7 @@ def laplacian_decode(residual, lowres, interp_mode=TF.InterpolationMode.BILINEAR
         residual = residual.unsqueeze(0)
         lowres = lowres.unsqueeze(0)
         squeeze_count += 1
-    lowres_up = TF.resize(lowres, residual.shape[-2:], interpolation=interp_mode)
+    lowres_up = TF.resize(lowres, residual.shape[-2:], interpolation=interp_mode, antialias=False)
     
     # Squeeze back to original dimensions
     while squeeze_count > 0:

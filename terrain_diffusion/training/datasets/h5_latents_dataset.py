@@ -1,4 +1,3 @@
-import random
 import numpy as np
 import torch
 from torch.utils.data import Dataset
@@ -70,6 +69,7 @@ class H5LatentsDataset(Dataset):
         self.val_dset = val_dset
         self.cond_input_dropout = cond_input_dropout
         self.cond_input_max_noise = cond_input_max_noise
+        self.rng = torch.Generator()
         
         num_subsets = len(subset_weights)
         assert len(pct_land_ranges) == len(subset_resolutions) == num_subsets, \
@@ -143,9 +143,8 @@ class H5LatentsDataset(Dataset):
         return 100000
     
     def set_seed(self, seed):
-        random.seed(seed)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
+        self.rng = torch.Generator()
+        self.rng.manual_seed(int(seed))
         
     def _get_cond_image(self, f, group_path, li, lj, lh, lw, flip, rotate_k, raw=False):
         HALO = 32
@@ -202,15 +201,15 @@ class H5LatentsDataset(Dataset):
         mask = 1 - torch.isnan(means).float()
         
         if self.cond_input_dropout and not self.val_dset:
-            mask = mask * (torch.rand_like(mask) > self.cond_input_dropout)
+            mask = mask * (torch.rand(mask.shape, generator=self.rng) > self.cond_input_dropout)
             means[mask == 0] = np.nan
             p5[mask == 0] = np.nan
             
         if self.cond_input_max_noise and not self.val_dset:
-            noise_level = torch.rand(1)
+            noise_level = torch.rand(1, generator=self.rng)
             noise_std = noise_level * self.cond_input_max_noise
-            means = means + torch.randn_like(means) * noise_std
-            p5 = p5 + torch.randn_like(p5) * noise_std
+            means = means + torch.randn(means.shape, generator=self.rng) * noise_std
+            p5 = p5 + torch.randn(p5.shape, generator=self.rng) * noise_std
         else:
             noise_level = torch.tensor(0.0)
 
@@ -239,7 +238,8 @@ class H5LatentsDataset(Dataset):
         climate_means_crop = cond_img[2:6, crop_h_start+1:crop_h_end-1, crop_w_start+1:crop_w_end-1].mean(dim=(1, 2))
         mask_crop = cond_img[6:7, crop_h_start:crop_h_end, crop_w_start:crop_w_end]
         
-        climate_means_crop[torch.isnan(climate_means_crop)] = torch.randn_like(climate_means_crop[torch.isnan(climate_means_crop)])
+        nan_mask = torch.isnan(climate_means_crop)
+        climate_means_crop[nan_mask] = torch.randn(climate_means_crop[nan_mask].shape, generator=self.rng)
         
         return mp_concat([means_crop.flatten(), p5_crop.flatten(), climate_means_crop.flatten(), mask_crop.flatten(), histogram_raw, noise_level.view(1)], dim=0)
         
@@ -248,20 +248,21 @@ class H5LatentsDataset(Dataset):
         LOWFREQ_STD = 38.6
         
         # Draw a random subset based on subset weights
-        subset_idx = random.choices(range(len(self.subset_weights)), weights=self.subset_weights, k=1)[0]
+        subset_weights_tensor = torch.tensor(self.subset_weights, dtype=torch.float32)
+        subset_idx = torch.multinomial(subset_weights_tensor, 1, generator=self.rng).item()
         class_label = self.subset_class_labels[subset_idx] if self.subset_class_labels is not None else None
         
         if self.beauty_dist[subset_idx]:
             subset_lens = torch.tensor([len(self.keys[subset_idx][i]) for i in range(5)]).float()
             baseline_probs = torch.log(subset_lens / subset_lens.sum())
-            histogram_raw = torch.randn(5)
+            histogram_raw = torch.randn(5, generator=self.rng)
             histogram = torch.softmax(histogram_raw + baseline_probs, dim=0)
-            beauty_score = random.choices(range(5), weights=histogram.tolist(), k=1)[0]
-            index = random.randrange(len(self.keys[subset_idx][beauty_score]))
+            beauty_score = torch.multinomial(histogram, 1, generator=self.rng).item()
+            index = torch.randint(len(self.keys[subset_idx][beauty_score]), (1,), generator=self.rng).item()
             chunk_id, res, subchunk_id = self.keys[subset_idx][beauty_score][index]
         else:
-            histogram_raw = torch.randn(5)
-            index = random.randrange(len(self.keys[subset_idx][0]))
+            histogram_raw = torch.randn(5, generator=self.rng)
+            index = torch.randint(len(self.keys[subset_idx][0]), (1,), generator=self.rng).item()
             chunk_id, res, subchunk_id = self.keys[subset_idx][0][index]
         
         with h5py.File(self.h5_file, 'r') as f:
@@ -279,11 +280,11 @@ class H5LatentsDataset(Dataset):
         
             if not self.eval_dataset:
                 if self.clip_edges:
-                    i = random.randint(1, shape[2] - self.crop_size - 1)
-                    j = random.randint(1, shape[3] - self.crop_size - 1)
+                    i = torch.randint(1, shape[2] - self.crop_size, (1,), generator=self.rng).item()
+                    j = torch.randint(1, shape[3] - self.crop_size, (1,), generator=self.rng).item()
                 else:
-                    i = random.randint(0, shape[2] - self.crop_size)
-                    j = random.randint(0, shape[3] - self.crop_size)
+                    i = torch.randint(0, shape[2] - self.crop_size + 1, (1,), generator=self.rng).item()
+                    j = torch.randint(0, shape[3] - self.crop_size + 1, (1,), generator=self.rng).item()
             else:
                 i = (shape[2] - self.crop_size) // 2
                 j = (shape[3] - self.crop_size) // 2
@@ -291,7 +292,7 @@ class H5LatentsDataset(Dataset):
             h = w = self.crop_size
             li, lj, lh, lw = i, j, h, w
                 
-            transform_idx = random.randrange(8) if not self.eval_dataset else 0
+            transform_idx = torch.randint(8, (1,), generator=self.rng).item() if not self.eval_dataset else 0
             flip = (transform_idx // 4) == 1
             rotate_k = transform_idx % 4
             
@@ -306,7 +307,7 @@ class H5LatentsDataset(Dataset):
             assert data_latent.shape[-1] > 0, f"Latent crop is empty. i: {i}, j: {j}, h: {h}, w: {w}"
             latent_channels = data_latent.shape[0]
             means, logvars = data_latent[:latent_channels//2], data_latent[latent_channels//2:]
-            sampled_latent = torch.randn_like(means) * (logvars * 0.5).exp() + means
+            sampled_latent = torch.randn(means.shape, generator=self.rng) * (logvars * 0.5).exp() + means
             sampled_latent = (sampled_latent - self.latents_mean) / self.latents_std * self.sigma_data
             
             # Load lowfreq data

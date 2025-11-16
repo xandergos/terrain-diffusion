@@ -28,7 +28,8 @@ from terrain_diffusion.data.preprocessing.calculate_stds import calculate_stats_
 @click.option('--highres-size', type=int, default=4096, help='Size of the high-resolution images')
 @click.option('--lowres-size', type=int, default=512, help='Size of the low-resolution images')
 @click.option('--lowres-sigma', type=float, default=5.0, help='Sigma for Gaussian smoothing of low-resolution images')
-@click.option('--resolution', type=int, default=90, help='Resolution of the input images in meters. Only used for labeling.')
+@click.option('--resolution', type=float, default=92.15, help='Resolution of the input images in meters. Used for creating tiles.')
+@click.option('--res-group', type=int, default=90, help='Resolution group of the input images. Only used for labeling.')
 @click.option('--num-chunks', type=int, default=1, help='Number of chunks to divide the image into for processing')
 @click.option('--climate-folder', type=str, default=None, help='Path to the folder containing climate data (optional)')
 @click.option('-o', '--output-file', type=str, default='dataset.h5', help='Path to the output HDF5 file')
@@ -44,6 +45,7 @@ def process_base_dataset(
     lowres_size,
     lowres_sigma,
     resolution,
+    res_group,
     num_chunks,
     climate_folder,
     output_file,
@@ -76,7 +78,7 @@ def process_base_dataset(
     
     with h5py.File(output_file, 'a') as f:
         # Create resolution group if it doesn't exist
-        res_group = f.require_group(f"{resolution}")
+        res_group = f.require_group(f"{res_group}")
         
         # Filter out files that are already in the HDF5 file
         if not overwrite:
