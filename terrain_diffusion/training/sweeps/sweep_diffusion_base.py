@@ -32,13 +32,13 @@ def _normalize_uint8_three_channel(images: torch.Tensor) -> torch.Tensor:
     """Normalize single-channel images to uint8 [0, 255] repeated to 3 channels."""
     image_min = torch.amin(images, dim=(1, 2, 3), keepdim=True)
     image_max = torch.amax(images, dim=(1, 2, 3), keepdim=True)
-    image_range = torch.maximum(image_max - image_min, torch.tensor(1.0, device=images.device))
+    image_range = torch.maximum(image_max - image_min, torch.tensor(255.0, device=images.device))
     image_mid = (image_min + image_max) / 2
     normalized = torch.clamp(((images - image_mid) / image_range + 0.5) * 255, 0, 255)
     return normalized.repeat(1, 3, 1, 1).to(torch.uint8)
 
 
-def _decode_latents_to_terrain(samples: torch.Tensor, val_dataset, decoder_model, scheduler, generator) -> torch.Tensor:
+def _decode_latents_to_terrain(samples: torch.Tensor, val_dataset, decoder_model, scheduler, generator, inter_t) -> torch.Tensor:
     """Decode [latents(4ch), lowfreq(1ch)] into terrain using evaluation primitives."""
     device = samples.device
     base_dataset = val_dataset.base_dataset if hasattr(val_dataset, 'base_dataset') else val_dataset
@@ -62,7 +62,8 @@ def _decode_latents_to_terrain(samples: torch.Tensor, val_dataset, decoder_model
         cond_img=cond_img,
         noise=noise,
         tile_size=H,
-        tile_stride=H
+        tile_stride=H,
+        intermediate_t=inter_t
     )
 
     # Convert from trig-flow space
@@ -72,7 +73,7 @@ def _decode_latents_to_terrain(samples: torch.Tensor, val_dataset, decoder_model
     highfreq = base_dataset.denormalize_residual(residual[:, :1])
     lowfreq = base_dataset.denormalize_lowfreq(lowfreq_input)
     highfreq, lowfreq = laplacian_denoise(highfreq, lowfreq, sigma=5)
-    return laplacian_decode(highfreq, lowfreq)
+    return laplacian_decode(highfreq, lowfreq, extrapolate=True)
 
 
 def evaluate_base_kid(
@@ -85,6 +86,7 @@ def evaluate_base_kid(
     kid_scheduler_steps: int,
     g_model=None,
     guidance_scale: float = 1.0,
+    inter_t = None,
     trial=None,
     check_interval: int | None = None,
     prune_probability_threshold: float | None = None,
@@ -149,11 +151,13 @@ def evaluate_base_kid(
             )
 
             # Decode to terrain
-            terrain_fake = _decode_latents_to_terrain(samples, val_dataloader.dataset, autoencoder, scheduler, generator)
-
+            terrain_fake = _decode_latents_to_terrain(samples, val_dataloader.dataset, autoencoder, scheduler, generator, inter_t=inter_t)
+            terrain_fake = torch.sign(terrain_fake) * torch.square(terrain_fake)
+            
             # Real terrain
             ground_truth = batch['ground_truth']
             terrain_real = ground_truth
+            terrain_real = torch.sign(terrain_real) * torch.square(terrain_real)
 
             kid.update(_normalize_uint8_three_channel(terrain_fake), real=False)
             kid.update(_normalize_uint8_three_channel(terrain_real), real=True)
@@ -320,6 +324,7 @@ def main(config_path, guide_config_path, n_trials, study_name, storage):
             trial=trial,
             check_interval=intermediate_steps,
             prune_probability_threshold=prune_probability_threshold,
+            inter_t=[config['evaluation']['inter_t']] if config['evaluation']['inter_t'] is not None else None,
         )
 
         del val_loader

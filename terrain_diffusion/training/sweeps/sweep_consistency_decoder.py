@@ -1,4 +1,4 @@
-"""Bayesian Optimization sweep for consistency model hyperparameters using decoder KID metric."""
+"""Bayesian Optimization sweep for consistency model hyperparameters using decoder image metrics (KID or FID)."""
 import json
 import click
 import numpy as np
@@ -9,23 +9,23 @@ from confection import Config, registry
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import optuna
-from optuna.exceptions import TrialPruned
-import math
 
 from ema_pytorch import PostHocEMA
 from torchmetrics.image.kid import KernelInceptionDistance
+from torchmetrics.image.fid import FrechetInceptionDistance
 
 from terrain_diffusion.models.edm_autoencoder import EDMAutoencoder
 from terrain_diffusion.models.edm_unet import EDMUnet2D
 from terrain_diffusion.training.registry import build_registry
 from terrain_diffusion.training.datasets import LongDataset
 from terrain_diffusion.training.utils import recursive_to
+from terrain_diffusion.data.laplacian_encoder import laplacian_decode
 
 def _normalize_uint8_three_channel(images: torch.Tensor) -> torch.Tensor:
     """Normalize single-channel images to uint8 [0, 255] repeated to 3 channels."""
     image_min = torch.amin(images, dim=(1, 2, 3), keepdim=True)
     image_max = torch.amax(images, dim=(1, 2, 3), keepdim=True)
-    image_range = torch.maximum(image_max - image_min, torch.tensor(1.0, device=images.device))
+    image_range = torch.maximum(image_max - image_min, torch.tensor(255.0, device=images.device))
     image_mid = (image_min + image_max) / 2
     normalized = torch.clamp(((images - image_mid) / image_range + 0.5) * 255, 0, 255)
     return normalized.repeat(1, 3, 1, 1).to(torch.uint8)
@@ -39,44 +39,30 @@ def _get_weights(size):
     distance_x = 1 - (1 - epsilon) * torch.clamp(torch.abs(x - mid).float() / mid, 0, 1)
     return (distance_y * distance_x)[None, None, :, :]
 
-def evaluate_decoder_kid(model, scheduler, val_dataloader=None, kid_n_images=None, accelerator=None, trial=None, check_interval=None, prune_probability_threshold=None, tile_size=128, intermediate_sigma=1.0, sigma_data=None):
-    """Compute KID for consistency decoder using 2-step consistency sampling with optional interim pruning."""
-    pbar = tqdm(total=kid_n_images, desc="Calculating Decoder KID")
-    kid = KernelInceptionDistance(normalize=True,).to(accelerator.device)
+def evaluate_decoder_kid(model, scheduler, config, val_dataloader=None, kid_n_images=None, accelerator=None, tile_size=128, intermediate_sigma=1.0, metric='kid'):
+    """Compute image metric (KID or FID) for consistency decoder using 2-step consistency sampling."""
+    metric = (metric or 'kid').lower()
+    pbar = tqdm(total=kid_n_images, desc=f"Calculating Decoder {metric.upper()}")
+    if metric == 'kid':
+        image_metric = KernelInceptionDistance(normalize=True,).to(accelerator.device)
+    elif metric == 'fid':
+        image_metric = FrechetInceptionDistance(normalize=True,).to(accelerator.device)
+    else:
+        raise ValueError(f"Unknown metric '{metric}'. Expected 'kid' or 'fid'.")
     generator = torch.Generator(device=accelerator.device).manual_seed(548)
     val_dataloader_iter = iter(val_dataloader)
 
+    sigma_data = config['sweep_dataset']['sigma_data']
     init_t = torch.tensor(np.arctan(scheduler.sigmas[0] / sigma_data), device=accelerator.device)
     intermediate_t = torch.tensor(np.arctan(intermediate_sigma / sigma_data), device=accelerator.device)
 
-    def _norm_cdf(z):
-        return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
-
-    def _maybe_prune(cur_mean, cur_std):
-        if trial is None or prune_probability_threshold is None:
-            return False
-        study = trial.study
-        if study is None:
-            return False
-        for t in study.get_trials(deepcopy=False, states=(optuna.trial.TrialState.COMPLETE,)):
-            if t.number == trial.number:
-                continue
-            other_mean = t.value
-            other_std = t.user_attrs.get('kid_std')
-            if other_mean is None or other_std is None:
-                continue
-            denom = math.sqrt(cur_std * cur_std + float(other_std) * float(other_std))
-            z = -(cur_mean - float(other_mean)) / denom
-            p_cur_less = _norm_cdf(z)
-            if p_cur_less < prune_probability_threshold:
-                return True
-        return False
 
     weights = _get_weights(tile_size).to(accelerator.device)
     with torch.no_grad(), accelerator.autocast():
         while pbar.n < pbar.total:
             batch = recursive_to(next(val_dataloader_iter), device=accelerator.device)
             images = batch['image']
+            lowfreq = batch['lowfreq']
             cond_img = batch.get('cond_img')
             conditional_inputs = batch.get('cond_inputs')
             assert not conditional_inputs
@@ -110,27 +96,28 @@ def evaluate_decoder_kid(model, scheduler, val_dataloader=None, kid_n_images=Non
                     output[..., i*tile_size//2:(i+2)*tile_size//2, j*tile_size//2:(j+2)*tile_size//2] += samples * weights
                     output_weights[..., i*tile_size//2:(i+2)*tile_size//2, j*tile_size//2:(j+2)*tile_size//2] += weights
 
-            output = output / output_weights
-            samples = output
-
-            kid.update(_normalize_uint8_three_channel(samples / sigma_data), real=False)
-            kid.update(_normalize_uint8_three_channel(images / sigma_data), real=True)
+            output = output / output_weights / sigma_data
+            images = images / sigma_data
+            
+            output_full = laplacian_decode(output * config['sweep_dataset']['residual_std'] + config['sweep_dataset']['residual_mean'], lowfreq, extrapolate=True)
+            images_full = laplacian_decode(images * config['sweep_dataset']['residual_std'] + config['sweep_dataset']['residual_mean'], lowfreq, extrapolate=True)
+            
+            output_full = torch.sign(output_full) * torch.square(output_full)
+            images_full = torch.sign(images_full) * torch.square(images_full)
+            
+            with torch.autocast(device_type=accelerator.device.type, enabled=False):
+                image_metric.update(_normalize_uint8_three_channel(output_full), real=False)
+                image_metric.update(_normalize_uint8_three_channel(images_full), real=True)
 
             pbar.update(images.shape[0])
 
-            # Interim pruning checks
-            if check_interval and (pbar.n % check_interval == 0 or pbar.n >= pbar.total):
-                cur_mean_t, cur_std_t = kid.compute()
-                cur_mean = float(cur_mean_t.item())
-                cur_std = float(cur_std_t.item())
-                if trial is not None:
-                    trial.report(cur_mean, step=pbar.n)
-                if _maybe_prune(cur_mean, cur_std):
-                    return cur_mean_t.item(), cur_std_t.item()
-
     pbar.close()
-    kid_mean, kid_std = kid.compute()
-    return kid_mean.item(), kid_std.item()
+    if metric == 'kid':
+        kid_mean, _ = image_metric.compute()
+        return kid_mean.item()
+    else:
+        fid = image_metric.compute()
+        return fid.item()
 
 
 @click.command()
@@ -140,7 +127,7 @@ def evaluate_decoder_kid(model, scheduler, val_dataloader=None, kid_n_images=Non
 @click.option('--study-name', type=str, default=None, help='Name for the Optuna study (for resuming)')
 @click.option('--storage', is_flag=True, default=False, help='Enable persistent Optuna storage under save_dir')
 def main(config_path, n_trials, study_name, storage):
-    """Run Bayesian Optimization over hyperparameters to minimize decoder KID for consistency models."""
+    """Run Bayesian Optimization over hyperparameters to minimize decoder image metric (KID or FID) for consistency models."""
     build_registry()
 
     # Load config
@@ -179,11 +166,11 @@ def main(config_path, n_trials, study_name, storage):
     # Evaluation parameters
     kid_n_images = int(config['sweep']['kid_n_images'])
     tile_size = int(config['sweep']['tile_size'])
-    sigma_data = float(config['training'].get('sigma_data', 1.0))
     
-    # Pruning parameters
-    intermediate_steps = int(config['sweep'].get('intermediate_steps', 1024))
-    prune_probability_threshold = float(config['sweep'].get('prune_probability_threshold', 0.05))
+    # Metric selection
+    metric_name = str(config['sweep'].get('metric', 'kid')).lower()
+    if metric_name not in ('kid', 'fid'):
+        raise ValueError(f"Invalid sweep metric '{metric_name}'. Expected 'kid' or 'fid'.")
 
     min_ema_sigma = config['sweep']['min_ema_sigma']
     max_ema_sigma = config['sweep']['max_ema_sigma']
@@ -194,6 +181,7 @@ def main(config_path, n_trials, study_name, storage):
 
     print(f"Loaded config from: {config_path}")
     print(f"Using PHEMA folder: {phema_folder}")
+    print(f"Sweeping metric: {metric_name.upper()}")
     print(f"Search range: EMA σ_rel ∈ [{min_ema_sigma}, {max_ema_sigma}]")
     print(f"Search range: EMA step ∈ [{min_ema_step}, {max_ema_step}]")
     print(f"Search range: intermediate σ ∈ [{min_intermediate_sigma}, {max_intermediate_sigma}]")
@@ -215,35 +203,30 @@ def main(config_path, n_trials, study_name, storage):
             LongDataset(val_dataset, shuffle=True, seed=958),
             batch_size=config['sweep']['batch_size']
         )
-        kid_mean, kid_std = evaluate_decoder_kid(
+        metric_score = evaluate_decoder_kid(
             model=model,
             scheduler=scheduler,
+            config=config,
             val_dataloader=val_dataloader,
             kid_n_images=kid_n_images,
             accelerator=accelerator,
-            trial=trial,
-            check_interval=intermediate_steps,
-            prune_probability_threshold=prune_probability_threshold,
             tile_size=tile_size,
             intermediate_sigma=intermediate_sigma,
-            sigma_data=sigma_data,
+            metric=metric_name,
         )
         del val_dataloader
-
-        # Store std on trial for future pruning comparisons
-        trial.set_user_attr('kid_std', float(kid_std))
-
-        print(f"Result: KID mean = {kid_mean:.6f} (std = {kid_std:.6f})")
-        return kid_mean
+        print(f"Result: {metric_name.upper()} = {metric_score:.6f}")
+        return metric_score
 
     # Study setup
     if study_name is None:
-        study_name = f"consistency_decoder_kid_sweep_{os.path.basename(save_dir)}"
+        study_name = f"consistency_decoder_{metric_name}_sweep_{os.path.basename(save_dir)}"
 
     print("\n" + "=" * 80)
     print("Starting Bayesian Optimization with Optuna")
     print(f"Study name: {study_name}")
     print(f"Number of trials: {n_trials}")
+    print(f"Sweeping metric: {metric_name.upper()}")
     print(f"Search range: EMA σ ∈ [{min_ema_sigma}, {max_ema_sigma}]")
     print(f"Search range: EMA step ∈ [{min_ema_step}, {max_ema_step}]")
     print(f"Search range: intermediate_sigma ∈ [{min_intermediate_sigma}, {max_intermediate_sigma}]")
@@ -278,7 +261,7 @@ def main(config_path, n_trials, study_name, storage):
         baseline_params = {
             'ema_sigma': 0.05,
             'ema_step': min_ema_step,
-            'intermediate_sigma': 2.0,
+            'intermediate_sigma': max_intermediate_sigma,
         }
         print("Enqueuing baseline first trial:", baseline_params)
         study.enqueue_trial(baseline_params)
@@ -291,23 +274,24 @@ def main(config_path, n_trials, study_name, storage):
     optimal_ema_sigma = float(best_trial.params['ema_sigma'])
     optimal_ema_step = int(best_trial.params['ema_step'])
     optimal_intermediate_sigma = float(best_trial.params['intermediate_sigma'])
-    optimal_kid = float(best_trial.value)
+    optimal_score = float(best_trial.value)
 
     print("\n" + "=" * 80)
     print("Optimization complete!")
     print(f"Optimal EMA σ: {optimal_ema_sigma:.6f}")
     print(f"Optimal EMA step: {optimal_ema_step}")
     print(f"Optimal intermediate_sigma: {optimal_intermediate_sigma:.6f}")
-    print(f"Optimal KID mean: {optimal_kid:.6f}")
+    print(f"Optimal {metric_name.upper()}: {optimal_score:.6f}")
     print(f"Best trial: {best_trial.number}")
     print("=" * 80)
 
     # Save results
     results = {
+        'metric': metric_name,
         'optimal_ema_sigma': optimal_ema_sigma,
         'optimal_ema_step': optimal_ema_step,
         'optimal_intermediate_sigma': optimal_intermediate_sigma,
-        'optimal_kid_mean': optimal_kid,
+        'optimal_score': optimal_score,
         'best_trial_number': best_trial.number,
         'n_trials': len(study.trials),
         'all_trials': [
@@ -316,7 +300,7 @@ def main(config_path, n_trials, study_name, storage):
                 'ema_sigma': t.params.get('ema_sigma'),
                 'ema_step': t.params.get('ema_step'),
                 'intermediate_sigma': t.params.get('intermediate_sigma'),
-                'kid_mean': t.value,
+                'score': t.value,
                 'state': t.state.name,
             }
             for t in study.trials

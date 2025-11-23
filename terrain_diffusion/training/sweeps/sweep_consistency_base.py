@@ -29,13 +29,13 @@ from terrain_diffusion.training.datasets import LongDataset
 from terrain_diffusion.training.utils import recursive_to
 from terrain_diffusion.data.laplacian_encoder import laplacian_denoise, laplacian_decode
 from terrain_diffusion.training.evaluation.sample_diffusion_decoder import sample_decoder_consistency_tiled
-from terrain_diffusion.training.evaluation.sample_diffusion_base import sample_base_consistency_tiled
+from terrain_diffusion.training.evaluation.sample_diffusion_base import sample_base_consistency
 
 
 def _normalize_uint8_three_channel(images: torch.Tensor) -> torch.Tensor:
     image_min = torch.amin(images, dim=(1, 2, 3), keepdim=True)
     image_max = torch.amax(images, dim=(1, 2, 3), keepdim=True)
-    image_range = torch.maximum(image_max - image_min, torch.tensor(1.0, device=images.device))
+    image_range = torch.maximum(image_max - image_min, torch.tensor(255.0, device=images.device))
     image_mid = (image_min + image_max) / 2
     normalized = torch.clamp(((images - image_mid) / image_range + 0.5) * 255, 0, 255)
     return normalized.repeat(1, 3, 1, 1).to(torch.uint8)
@@ -122,19 +122,25 @@ def evaluate_base_kid_consistency(
         while pbar.n < pbar.total:
             batch = recursive_to(next(val_iter), device=accelerator.device)
             images = batch['image']
-            cond_img = batch.get('cond_img')
-            conditional_inputs = batch.get('cond_inputs') or []
+            cond_inputs = batch['cond_inputs_img']
+            histogram_raw = batch['histogram_raw']
+            bs = images.shape[0]
 
+            model.eval()
             noise = torch.randn((2, *images.shape), generator=generator, device=images.device)
-            samples = sample_base_consistency_tiled(
-                model,
-                scheduler,
-                cond_img=cond_img,
-                noise=noise,
-                tile_size=tile_size,
-                tile_stride=tile_size,
+            samples = sample_base_consistency(
+                model=model,
+                scheduler=scheduler,
+                shape=images.shape,
+                cond_inputs=cond_inputs,
+                cond_means=torch.zeros(7, device=accelerator.device),
+                cond_stds=torch.ones(7, device=accelerator.device),
+                noise_level=torch.zeros(bs, 1, device=accelerator.device),
+                histogram_raw=histogram_raw,
+                generator=generator,
+                tile_size=64,
                 intermediate_t=interm_t,
-                conditional_inputs=conditional_inputs,
+                noise=noise
             )
             
             # Central crop samples to crop_size
@@ -144,8 +150,14 @@ def evaluate_base_kid_consistency(
             left = (W - crop_size) // 2
             samples = samples[..., top:top+crop_size, left:left+crop_size]
 
+            # Decode to terrain
             terrain_fake = _decode_latents_to_terrain(samples, val_dataloader.dataset, decoder_model, scheduler, generator)
-            terrain_real = batch['ground_truth'][..., top*8:top*8+crop_size*8, left*8:left*8+crop_size*8]
+            terrain_fake = torch.sign(terrain_fake) * torch.square(terrain_fake)
+            
+            # Real terrain
+            ground_truth = batch['ground_truth']
+            terrain_real = ground_truth
+            terrain_real = torch.sign(terrain_real) * torch.square(terrain_real)
 
             kid.update(_normalize_uint8_three_channel(terrain_fake), real=False)
             kid.update(_normalize_uint8_three_channel(terrain_real), real=True)
@@ -306,7 +318,7 @@ def main(config_path, n_trials, study_name, storage):
         baseline_params = {
             'ema_sigma': 0.05,
             'ema_step': min_ema_step,
-            'intermediate_sigma': 2.0,
+            'intermediate_sigma': 1.0,
         }
         print("Enqueuing baseline first trial:", baseline_params)
         study.enqueue_trial(baseline_params)

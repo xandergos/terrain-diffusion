@@ -45,6 +45,7 @@ def _process_cond_img(
     
     return mp_concat([means_crop.flatten(1), p5_crop.flatten(1), climate_means_crop.flatten(1), mask_crop.flatten(1), histogram_raw, noise_level.view(-1, 1)], dim=1).float()
 
+@torch.no_grad()
 def sample_base_diffusion(
     model,
     scheduler,
@@ -165,91 +166,98 @@ def sample_base_diffusion(
     return output / output_weights / scheduler.config.sigma_data
 
 
-@torch.no_grad()
-def sample_base_consistency_tiled(
+def sample_base_consistency(
     model,
     scheduler,
+    shape: tuple[int, ...],
+    cond_inputs,
     *,
-    cond_img: Optional[torch.Tensor],
-    noise: torch.Tensor,
+    cond_means: torch.Tensor|np.ndarray,
+    cond_stds: torch.Tensor|np.ndarray,
+    noise_level: float = 0.0,
+    histogram_raw: torch.Tensor,
+    intermediate_t: float,
+    dtype: torch.dtype = torch.float32,
+    generator: Optional[torch.Generator] = None,
     tile_size: Optional[int] = None,
-    tile_stride: Optional[int] = None,
-    intermediate_t: Optional[torch.Tensor | float | list | tuple] = None,
-    conditional_inputs=None,
     weight_window_fn: Optional[Callable[[int, torch.device, torch.dtype], torch.Tensor]] = None,
+    noise: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Run n-step consistency sampling for base models with tiling.
+    """Sample a base image using diffusion, with optional tiled blending.
 
     Args:
-        model: consistency base model (single-step update network)
-        scheduler: provides sigmas and sigma_data for trig-flow conversion
-        cond_img: optional conditioning image to concat to model input
-        noise: standard initial noise tensor used for constructing x_t at each step. If len(shape) == 5, the first channel is for the noise level.
-        tile_size: optional square tile size in pixels; defaults to min(H, W)
-        tile_stride: optional stride between tile starts; defaults to tile_size
-        intermediate_t: list/tensor/scalar of additional timesteps after init
-        conditional_inputs: optional list passed through to model forward
-        weight_window_fn: callable(size, device, dtype) -> [1,1,S,S] weights
+        model: base diffusion model (EDM parameterization)
+        scheduler: diffusion scheduler providing sigmas/timesteps and preconditioning
+        shape: output shape (B, C, H, W)
+        cond_means: Array or tensor with means for means (signed-sqrt), p5 (signed-sqrt), temp mean (C), temp std (C), precip mean (mm/yr), precip std (coeff of var), mask.
+        cond_stds: Array or tensor with stds for means (signed-sqrt), p5 (signed-sqrt), temp mean (C), temp std (C), precip mean (mm/yr), precip std (coeff of var), mask.
+        noise_level: Noise level (0-1) to apply to the conditioning tensor. Shape (B, 1).
+        histogram_raw: Raw histogram (pre-softmax values) features to include in the conditioning vector. Length equal to the number of subsets trained on.
+        dtype: dtype of generated tensor
+        steps: number of scheduler steps
+        cond_inputs: Either a tensor image (required for tiling) or a 1D pre-processed tensor
+        guide_model: optional guide model for two-model guidance
+        guidance_scale: guidance interpolation factor
+        generator: optional torch.Generator
+        tile_size: if set, enables tiled sampling with square tiles of this size
+        weight_window_fn: optional callable(size, device, dtype) -> [1,1,S,S] weights. Defaults to _linear_weight_window
 
     Returns:
-        Generated sample with the same shape/dtype/device as noise
+        torch.Tensor: Generated tensor with shape 'shape'
     """
-    b, c, h, w = noise.shape[-4:]
-    device, dtype = noise.device, noise.dtype
+    device = next(model.parameters()).device
+    sigma0 = scheduler.sigmas[0].to(device)
     sigma_data = scheduler.config.sigma_data
+    
+    t_scalars = (torch.tensor(torch.atan(sigma0 / sigma_data), device=device, dtype=dtype), 
+                 torch.tensor(intermediate_t, device=device, dtype=dtype))
 
-    if cond_img is not None:
-        cond_img = cond_img.to(device=device, dtype=dtype)
-        if cond_img.shape[-2:] != (h, w):
-            cond_img = F.interpolate(cond_img, size=(h, w), mode="nearest")
-
+    # Tiled sampling
+    B, C, H, W = shape
+    stride = tile_size // 2
     if weight_window_fn is None:
         weight_window_fn = _linear_weight_window
-    if tile_size is None:
-        tile_size = min(h, w)
-    if tile_stride is None:
-        tile_stride = tile_size
     weights = weight_window_fn(tile_size, device, dtype)
 
-    out = torch.zeros(noise.shape[-4:], device=device, dtype=dtype)
-    out_w = torch.zeros(noise.shape[-4:], device=device, dtype=dtype)
+    h_starts = _tile_starts(H, tile_size, stride)
+    w_starts = _tile_starts(W, tile_size, stride)
+    
+    if cond_inputs.ndim == 1 and len(h_starts) * len(w_starts) > 1:
+        raise ValueError(f"cond_inputs must be a tensor image for tiled sampling. Cond inputs must have width {len(w_starts)+3} and height {len(h_starts)+3}.")
+    elif cond_inputs.ndim == 4:
+        assert cond_inputs.shape[-1] == len(w_starts)+3
+        assert cond_inputs.shape[-2] == len(h_starts)+3
 
-    # Build timesteps: init_t from largest sigma, then optional intermediates
-    s0 = scheduler.sigmas[0]
-    init_t = torch.tensor(torch.atan(torch.as_tensor(s0 / sigma_data)), device=device, dtype=dtype)
-
-    if intermediate_t is None:
-        t_scalars = (init_t,)
-    else:
-        if torch.is_tensor(intermediate_t):
-            flat_t = intermediate_t.flatten()
-            t_scalars = (init_t,) if flat_t.numel() == 0 else (init_t, *[tt.to(device=device, dtype=dtype) for tt in flat_t])
-        elif isinstance(intermediate_t, (list, tuple)):
-            t_scalars = (init_t, *[torch.tensor(t, device=device, dtype=dtype) for t in intermediate_t])
+    sample = torch.zeros(shape, device=device, dtype=dtype)
+    for step, t_scalar in enumerate(t_scalars):
+        if noise is None:
+            step_noise = torch.randn(shape, generator=generator, device=device, dtype=dtype) * sigma0
         else:
-            t_scalars = (init_t, torch.tensor(intermediate_t, device=device, dtype=dtype))
+            step_noise = noise[step]
+        output = torch.zeros(shape, device=device, dtype=dtype)
+        output_weights = torch.zeros(shape, device=device, dtype=dtype)
+        for ic, i0 in enumerate(h_starts):
+            for jc, j0 in enumerate(w_starts):
+                if cond_inputs.ndim == 4:
+                    tile_cond = cond_inputs[..., ic:ic+4, jc:jc+4]
+                    tile_cond = [_process_cond_img(tile_cond, histogram_raw, cond_means, cond_stds, noise_level)]
+                else:
+                    tile_cond = [cond_inputs]
+                
+                i1, j1 = i0 + tile_size, j0 + tile_size
+                z = step_noise[..., i0:i1, j0:j1] * sigma_data
+                tile_sample = sample[..., i0:i1, j0:j1]
 
-    h_starts = _tile_starts(h, tile_size, tile_stride)
-    w_starts = _tile_starts(w, tile_size, tile_stride)
-
-    for i0 in h_starts:
-        for j0 in w_starts:
-            i1, j1 = i0 + tile_size, j0 + tile_size
-            samples = torch.zeros((b, c, tile_size, tile_size), device=device, dtype=dtype)
-            tile_noise = noise[..., i0:i1, j0:j1]
-            tile_cond = cond_img[..., i0:i1, j0:j1] if cond_img is not None else None
-
-            for step, t_scalar in enumerate(t_scalars):
-                t = t_scalar.view(1, 1, 1, 1).expand(b, 1, 1, 1)
-                z = tile_noise * sigma_data if len(noise.shape) == 4 else tile_noise[step] * sigma_data
-                x_t = torch.cos(t) * samples + torch.sin(t) * z
+                t = t_scalar.view(1, 1, 1, 1).expand(B, 1, 1, 1)
+                x_t = torch.cos(t) * tile_sample + torch.sin(t) * z
+                
                 model_in = x_t / sigma_data
-                if tile_cond is not None:
-                    model_in = torch.cat([model_in, tile_cond], dim=1)
-                pred = -model(model_in, noise_labels=t.flatten(), conditional_inputs=conditional_inputs)
-                samples = torch.cos(t) * x_t - torch.sin(t) * sigma_data * pred
+                pred = -model(model_in, noise_labels=t.flatten(), conditional_inputs=tile_cond)
+                tile_samples = torch.cos(t) * x_t - torch.sin(t) * sigma_data * pred
 
-            out[..., i0:i1, j0:j1] += samples * weights
-            out_w[..., i0:i1, j0:j1] += weights
+                output[..., i0:i1, j0:j1] += tile_samples * weights
+                output_weights[..., i0:i1, j0:j1] += weights
 
-    return out / out_w / sigma_data
+        sample = output / output_weights
+
+    return sample / scheduler.config.sigma_data

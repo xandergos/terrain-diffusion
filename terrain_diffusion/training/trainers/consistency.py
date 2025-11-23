@@ -229,7 +229,7 @@ class ConsistencyTrainer(Trainer):
         """Normalize single-channel terrain to [0, 255] uint8 3-channel for KID."""
         terrain_min = torch.amin(terrain, dim=(1, 2, 3), keepdim=True)
         terrain_max = torch.amax(terrain, dim=(1, 2, 3), keepdim=True)
-        terrain_range = torch.maximum(terrain_max - terrain_min, torch.tensor(1.0, device=terrain.device))
+        terrain_range = torch.maximum(terrain_max - terrain_min, torch.tensor(255.0, device=terrain.device))
         terrain_mid = (terrain_min + terrain_max) / 2
         terrain_norm = torch.clamp(((terrain - terrain_mid) / terrain_range + 0.5) * 255, 0, 255)
         terrain_norm = terrain_norm.repeat(1, 3, 1, 1)
@@ -304,6 +304,7 @@ class ConsistencyTrainer(Trainer):
                 batch = recursive_to(next(data_iter), device=self.accelerator.device)
                 images = batch['image']
                 cond_img = batch.get('cond_img')
+                lowfreq = batch['lowfreq']
                 conditional_inputs = batch.get('cond_inputs')
 
                 # 2-step consistency sampling
@@ -312,6 +313,14 @@ class ConsistencyTrainer(Trainer):
                 # Single-channel decoder evaluation
                 samples = samples[:, :1] / scheduler.config.sigma_data
                 real_samples = images[:, :1] / scheduler.config.sigma_data
+            
+                residual_std = self.val_dataset.base_dataset.residual_std.to(images.device)
+                residual_mean = self.val_dataset.base_dataset.residual_mean.to(images.device)
+                output_full = laplacian_decode(samples * residual_std + residual_mean, lowfreq, extrapolate=True)
+                images_full = laplacian_decode(images * residual_std + residual_mean, lowfreq, extrapolate=True)
+                
+                output_full = torch.sign(output_full) * torch.square(output_full)
+                images_full = torch.sign(images_full) * torch.square(images_full)
 
                 kid.update(self._normalize_and_process_terrain(samples), real=False)
                 kid.update(self._normalize_and_process_terrain(real_samples), real=True)
@@ -347,7 +356,10 @@ class ConsistencyTrainer(Trainer):
 
                 # Decode latents to terrain
                 terrain = self._decode_latents_to_terrain(samples[:, :4], samples[:, 4:5], autoencoder, scheduler)
+                terrain = torch.sign(terrain) * torch.square(terrain)
+                
                 real_terrain = batch['ground_truth']
+                real_terrain = torch.sign(real_terrain) * torch.square(real_terrain)
                 
                 kid.update(self._normalize_and_process_terrain(terrain), real=False)
                 kid.update(self._normalize_and_process_terrain(real_terrain), real=True)

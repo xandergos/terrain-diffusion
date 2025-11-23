@@ -14,6 +14,7 @@ from ema_pytorch import PostHocEMA
 from torchmetrics.image.kid import KernelInceptionDistance
 from torchmetrics.image.fid import FrechetInceptionDistance
 
+from terrain_diffusion.data.laplacian_encoder import laplacian_decode
 from terrain_diffusion.models.edm_autoencoder import EDMAutoencoder
 from terrain_diffusion.training.registry import build_registry
 from terrain_diffusion.training.datasets import LongDataset
@@ -27,7 +28,7 @@ def _normalize_uint8_three_channel(images: torch.Tensor) -> torch.Tensor:
     """Normalize single-channel images to uint8 [0, 255] repeated to 3 channels."""
     image_min = torch.amin(images, dim=(1, 2, 3), keepdim=True)
     image_max = torch.amax(images, dim=(1, 2, 3), keepdim=True)
-    image_range = torch.maximum(image_max - image_min, torch.tensor(1.0, device=images.device))
+    image_range = torch.maximum(image_max - image_min, torch.tensor(255.0, device=images.device))
     image_mid = (image_min + image_max) / 2
     normalized = torch.clamp(((images - image_mid) / image_range + 0.5) * 255, 0, 255)
     return normalized.repeat(1, 3, 1, 1).to(torch.uint8)
@@ -41,7 +42,7 @@ def _get_weights(size):
     distance_x = 1 - (1 - epsilon) * torch.clamp(torch.abs(x - mid).float() / mid, 0, 1)
     return (distance_y * distance_x)[None, None, :, :]
     
-def evaluate_decoder_kid(model, g_model=None, guidance_scale=1.0, scheduler=None, val_dataloader=None, kid_n_images=None, kid_scheduler_steps=None, accelerator=None, tile_size=128, metric='kid'):
+def evaluate_decoder_kid(model, g_model=None, guidance_scale=1.0, scheduler=None, config=None, val_dataloader=None, kid_n_images=None, kid_scheduler_steps=None, accelerator=None, tile_size=128, metric='kid'):
     """Compute image metric (KID or FID) for the decoder using diffusion sampling on the validation set.
     Returns a single float score."""
     metric = (metric or 'kid').lower()
@@ -60,6 +61,7 @@ def evaluate_decoder_kid(model, g_model=None, guidance_scale=1.0, scheduler=None
         while pbar.n < pbar.total:
             batch = recursive_to(next(val_dataloader_iter), device=accelerator.device)
             images = batch['image']
+            lowfreq = batch['lowfreq']
             cond_img = batch.get('cond_img')
             conditional_inputs = batch.get('cond_inputs')
             assert not conditional_inputs
@@ -97,12 +99,22 @@ def evaluate_decoder_kid(model, g_model=None, guidance_scale=1.0, scheduler=None
                     output[..., i*tile_size//2:(i+2)*tile_size//2, j*tile_size//2:(j+2)*tile_size//2] += samples * weights
                     output_weights[..., i*tile_size//2:(i+2)*tile_size//2, j*tile_size//2:(j+2)*tile_size//2] += weights
 
-            output = output / output_weights
-            samples = output
+            output = output / output_weights / config['sweep_dataset']['sigma_data']
+            images = images / config['sweep_dataset']['sigma_data']
+            
+            output_full = laplacian_decode(output * config['sweep_dataset']['residual_std'] + config['sweep_dataset']['residual_mean'], lowfreq, extrapolate=True)
+            images_full = laplacian_decode(images * config['sweep_dataset']['residual_std'] + config['sweep_dataset']['residual_mean'], lowfreq, extrapolate=True)
+            
+            output_full = torch.sign(output_full) * torch.square(output_full)
+            images_full = torch.sign(images_full) * torch.square(images_full)
 
+            assert torch.isfinite(output_full).all()
+            assert torch.isfinite(images_full).all()
 
-            image_metric.update(_normalize_uint8_three_channel(samples / scheduler.config.sigma_data), real=False)
-            image_metric.update(_normalize_uint8_three_channel(images / scheduler.config.sigma_data), real=True)
+            # Disable autocast for metric calculation to prevent NaN in Inception features
+            with torch.autocast(device_type=accelerator.device.type, enabled=False):
+                image_metric.update(_normalize_uint8_three_channel(output_full.float()), real=False)
+                image_metric.update(_normalize_uint8_three_channel(images_full.float()), real=True)
 
             pbar.update(images.shape[0])
 
@@ -152,7 +164,7 @@ def main(config_path, guide_config_path, n_trials, study_name, storage):
 
     # Accelerator
     accelerator = Accelerator(
-        mixed_precision=resolved['training']['mixed_precision'],
+        mixed_precision=config['training']['mixed_precision'],
         gradient_accumulation_steps=1,
     )
     device = accelerator.device
@@ -228,6 +240,7 @@ def main(config_path, guide_config_path, n_trials, study_name, storage):
             g_model=guide_model,
             guidance_scale=guidance_scale,
             scheduler=scheduler,
+            config=config,
             val_dataloader=val_dataloader,
             kid_n_images=kid_n_images,
             kid_scheduler_steps=kid_scheduler_steps,
@@ -291,19 +304,6 @@ def main(config_path, guide_config_path, n_trials, study_name, storage):
 
         # Only enqueue as first if the study has no trials yet
         print("Enqueuing baseline first trial:", baseline_params)
-        study.enqueue_trial(baseline_params)
-            
-        baseline_params = {
-            'sigma_rel': 0.05,
-        }
-        if guide_model:
-            baseline_params.update({
-                'guidance_scale': 1.0,
-                'guide_sigma_rel': 0.05,
-                'guide_ema_step': min_guide_ema_step,
-            })
-
-        print("Enqueuing baseline second trial:", baseline_params)
         study.enqueue_trial(baseline_params)
 
     # Run optimization

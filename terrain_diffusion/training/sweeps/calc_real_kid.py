@@ -1,12 +1,13 @@
 import os
 import sys
-import random
-from typing import Iterable, List, Optional, Tuple
+from typing import Optional, Union
 
-import h5py
-import numpy as np
 import torch
+from torch.utils.data import DataLoader
 from torchmetrics.image.kid import KernelInceptionDistance
+from torchmetrics.image.fid import FrechetInceptionDistance
+from confection import Config, registry
+from tqdm import tqdm
 import click
 
 
@@ -16,133 +17,149 @@ _ROOT = os.path.abspath(os.path.join(_HERE, "../../.."))
 if _ROOT not in sys.path:
     sys.path.append(_ROOT)
 
-from terrain_diffusion.data.laplacian_encoder import laplacian_decode  # noqa: E402
+from terrain_diffusion.training.registry import build_registry  # noqa: E402
+from terrain_diffusion.training.datasets import LongDataset  # noqa: E402
+from terrain_diffusion.training.utils import recursive_to  # noqa: E402
 
 
-def iter_ground_truth_images(
-    h5_path: str,
-    crop_size: int,
-    max_images: Optional[int] = None,
-    split: Optional[str] = None,
-    resolutions: Optional[Iterable[int]] = None,
-) -> List[np.ndarray]:
-    images: List[np.ndarray] = []
-    with h5py.File(h5_path, "r") as f:
-        res_keys = [k for k in f.keys() if (k.isdigit() and (resolutions is None or int(k) in set(resolutions)))]
-        for res_key in res_keys:
-            res_group = f[res_key]
-            for chunk_id in res_group:
-                chunk_group = res_group[chunk_id]
-                for subchunk_id in chunk_group:
-                    g = chunk_group[subchunk_id]
-                    if "lowfreq" not in g or "residual" not in g:
-                        continue
-                    # Filter by split using the 'latent' dataset attrs if present
-                    if "latent" in g and split is not None:
-                        try:
-                            if g["latent"].attrs.get("split", None) != split:
-                                continue
-                        except Exception:
-                            pass
-
-                    lowfreq_ds = g["lowfreq"]
-                    H, W = lowfreq_ds.shape
-
-                    # Center crop (eval-style)
-                    li = (H - crop_size) // 2
-                    lj = (W - crop_size) // 2
-                    h = w = crop_size
-
-                    # Load crops
-                    lowfreq = torch.from_numpy(lowfreq_ds[li:li + h, lj:lj + w])[None].float()
-                    residual_ds = g["residual"]
-                    residual = torch.from_numpy(
-                        residual_ds[li * 8:li * 8 + h * 8, lj * 8:lj * 8 + w * 8]
-                    )[None].float()
-
-                    # Decode ground truth exactly as in dataset (no flip/rot for eval)
-                    gt = laplacian_decode(residual, lowfreq)
-                    img = gt.squeeze(0).cpu().numpy()  # [H*8, W*8]
-                    images.append(img.astype(np.float32))
-
-                    if max_images is not None and len(images) >= max_images:
-                        return images
-    return images
-
-
-def _normalize_and_process_terrain(terrain: torch.Tensor) -> torch.Tensor:
-    """Match consistency.py: per-image min/max -> uint8 [0,255], 3-channel."""
-    terrain_min = torch.amin(terrain, dim=(1, 2, 3), keepdim=True)
-    terrain_max = torch.amax(terrain, dim=(1, 2, 3), keepdim=True)
-    terrain_range = torch.maximum(terrain_max - terrain_min, torch.tensor(1.0, device=terrain.device))
-    terrain_mid = (terrain_min + terrain_max) / 2
-    terrain_norm = torch.clamp(((terrain - terrain_mid) / terrain_range + 0.5) * 255, 0, 255)
-    terrain_norm = terrain_norm.repeat(1, 3, 1, 1)
-    return terrain_norm.to(torch.uint8)
-
-
-@torch.no_grad()
-def _update_kid(kid: KernelInceptionDistance, images: List[np.ndarray], real: bool, batch_size: int, device: torch.device) -> None:
-    for i in range(0, len(images), batch_size):
-        chunk = images[i:i + batch_size]
-        x = torch.stack([torch.from_numpy(im).unsqueeze(0).float() for im in chunk], dim=0).to(device)
-        x = _normalize_and_process_terrain(x)
-        kid.update(x, real=real)
+def _normalize_uint8_three_channel(images: torch.Tensor) -> torch.Tensor:
+    """Normalize single-channel images to uint8 [0, 255] repeated to 3 channels."""
+    image_min = torch.amin(images, dim=(1, 2, 3), keepdim=True)
+    image_max = torch.amax(images, dim=(1, 2, 3), keepdim=True)
+    image_range = torch.maximum(image_max - image_min, torch.tensor(1.0, device=images.device))
+    image_mid = (image_min + image_max) / 2
+    normalized = torch.clamp(((images - image_mid) / image_range + 0.5) * 255, 0, 255)
+    return normalized.repeat(1, 3, 1, 1).to(torch.uint8)
 
 
 def _device() -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-@click.command(help="Calculate KID between two real sets decoded from a single HDF5 file.")
-@click.option("--h5", type=click.Path(exists=True, dir_okay=False, path_type=str), required=True, help="Path to HDF5 file.")
-@click.option("--crop-size", type=int, default=512, show_default=True, help="Lowfreq crop size (any positive integer).")
-@click.option("--max-images-a", type=int, default=1024, show_default=True, help="Max images to load from set A.")
-@click.option("--max-images-b", type=int, default=1024, show_default=True, help="Max images to load from set B.")
-@click.option("--split-a", type=str, default='train', show_default=True, help="Optional split for set A (e.g., train/val/test).")
-@click.option("--split-b", type=str, default='train', show_default=True, help="Optional split for set B (e.g., train/val/test).")
-@click.option("--resolutions-a", type=str, default=90, show_default=True, help="Comma-separated resolutions for A (e.g., 90,480).")
-@click.option("--resolutions-b", type=str, default=90, show_default=True, help="Comma-separated resolutions for B (e.g., 90,480).")
+@torch.no_grad()
+def _compute_real_vs_real_metric(
+    dataset,
+    max_images: int,
+    seed_a: int,
+    seed_b: int,
+    batch_size: int,
+    metric: str,
+    subsets: int,
+    subset_size: int,
+    device: torch.device,
+    sigma_data: float = 1.0,
+) -> tuple:
+    """Compute KID or FID between two real sets using different random seeds."""
+    metric_lower = metric.lower()
+    if metric_lower == 'kid':
+        image_metric = KernelInceptionDistance(normalize=True, subsets=subsets, subset_size=subset_size).to(device)
+    elif metric_lower == 'fid':
+        image_metric = FrechetInceptionDistance(normalize=True).to(device)
+    else:
+        raise ValueError(f"Unknown metric '{metric}'. Expected 'kid' or 'fid'.")
+    
+    # Create two dataloaders with different seeds
+    long_dataset_a = LongDataset(dataset, shuffle=True, seed=seed_a)
+    long_dataset_b = LongDataset(dataset, shuffle=True, seed=seed_b)
+    dataloader_a = DataLoader(long_dataset_a, batch_size=batch_size, num_workers=0)
+    dataloader_b = DataLoader(long_dataset_b, batch_size=batch_size, num_workers=0)
+    
+    dataloader_a_iter = iter(dataloader_a)
+    dataloader_b_iter = iter(dataloader_b)
+    
+    pbar = tqdm(total=max_images, desc=f"Calculating {metric.upper()}")
+    
+    with torch.no_grad():
+        while pbar.n < pbar.total:
+            batch_a = recursive_to(next(dataloader_a_iter), device=device)
+            batch_b = recursive_to(next(dataloader_b_iter), device=device)
+            
+            images_a = batch_a['image']
+            images_b = batch_b['image']
+            
+            # Ensure format matches expectation (B, C, H, W)
+            # Some datasets might return (B, H, W) or (B, 1, H, W)
+            if images_a.dim() == 3:
+                images_a = images_a.unsqueeze(1)
+            if images_b.dim() == 3:
+                images_b = images_b.unsqueeze(1)
+                
+            # Normalize and update metric
+            # Using the logic from sweep_diffusion_decoder.py:
+            # image_metric.update(_normalize_uint8_three_channel(images.float() / scheduler.config.sigma_data), real=True)
+            
+            with torch.autocast(device_type=device.type, enabled=False):
+                images_a_norm = _normalize_uint8_three_channel(images_a.float() / sigma_data)
+                images_b_norm = _normalize_uint8_three_channel(images_b.float() / sigma_data)
+                image_metric.update(images_a_norm, real=True)
+                image_metric.update(images_b_norm, real=False)
+            
+            pbar.update(images_a.shape[0])
+            
+            if pbar.n >= pbar.total:
+                break
+    
+    pbar.close()
+    
+    # Compute final metric
+    if metric_lower == 'kid':
+        kid_mean, kid_std = image_metric.compute()
+        return kid_mean.item(), kid_std.item()
+    else:
+        fid = image_metric.compute()
+        return fid.item(), None
+
+
+@click.command(help="Calculate KID or FID between two real sets from the sweep dataset using different random seeds.")
+@click.option('-c', '--config', 'config_path', type=click.Path(exists=True), required=True,
+              help='Path to the configuration file')
+@click.option("--max-images", type=int, default=1024, show_default=True, help="Max images to load from each set.")
+@click.option("--metric", type=click.Choice(['kid', 'fid'], case_sensitive=False), default='kid', show_default=True, help="Metric to compute: KID or FID.")
 @click.option("--subsets", type=int, default=50, show_default=True, help="Number of random subsets for KID.")
 @click.option("--subset-size", type=int, default=100, show_default=True, help="Subset size for KID.")
-@click.option("--batch-size", type=int, default=32, show_default=True, help="Batch size for metric updates.")
-@click.option("--full", is_flag=True, help="Use full decoded images.")
-def main(h5: str, crop_size: int, max_images_a: int, max_images_b: int, split_a: Optional[str], split_b: Optional[str],
-         resolutions_a: Optional[str], resolutions_b: Optional[str], subsets: int, subset_size: int, batch_size: int, full: bool) -> None:
-    if crop_size <= 0:
-        raise ValueError("--crop-size must be positive.")
+@click.option("--batch-size", type=int, default=32, show_default=True, help="Batch size for loading images.")
+@click.option("--seed-a", type=int, default=42, show_default=True, help="Random seed for set A.")
+@click.option("--seed-b", type=int, default=123, show_default=True, help="Random seed for set B.")
+def main(config_path: str, max_images: int, metric: str, subsets: int, subset_size: int, batch_size: int, seed_a: int, seed_b: int) -> None:
+    build_registry()
+    
+    # Load config
+    config = Config().from_disk(config_path)
+    resolved = registry.resolve(config, validate=False)
+    
+    # Get sweep dataset
+    sweep_dataset = resolved.get('sweep_dataset')
+    if sweep_dataset is None:
+        raise ValueError("Config must contain 'sweep_dataset'.")
+    
+    sigma_data = resolved['scheduler'].config.sigma_data
 
-    res_a = [int(x.strip()) for x in resolutions_a.split(",")] if resolutions_a else None
-    res_b = [int(x.strip()) for x in resolutions_b.split(",")] if resolutions_b else None
-
-    imgs_a = iter_ground_truth_images(
-        h5,
-        crop_size=crop_size,
-        max_images=max_images_a,
-        split=split_a,
-        resolutions=res_a,
-    )
-    imgs_b = iter_ground_truth_images(
-        h5,
-        crop_size=crop_size,
-        max_images=max_images_b,
-        split=split_b,
-        resolutions=res_b,
-        full=full,
-    )
-
-    if len(imgs_a) == 0 or len(imgs_b) == 0:
-        raise RuntimeError("No images loaded from one or both sets. Check split, resolutions, and crop-size.")
-
+    print(f"Loaded config from: {config_path}")
+    print(f"Max images per set: {max_images}")
+    print(f"Metric: {metric.upper()}")
+    print(f"Seed A: {seed_a}, Seed B: {seed_b}")
+    
     device = _device()
-    kid = KernelInceptionDistance(normalize=True, subsets=subsets, subset_size=subset_size).to(device)
-    _update_kid(kid, imgs_a, real=True, batch_size=batch_size, device=device)
-    _update_kid(kid, imgs_b, real=False, batch_size=batch_size, device=device)
-    kid_mean, kid_std = kid.compute()
-    print(f"KID (mean ± std): {kid_mean.item():.6f} ± {kid_std.item():.6f}")
+    
+    print(f"\nComputing {metric.upper()}...")
+    result_mean, result_std = _compute_real_vs_real_metric(
+        sweep_dataset,
+        max_images,
+        seed_a,
+        seed_b,
+        batch_size,
+        metric,
+        subsets,
+        subset_size,
+        device,
+        sigma_data,
+    )
+    
+    if metric.lower() == 'kid':
+        print(f"\nKID (mean ± std): {result_mean:.6f} ± {result_std:.6f}")
+    else:
+        print(f"\nFID: {result_mean:.6f}")
 
 
 if __name__ == "__main__":
     main()
-
-

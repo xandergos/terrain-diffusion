@@ -109,10 +109,10 @@ class H5LatentsDataset(Dataset):
                             else:
                                 self.keys[i][0].add((chunk_id, res, subchunk_id))
         if self.beauty_dist != [False] * len(subset_weights):
-            self.keys = [[list(subkeys) for subkeys in keys] for keys in self.keys]
+            self.keys = [[sorted(list(subkeys)) for subkeys in keys] for keys in self.keys]
             print("Using beauty distribution. Have sizes:", [[len(subkeys) for subkeys in keys] for keys in self.keys])
         else:
-            self.keys = [list(keys) for keys in self.keys]
+            self.keys = [sorted(list(keys)) for keys in self.keys]
             print("Not using beauty distribution.")
         
         self.residual_mean = residual_mean
@@ -255,7 +255,7 @@ class H5LatentsDataset(Dataset):
         if self.beauty_dist[subset_idx]:
             subset_lens = torch.tensor([len(self.keys[subset_idx][i]) for i in range(5)]).float()
             baseline_probs = torch.log(subset_lens / subset_lens.sum())
-            histogram_raw = torch.randn(5, generator=self.rng)
+            histogram_raw = torch.randn(5, generator=self.rng) if not self.val_dset else torch.zeros(5)
             histogram = torch.softmax(histogram_raw + baseline_probs, dim=0)
             beauty_score = torch.multinomial(histogram, 1, generator=self.rng).item()
             index = torch.randint(len(self.keys[subset_idx][beauty_score]), (1,), generator=self.rng).item()
@@ -311,11 +311,19 @@ class H5LatentsDataset(Dataset):
             sampled_latent = (sampled_latent - self.latents_mean) / self.latents_std * self.sigma_data
             
             # Load lowfreq data
-            data_lowfreq = torch.from_numpy(data_lowfreq[li:li+lh, lj:lj+lw])[None]
+            if not self.clip_edges:
+                data_lowfreq = torch.from_numpy(data_lowfreq[li:li+lh, lj:lj+lw])[None]
+            else:
+                data_lowfreq = torch.from_numpy(data_lowfreq[li-1:li+lh+1, lj-1:lj+lw+1])[None]
             if flip:
                 data_lowfreq = torch.flip(data_lowfreq, dims=[-1])
             if rotate_k != 0:
                 data_lowfreq = torch.rot90(data_lowfreq, k=rotate_k, dims=[-2, -1])
+            if self.clip_edges:
+                lowfreq_padded = data_lowfreq
+                data_lowfreq = data_lowfreq[..., 1:-1, 1:-1]
+            else:
+                lowfreq_padded = None
             data_lowfreq = data_lowfreq.float()
             data_lowfreq = (data_lowfreq - LOWFREQ_MEAN) / LOWFREQ_STD * self.sigma_data
             
@@ -326,7 +334,10 @@ class H5LatentsDataset(Dataset):
                     data_residual = torch.flip(data_residual, dims=[-1])
                 if rotate_k != 0:
                     data_residual = torch.rot90(data_residual, k=rotate_k, dims=[-2, -1])
-                ground_truth = laplacian_decode(data_residual, self.denormalize_lowfreq(data_lowfreq / self.sigma_data))
+                if self.clip_edges:
+                    ground_truth = laplacian_decode(data_residual, lowfreq_padded, pre_padded=True)
+                else:
+                    ground_truth = laplacian_decode(data_residual, self.denormalize_lowfreq(data_lowfreq / self.sigma_data), extrapolate=True)
             
             cond_tensor_img, noise_level = self._get_cond_image(f, group_path, li, lj, lh, lw, flip, rotate_k)
             cond_tensor = self.build_cond_inputs(cond_tensor_img, histogram_raw, noise_level)

@@ -78,6 +78,7 @@ class H5DecoderTerrainDataset(Dataset):
                         if pct_land_valid and split_valid:
                             self.keys[i].add((chunk_id, res, subchunk_id))
         self.keys = [list(keys) for keys in self.keys]
+        self.keys = [sorted(l, key=lambda x: (x[0], x[1], x[2])) for l in self.keys]
         
         self.residual_mean = residual_mean
         self.residual_std = residual_std
@@ -191,6 +192,22 @@ class H5DecoderTerrainDataset(Dataset):
                 li, lj = lj, residual_shape[1] - li - lh
             if flip:
                 lj = residual_shape[1] - lj - lw
+                
+            # Load lowfreq data for later decoding
+            if not self.clip_edges:
+                data_lowfreq = torch.from_numpy(f[f"{group_path}/lowfreq"][i:i+h, j:j+w])[None]
+            else:
+                data_lowfreq = torch.from_numpy(f[f"{group_path}/lowfreq"][i-1:i+h+1, j-1:j+w+1])[None]
+            if flip:
+                data_lowfreq = torch.flip(data_lowfreq, dims=[-1])
+            if rotate_k != 0:
+                data_lowfreq = torch.rot90(data_lowfreq, k=rotate_k, dims=[-2, -1])
+            if self.clip_edges:
+                lowfreq_padded = data_lowfreq
+                data_lowfreq = data_lowfreq[..., 1:-1, 1:-1]
+            else:
+                lowfreq_padded = None
+                data_lowfreq = data_lowfreq
             
             # Load latent data
             data_latent = torch.from_numpy(data_latent[transform_idx, :, i:i+h, j:j+w])
@@ -217,7 +234,8 @@ class H5DecoderTerrainDataset(Dataset):
         else:
             cond_inputs = []
             
-        return {'image': image.float(), 'cond_img': cond_image, 'cond_inputs': cond_inputs, 'path': group_path}
+        return {'image': image.float(), 'cond_img': cond_image, 'cond_inputs': cond_inputs, 'path': group_path,
+                'lowfreq': data_lowfreq.float(), 'lowfreq_padded': lowfreq_padded.float()}
         
     def denormalize_residual(self, residual):
         return (residual * self.residual_std) + self.residual_mean

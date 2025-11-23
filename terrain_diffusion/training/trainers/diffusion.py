@@ -174,7 +174,7 @@ class DiffusionTrainer(Trainer):
         """Normalize terrain to [0, 255] uint8 format for KID calculation."""
         terrain_min = torch.amin(terrain, dim=(1, 2, 3), keepdim=True)
         terrain_max = torch.amax(terrain, dim=(1, 2, 3), keepdim=True)
-        terrain_range = torch.maximum(terrain_max - terrain_min, torch.tensor(1.0, device=terrain.device))
+        terrain_range = torch.maximum(terrain_max - terrain_min, torch.tensor(255.0, device=terrain.device))
         terrain_mid = (terrain_min + terrain_max) / 2
         
         terrain_norm = torch.clamp(((terrain - terrain_mid) / terrain_range + 0.5) * 255, 0, 255)
@@ -261,7 +261,10 @@ class DiffusionTrainer(Trainer):
                 
                 # Decode latents to terrain
                 terrain = self._decode_latents_to_terrain(samples[:, :4], samples[:, 4:5], autoencoder, scheduler)
+                terrain = torch.sign(terrain) * torch.square(terrain)
+                
                 real_terrain = batch['ground_truth']
+                real_terrain = torch.sign(real_terrain) * torch.square(real_terrain)
                 
                 # Update KID metric for original terrain
                 kid.update(self._normalize_and_process_terrain(terrain), real=False)
@@ -298,6 +301,7 @@ class DiffusionTrainer(Trainer):
                 batch = recursive_to(next(data_iter), device=self.accelerator.device)
                 images = batch['image']
                 cond_img = batch.get('cond_img')
+                lowfreq = batch['lowfreq']
                 conditional_inputs = batch.get('cond_inputs')
                 
                 # Generate samples using diffusion sampling
@@ -321,6 +325,14 @@ class DiffusionTrainer(Trainer):
                 # Only evaluate first channel
                 samples = samples[:, :1] / scheduler.config.sigma_data
                 real_samples = images[:, :1] / scheduler.config.sigma_data
+            
+                residual_std = self.val_dataset.base_dataset.residual_std.to(images.device)
+                residual_mean = self.val_dataset.base_dataset.residual_mean.to(images.device)
+                output_full = laplacian_decode(samples * residual_std + residual_mean, lowfreq, extrapolate=True)
+                images_full = laplacian_decode(images * residual_std + residual_mean, lowfreq, extrapolate=True)
+                
+                output_full = torch.sign(output_full) * torch.square(output_full)
+                images_full = torch.sign(images_full) * torch.square(images_full)
                 
                 # Update KID metric for original samples
                 kid.update(self._normalize_and_process_terrain(samples), real=False)
