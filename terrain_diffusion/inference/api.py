@@ -475,8 +475,11 @@ def _classify_biome(elev: torch.Tensor, climate: Optional[torch.Tensor], i0: int
     # Lowland wet = swamp
     swamp_rain = rain_land & ~jungle_rain & lowland
     out[swamp_rain] = _BIOME_ID["swamp"]
+    # Cool/cold rainforest = taiga
+    taiga_rain = rain_land & (cool | cold) & ~jungle_rain & ~swamp_rain
+    out[taiga_rain] = _BIOME_ID["taiga"]
     # Temperate rainforest = forest
-    forest_rain = rain_land & ~jungle_rain & ~swamp_rain
+    forest_rain = rain_land & ~jungle_rain & ~swamp_rain & ~taiga_rain
     out[forest_rain] = _BIOME_ID["forest"]
     land_mask = land_mask & ~rain_land
 
