@@ -16,7 +16,8 @@ from terrain_diffusion.training.datasets import LongDataset
 from terrain_diffusion.training.utils import recursive_to
 from terrain_diffusion.data.laplacian_encoder import laplacian_denoise, laplacian_decode
 from terrain_diffusion.training.evaluation.sample_diffusion_decoder import sample_decoder_consistency_tiled
-from terrain_diffusion.training.evaluation.sample_diffusion_base import sample_base_diffusion
+from terrain_diffusion.training.evaluation import _linear_weight_window, _tile_starts
+from terrain_diffusion.training.evaluation.sample_diffusion_base import _process_cond_img
 
 def _normalize_uint8_three_channel(images: torch.Tensor) -> torch.Tensor:
     """Normalize single-channel images to uint8 [0, 255] repeated to 3 channels."""
@@ -67,17 +68,16 @@ def _decode_latents_to_terrain(samples: torch.Tensor, val_dataset, decoder_model
     return laplacian_decode(highfreq, lowfreq, extrapolate=True)
 
 @click.command()
-@click.option('-m', '--model', 'model_path', type=click.Path(exists=True), help='Path to the pretrained base model checkpoint directory', default='checkpoints/models/diffusion_base-192x3')
-@click.option('-c', '--config', 'config_path', type=click.Path(exists=True), help='Path to the base diffusion configuration file', default='configs/diffusion_base/diffusion_192-3.cfg')
+@click.option('-m', '--model', 'model_path', type=click.Path(exists=True), help='Path to the pretrained base model checkpoint directory', default='checkpoints/models/consistency_base-192x3')
+@click.option('-c', '--config', 'config_path', type=click.Path(exists=True), help='Path to the base diffusion configuration file', default='configs/diffusion_base/consistency_base_192-3.cfg')
 @click.option('--num-images', type=int, default=50000, help='Number of images to evaluate')
 @click.option('--batch-size', type=int, default=40, help='Batch size for evaluation')
 @click.option('--decoder-batch-size', type=int, default=10, help='Batch size for decoder evaluation')
 @click.option('--steps', type=int, default=32, help='Number of diffusion steps (overrides config)')
 @click.option('--metric', type=click.Choice(['fid', 'kid'], case_sensitive=False), default='fid', help='Metric to evaluate')
-@click.option('-gm', '--guide-model', 'guide_model_path', type=click.Path(exists=True), help='Path to the guide model checkpoint directory', default='checkpoints/models/diffusion_base-128x3')
-@click.option('--guidance-scale', type=float, default=2.15, help='Guidance scale')
-@click.option('--inter-t', type=float, default=0.13, help='Intermediate t for 2-step decoder sampling.')
-def main(model_path, config_path, num_images, batch_size, decoder_batch_size, steps, metric, guide_model_path, guidance_scale, inter_t):
+@click.option('--inter-t', type=float, default=0.61, help='Intermediate t for 2-step sampling.')
+@click.option('--decoder-inter-t', type=float, default=0.13, help='Intermediate t for 2-step decoder sampling.')
+def main(model_path, config_path, num_images, batch_size, decoder_batch_size, steps, metric, inter_t, decoder_inter_t):
     """Evaluate base diffusion using FID/KID on decoded terrain."""
     build_registry()
     
@@ -87,6 +87,7 @@ def main(model_path, config_path, num_images, batch_size, decoder_batch_size, st
     keys_to_delete = [k for k in config.keys() if k not in kept_keys]
     for k in keys_to_delete:
         del config[k]
+    config['results_dataset']['crop_size'] = 192
     resolved = registry.resolve(config, validate=False)
     
     # Setup accelerator
@@ -98,13 +99,6 @@ def main(model_path, config_path, num_images, batch_size, decoder_batch_size, st
     model = EDMUnet2D.from_pretrained(model_path)
     model = model.to(device)
     model.eval()
-
-    guide_model = None
-    if guide_model_path:
-        print(f"Loading guide model from {guide_model_path}...")
-        guide_model = EDMUnet2D.from_pretrained(guide_model_path)
-        guide_model = guide_model.to(device)
-        guide_model.eval()
         
     # Load decoder model
     ae_path = resolved['evaluation']['kid_autoencoder_path']
@@ -114,7 +108,7 @@ def main(model_path, config_path, num_images, batch_size, decoder_batch_size, st
     decoder_model = EDMUnet2D.from_pretrained(ae_path).to(device)
     decoder_model.eval()
     
-    model, guide_model, decoder_model = accelerator.prepare(model, guide_model, decoder_model)
+    model, decoder_model = accelerator.prepare(model, decoder_model)
     
     # Scheduler
     scheduler = resolved['scheduler']
@@ -164,29 +158,75 @@ def main(model_path, config_path, num_images, batch_size, decoder_batch_size, st
             
             # Sample latents using evaluation primitive
             with accelerator.autocast():
-                samples = sample_base_diffusion(
-                    model=model,
-                    scheduler=scheduler,
-                    shape=(bs, 5, 64, 64), # Latents + lowfreq
-                    cond_inputs=cond_inputs,
-                    cond_means=torch.zeros(7, device=device),
-                    cond_stds=torch.ones(7, device=device),
-                    noise_level=torch.zeros(bs, 1, device=device),
-                    histogram_raw=histogram_raw,
-                    steps=int(scheduler_steps),
-                    guide_model=guide_model,
-                    guidance_scale=float(guidance_scale),
-                    generator=generator,
-                    tile_size=64
-                )
+                device = accelerator.device
+                dtype = torch.float32
+                sigma0 = scheduler.sigmas[0].to(device)
+                sigma_data = scheduler.config.sigma_data
+                
+                t_scalars = (torch.tensor(torch.atan(sigma0 / sigma_data), device=device, dtype=dtype), 
+                            torch.tensor(inter_t, device=device, dtype=dtype))
 
+                # Tiled sampling
+                B, C, H, W = shape = images.shape
+                tile_size = 64
+                stride = 64 // 2
+                weights = _linear_weight_window(tile_size, device, dtype)
+
+                h_starts = _tile_starts(H, tile_size, stride)
+                w_starts = _tile_starts(W, tile_size, stride)
+                
+                if cond_inputs.ndim == 1 and len(h_starts) * len(w_starts) > 1:
+                    raise ValueError(f"cond_inputs must be a tensor image for tiled sampling. Cond inputs must have width {len(w_starts)+3} and height {len(h_starts)+3}.")
+                elif cond_inputs.ndim == 4:
+                    assert cond_inputs.shape[-1] == len(w_starts)+3
+                    assert cond_inputs.shape[-2] == len(h_starts)+3
+
+                sample = torch.zeros(shape, device=device, dtype=dtype)
+                for step, t_scalar in enumerate(t_scalars):
+                    step_noise = torch.randn(shape, generator=generator, device=device, dtype=dtype)
+                    output = torch.zeros(shape, device=device, dtype=dtype)
+                    output_weights = torch.zeros(shape, device=device, dtype=dtype)
+                    for ic, i0 in enumerate(h_starts):
+                        for jc, j0 in enumerate(w_starts):
+                            # Don't need to sample edges here
+                            if step == 1 and (ic == 0 or jc == 0 or ic == len(h_starts) - 1 or jc == len(w_starts) - 1):
+                                continue
+                            
+                            if cond_inputs.ndim == 4:
+                                tile_cond = cond_inputs[..., ic:ic+4, jc:jc+4]
+                                tile_cond = [_process_cond_img(tile_cond, histogram_raw, torch.zeros(7, device=device), torch.ones(7, device=device), torch.zeros(bs, 1, device=device))]
+                            else:
+                                tile_cond = [cond_inputs]
+                            
+                            i1, j1 = i0 + tile_size, j0 + tile_size
+                            z = step_noise[..., i0:i1, j0:j1] * sigma_data
+                            tile_sample = sample[..., i0:i1, j0:j1]
+
+                            t = t_scalar.view(1, 1, 1, 1).expand(B, 1, 1, 1)
+                            x_t = torch.cos(t) * tile_sample + torch.sin(t) * z
+                            
+                            model_in = x_t / sigma_data
+                            pred = -model(model_in, noise_labels=t.flatten(), conditional_inputs=tile_cond)
+                            tile_samples = torch.cos(t) * x_t - torch.sin(t) * sigma_data * pred
+
+                            output[..., i0:i1, j0:j1] += tile_samples * weights
+                            output_weights[..., i0:i1, j0:j1] += weights
+
+                    sample = output / output_weights
+
+                samples = sample / scheduler.config.sigma_data
+
+            # Central crop samples to 64x64
+            start_h = (samples.shape[-2] - 64) // 2
+            start_w = (samples.shape[-1] - 64) // 2
+            samples = samples[..., start_h:start_h+64, start_w:start_w+64]
 
             terrain_fake = torch.zeros(bs, 1, samples.shape[-2]*8, samples.shape[-1]*8, device=device)
             with accelerator.autocast():
                 assert terrain_fake.shape[0] % decoder_batch_size == 0
                 for i in range(terrain_fake.shape[0]//decoder_batch_size):
                     in_samples = samples[i*decoder_batch_size:(i+1)*decoder_batch_size]
-                    terrain_fake[i*decoder_batch_size:(i+1)*decoder_batch_size] = _decode_latents_to_terrain(in_samples, val_dataset, decoder_model, scheduler, generator, inter_t=inter_t)
+                    terrain_fake[i*decoder_batch_size:(i+1)*decoder_batch_size] = _decode_latents_to_terrain(in_samples, val_dataset, decoder_model, scheduler, generator, inter_t=decoder_inter_t)
             terrain_fake = torch.sign(terrain_fake) * torch.square(terrain_fake)
             
             # Real terrain
@@ -195,6 +235,11 @@ def main(model_path, config_path, num_images, batch_size, decoder_batch_size, st
                  ground_truth = ground_truth[:bs]
             terrain_real = ground_truth
             terrain_real = torch.sign(terrain_real) * torch.square(terrain_real)
+            
+            # Central crop ground_truth to 512x512
+            start_h = (terrain_real.shape[-2] - 512) // 2
+            start_w = (terrain_real.shape[-1] - 512) // 2
+            terrain_real = terrain_real[..., start_h:start_h+512, start_w:start_w+512]
             
             # Disable autocast for metric calculation
             with torch.autocast(device_type=device.type, enabled=False):

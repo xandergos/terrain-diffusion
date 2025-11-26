@@ -231,7 +231,7 @@ def sample_base_consistency(
     sample = torch.zeros(shape, device=device, dtype=dtype)
     for step, t_scalar in enumerate(t_scalars):
         if noise is None:
-            step_noise = torch.randn(shape, generator=generator, device=device, dtype=dtype) * sigma0
+            step_noise = torch.randn(shape, generator=generator, device=device, dtype=dtype)
         else:
             step_noise = noise[step]
         output = torch.zeros(shape, device=device, dtype=dtype)

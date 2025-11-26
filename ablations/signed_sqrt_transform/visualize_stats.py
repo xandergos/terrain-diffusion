@@ -82,6 +82,7 @@ def load_samples_from_h5(h5_file, num_samples=100, crop_size=512, min_pct_land=0
             
             # Reconstruct full terrain using laplacian decode
             crop_transformed = laplacian_decode(residual_crop, lowfreq_crop)
+            crop_transformed[crop_transformed < 0] = 0
             
             # Handle NaN values
             if np.any(np.isnan(crop_transformed)):
@@ -109,19 +110,20 @@ def compute_stats(samples):
 
 def main():
     # Path to dataset
-    h5_file = Path("/mnt/ntfs2/shared/terrain-diffusion/data/dataset.h5")
+    h5_file = Path("./data/dataset.h5")
     
     if not h5_file.exists():
         print(f"Error: Dataset not found at {h5_file}")
         return
     
     print("Loading samples from dataset and reconstructing full terrain...")
-    samples_original, samples_transformed = load_samples_from_h5(h5_file, num_samples=200, crop_size=512)
+    samples_original, samples_transformed = load_samples_from_h5(h5_file, num_samples=1000, crop_size=512)
     print(f"Loaded {len(samples_original)} samples")
     
     # Compute stats for original data (without transform)
     print("Computing statistics for original elevation data (no transform)...")
     original_means, original_stds = compute_stats(samples_original)
+    original_means = np.sign(original_means) * np.sqrt(np.abs(original_means))
     
     # Compute stats for transformed data (with signed-sqrt transform)
     print("Computing statistics for transformed data (signed-sqrt)...")
@@ -152,28 +154,30 @@ def main():
     fig1, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
 
     # Original data (no transform)
-    ax1.scatter(original_means, original_stds, alpha=0.6, s=50, color='blue', edgecolors='black', linewidth=0.5)
+    ax1.scatter(original_means, original_stds, alpha=0.3, s=40, color='blue', edgecolors='black', linewidth=1.0)
     x_range_orig = np.linspace(original_means.min(), original_means.max(), 100)
     y_fit_orig = slope_std_orig * x_range_orig + intercept_std_orig
-    ax1.plot(x_range_orig, y_fit_orig, 'r-', linewidth=2, label=f'Linear fit')
-    ax1.set_xlabel('Mean Elevation (m)', fontsize=12)
-    ax1.set_ylabel('Standard deviation (m)', fontsize=12)
-    ax1.set_title(f'Original Elevation Data\n(No Transform)\nCorr(mean, std) = {r_std_orig:.4f}', fontsize=14, fontweight='bold')
+    ax1.plot(x_range_orig, y_fit_orig, 'r-', linewidth=4, label=f'Linear fit')
+    ax1.set_xlabel('Mean Elevation (m)', fontsize=22, fontweight='bold')
+    ax1.set_ylabel('Standard deviation (m)', fontsize=22, fontweight='bold')
+    ax1.set_title(f'Original Elevation Data\nCorr = {r_std_orig:.4f}', fontsize=22, fontweight='bold')
+    ax1.tick_params(labelsize=16)
     ax1.grid(True, alpha=0.3, which='both')
     ax1.set_axisbelow(True)
-    ax1.legend(fontsize=10)
+    ax1.legend(fontsize=20)
 
     # Transformed data (with signed-sqrt)
-    ax2.scatter(transformed_means, transformed_stds, alpha=0.6, s=50, color='orange', edgecolors='black', linewidth=0.5)
+    ax2.scatter(transformed_means, transformed_stds, alpha=0.6, s=40, color='orange', edgecolors='black', linewidth=1.0)
     x_range_trans = np.linspace(transformed_means.min(), transformed_means.max(), 100)
     y_fit_trans = slope_std_trans * x_range_trans + intercept_std_trans
-    ax2.plot(x_range_trans, y_fit_trans, 'r-', linewidth=2, label=f'Linear fit')
-    ax2.set_xlabel('Mean (signed-sqrt m)', fontsize=12)
-    ax2.set_ylabel('Standard deviation (signed-sqrt m)', fontsize=12)
-    ax2.set_title(f'With Signed-Sqrt Transform\n(Dataset Format)\nCorr(mean, std) = {r_std_trans:.4f}', fontsize=14, fontweight='bold')
+    ax2.plot(x_range_trans, y_fit_trans, 'r-', linewidth=4, label=f'Linear fit')
+    ax2.set_xlabel('Mean (signed-sqrt m)', fontsize=22, fontweight='bold')
+    ax2.set_ylabel('Standard deviation (signed-sqrt m)', fontsize=22, fontweight='bold')
+    ax2.set_title(f'With Signed-Sqrt Transform\nCorr = {r_std_trans:.4f}', fontsize=22, fontweight='bold')
+    ax2.tick_params(labelsize=16)
     ax2.grid(True, alpha=0.3, which='both')
     ax2.set_axisbelow(True)
-    ax2.legend(fontsize=10)
+    ax2.legend(fontsize=20)
 
     plt.tight_layout()
 
@@ -181,26 +185,28 @@ def main():
     fig2, (bx1, bx2) = plt.subplots(1, 2, figsize=(14, 6))
 
     # Original data (no transform)
-    bx1.scatter(original_means, original_log_stds, alpha=0.6, s=50, color='blue', edgecolors='black', linewidth=0.5)
+    bx1.scatter(original_means, original_log_stds, alpha=0.6, s=40, color='blue', edgecolors='black', linewidth=1.0)
     y_fit_log_orig = slope_log_orig * x_range_orig + intercept_log_orig
-    bx1.plot(x_range_orig, y_fit_log_orig, 'r-', linewidth=2, label=f'Linear fit')
-    bx1.set_xlabel('Mean Elevation (m)', fontsize=12)
-    bx1.set_ylabel('log(Standard deviation)', fontsize=12)
-    bx1.set_title(f'Original Elevation Data\n(No Transform)\nCorr(mean, log(std)) = {r_log_orig:.4f}', fontsize=14, fontweight='bold')
+    bx1.plot(x_range_orig, y_fit_log_orig, 'r-', linewidth=4, label=f'Linear fit')
+    bx1.set_xlabel('Mean (sqrt m)', fontsize=22, fontweight='bold')
+    bx1.set_ylabel('log(σ)', fontsize=22, fontweight='bold')
+    bx1.set_title(f'Original Elevation\nCorr = {r_log_orig:.4f}', fontsize=22, fontweight='bold')
+    bx1.tick_params(labelsize=16)
     bx1.grid(True, alpha=0.3)
     bx1.set_axisbelow(True)
-    bx1.legend(fontsize=10)
+    bx1.legend(fontsize=20)
 
     # Transformed data (with signed-sqrt)
-    bx2.scatter(transformed_means, transformed_log_stds, alpha=0.6, s=50, color='orange', edgecolors='black', linewidth=0.5)
+    bx2.scatter(transformed_means, transformed_log_stds, alpha=0.6, s=40, color='orange', edgecolors='black', linewidth=1.0)
     y_fit_log_trans = slope_log_trans * x_range_trans + intercept_log_trans
-    bx2.plot(x_range_trans, y_fit_log_trans, 'r-', linewidth=2, label=f'Linear fit')
-    bx2.set_xlabel('Mean (signed-sqrt m)', fontsize=12)
-    bx2.set_ylabel('log(Standard deviation) (signed-sqrt m)', fontsize=12)
-    bx2.set_title(f'With Signed-Sqrt Transform\n(Dataset Format)\nCorr(mean, log(std)) = {r_log_trans:.4f}', fontsize=14, fontweight='bold')
+    bx2.plot(x_range_trans, y_fit_log_trans, 'r-', linewidth=4, label=f'Linear fit')
+    bx2.set_xlabel('Mean (sqrt m)', fontsize=22, fontweight='bold')
+    bx2.set_ylabel('log(σ) (signed-sqrt)', fontsize=22, fontweight='bold')
+    bx2.set_title(f'With Signed-Sqrt Transform\nCorr = {r_log_trans:.4f}', fontsize=22, fontweight='bold')
+    bx2.tick_params(labelsize=16)
     bx2.grid(True, alpha=0.3)
     bx2.set_axisbelow(True)
-    bx2.legend(fontsize=10)
+    bx2.legend(fontsize=20)
 
     plt.tight_layout()
     

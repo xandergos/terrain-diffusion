@@ -26,7 +26,7 @@ def _normalize_uint8_three_channel(images: torch.Tensor) -> torch.Tensor:
     """Normalize single-channel images to uint8 [0, 255] repeated to 3 channels."""
     image_min = torch.amin(images, dim=(1, 2, 3), keepdim=True)
     image_max = torch.amax(images, dim=(1, 2, 3), keepdim=True)
-    image_range = torch.maximum(image_max - image_min, torch.tensor(1.0, device=images.device))
+    image_range = torch.maximum(image_max - image_min, torch.tensor(255.0, device=images.device))
     image_mid = (image_min + image_max) / 2
     normalized = torch.clamp(((images - image_mid) / image_range + 0.5) * 255, 0, 255)
     return normalized.repeat(1, 3, 1, 1).to(torch.uint8)
@@ -74,8 +74,11 @@ def _compute_real_vs_real_metric(
             batch_a = recursive_to(next(dataloader_a_iter), device=device)
             batch_b = recursive_to(next(dataloader_b_iter), device=device)
             
-            images_a = batch_a['image']
-            images_b = batch_b['image']
+            images_a = batch_a['ground_truth']
+            images_b = batch_b['ground_truth']
+            
+            images_a = torch.sign(images_a) * torch.square(images_a)
+            images_b = torch.sign(images_b) * torch.square(images_b)
             
             # Ensure format matches expectation (B, C, H, W)
             # Some datasets might return (B, H, W) or (B, 1, H, W)

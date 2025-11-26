@@ -109,6 +109,22 @@ def start_explorer(hdf5_file: str, seed: int, coarse_window: int = 64, device: s
 
         ax_relief.format_coord = relief_format_coord
 
+        # Format coord for coarse map showing all channel values
+        coarse_ss_all = world.coarse[:, ci0:ci1, cj0:cj1]
+        coarse_ss_all = coarse_ss_all[:-1] / coarse_ss_all[-1:]
+        coarse_ss_all_np = coarse_ss_all.detach().cpu().numpy()
+
+        def coarse_format_coord(x, y):
+            ix = int(np.floor(x)) - cj0
+            iy = int(np.floor(y)) - ci0
+            C, H, W = coarse_ss_all_np.shape
+            if 0 <= ix < W and 0 <= iy < H:
+                vals = [f"{coarse_ss_all_np[c, iy, ix]:.3f}" for c in range(C)]
+                return f"i={iy+ci0}, j={ix+cj0} | ch=[{', '.join(vals)}]"
+            return f"x={x:.1f}, y={y:.1f}"
+
+        ax_coarse.format_coord = coarse_format_coord
+
         def show_right_panel():
             nonlocal last_elev, last_biome, last_climate, last_climate0, right_mode, last_ci, last_cj
             if last_elev is None:
@@ -180,7 +196,15 @@ def start_explorer(hdf5_file: str, seed: int, coarse_window: int = 64, device: s
             nonlocal selected_channel
             selected_channel = int(ch)
             # Update coarse panel with selected channel using same transform
-            coarse_ss = world.coarse[selected_channel, ci0:ci1, cj0:cj1]
+            coarse_ss = world.coarse[:, ci0:ci1, cj0:cj1]
+            coarse_ss = coarse_ss[:-1] / coarse_ss[-1:]
+            coarse_ss = coarse_ss[selected_channel]
+            
+            if ch <= 1:
+                coarse_ss = torch.sign(coarse_ss) * torch.square(coarse_ss)
+            if ch == 4:
+                coarse_ss = torch.log(1 + coarse_ss)
+            
             data = coarse_ss.detach().cpu().numpy()
             im.set_data(data)
             # Rescale color limits to new data range
@@ -225,9 +249,11 @@ def start_explorer(hdf5_file: str, seed: int, coarse_window: int = 64, device: s
 if __name__ == '__main__':
     with NamedTemporaryFile(suffix='.h5') as tmp_file:
         start_explorer(
-            'world_mc.h5', device='cuda', seed=1, log_mode='debug', coarse_window=76,
+            tmp_file.name, device='cuda', seed=1, log_mode='debug', coarse_window=76,
             drop_water_pct=0.5,
-            frequency_mult=[1.3, 1.3, 1.3, 1.3, 1.3],
+            frequency_mult=[1.0, 1.0, 1.0, 1.0, 1.0],
             cond_snr=[0.5, 0.5, 0.5, 0.5, 0.5],
+            histogram_raw=[0.0, 0.0, 0.0, 1.0, 1.5],
             mode="a",
+            latents_batch_size=32,
         )

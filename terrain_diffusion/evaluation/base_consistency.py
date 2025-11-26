@@ -16,7 +16,7 @@ from terrain_diffusion.training.datasets import LongDataset
 from terrain_diffusion.training.utils import recursive_to
 from terrain_diffusion.data.laplacian_encoder import laplacian_denoise, laplacian_decode
 from terrain_diffusion.training.evaluation.sample_diffusion_decoder import sample_decoder_consistency_tiled
-from terrain_diffusion.training.evaluation.sample_diffusion_base import sample_base_diffusion
+from terrain_diffusion.training.evaluation.sample_diffusion_base import sample_base_consistency
 
 def _normalize_uint8_three_channel(images: torch.Tensor) -> torch.Tensor:
     """Normalize single-channel images to uint8 [0, 255] repeated to 3 channels."""
@@ -67,17 +67,16 @@ def _decode_latents_to_terrain(samples: torch.Tensor, val_dataset, decoder_model
     return laplacian_decode(highfreq, lowfreq, extrapolate=True)
 
 @click.command()
-@click.option('-m', '--model', 'model_path', type=click.Path(exists=True), help='Path to the pretrained base model checkpoint directory', default='checkpoints/models/diffusion_base-192x3')
-@click.option('-c', '--config', 'config_path', type=click.Path(exists=True), help='Path to the base diffusion configuration file', default='configs/diffusion_base/diffusion_192-3.cfg')
+@click.option('-m', '--model', 'model_path', type=click.Path(exists=True), help='Path to the pretrained base model checkpoint directory', default='checkpoints/models/consistency_base-192x3')
+@click.option('-c', '--config', 'config_path', type=click.Path(exists=True), help='Path to the base diffusion configuration file', default='configs/diffusion_base/consistency_base_192-3.cfg')
 @click.option('--num-images', type=int, default=50000, help='Number of images to evaluate')
 @click.option('--batch-size', type=int, default=40, help='Batch size for evaluation')
 @click.option('--decoder-batch-size', type=int, default=10, help='Batch size for decoder evaluation')
 @click.option('--steps', type=int, default=32, help='Number of diffusion steps (overrides config)')
 @click.option('--metric', type=click.Choice(['fid', 'kid'], case_sensitive=False), default='fid', help='Metric to evaluate')
-@click.option('-gm', '--guide-model', 'guide_model_path', type=click.Path(exists=True), help='Path to the guide model checkpoint directory', default='checkpoints/models/diffusion_base-128x3')
-@click.option('--guidance-scale', type=float, default=2.15, help='Guidance scale')
-@click.option('--inter-t', type=float, default=0.13, help='Intermediate t for 2-step decoder sampling.')
-def main(model_path, config_path, num_images, batch_size, decoder_batch_size, steps, metric, guide_model_path, guidance_scale, inter_t):
+@click.option('--inter-t', type=float, default=0.61, help='Intermediate t for 2-step sampling.')
+@click.option('--decoder-inter-t', type=float, default=0.13, help='Intermediate t for 2-step decoder sampling.')
+def main(model_path, config_path, num_images, batch_size, decoder_batch_size, steps, metric, inter_t, decoder_inter_t):
     """Evaluate base diffusion using FID/KID on decoded terrain."""
     build_registry()
     
@@ -98,13 +97,6 @@ def main(model_path, config_path, num_images, batch_size, decoder_batch_size, st
     model = EDMUnet2D.from_pretrained(model_path)
     model = model.to(device)
     model.eval()
-
-    guide_model = None
-    if guide_model_path:
-        print(f"Loading guide model from {guide_model_path}...")
-        guide_model = EDMUnet2D.from_pretrained(guide_model_path)
-        guide_model = guide_model.to(device)
-        guide_model.eval()
         
     # Load decoder model
     ae_path = resolved['evaluation']['kid_autoencoder_path']
@@ -114,7 +106,7 @@ def main(model_path, config_path, num_images, batch_size, decoder_batch_size, st
     decoder_model = EDMUnet2D.from_pretrained(ae_path).to(device)
     decoder_model.eval()
     
-    model, guide_model, decoder_model = accelerator.prepare(model, guide_model, decoder_model)
+    model, decoder_model = accelerator.prepare(model, decoder_model)
     
     # Scheduler
     scheduler = resolved['scheduler']
@@ -164,7 +156,7 @@ def main(model_path, config_path, num_images, batch_size, decoder_batch_size, st
             
             # Sample latents using evaluation primitive
             with accelerator.autocast():
-                samples = sample_base_diffusion(
+                samples = sample_base_consistency(
                     model=model,
                     scheduler=scheduler,
                     shape=(bs, 5, 64, 64), # Latents + lowfreq
@@ -173,9 +165,7 @@ def main(model_path, config_path, num_images, batch_size, decoder_batch_size, st
                     cond_stds=torch.ones(7, device=device),
                     noise_level=torch.zeros(bs, 1, device=device),
                     histogram_raw=histogram_raw,
-                    steps=int(scheduler_steps),
-                    guide_model=guide_model,
-                    guidance_scale=float(guidance_scale),
+                    intermediate_t=inter_t,
                     generator=generator,
                     tile_size=64
                 )
@@ -186,7 +176,7 @@ def main(model_path, config_path, num_images, batch_size, decoder_batch_size, st
                 assert terrain_fake.shape[0] % decoder_batch_size == 0
                 for i in range(terrain_fake.shape[0]//decoder_batch_size):
                     in_samples = samples[i*decoder_batch_size:(i+1)*decoder_batch_size]
-                    terrain_fake[i*decoder_batch_size:(i+1)*decoder_batch_size] = _decode_latents_to_terrain(in_samples, val_dataset, decoder_model, scheduler, generator, inter_t=inter_t)
+                    terrain_fake[i*decoder_batch_size:(i+1)*decoder_batch_size] = _decode_latents_to_terrain(in_samples, val_dataset, decoder_model, scheduler, generator, inter_t=decoder_inter_t)
             terrain_fake = torch.sign(terrain_fake) * torch.square(terrain_fake)
             
             # Real terrain

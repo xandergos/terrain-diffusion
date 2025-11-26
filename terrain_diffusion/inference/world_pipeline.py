@@ -266,11 +266,13 @@ class WorldPipeline:
                  base_model="checkpoints/models/consistency_base-192x3",
                  decoder_model="checkpoints/models/consistency_decoder-64x3",
                  superres_model="checkpoints/models/consistency_superres-32x2",
+                 latents_batch_size=1,
                  **kwargs):
         self.kwargs = kwargs
         self.device = device
         self.tile_store = HDF5TileStore(hdf5_file, mode=mode, compression=compression, compression_opts=compression_opts, tile_cache_size=100)
         self.seed = seed or random.randint(0, 2**31-1)
+        self.latents_batch_size = latents_batch_size
         
         self.log_mode = kwargs.get('log_mode', 'info')
         
@@ -329,13 +331,22 @@ class WorldPipeline:
             i1, j1 = i * TILE_STRIDE, j * TILE_STRIDE
             i2, j2 = i1 + TILE_SIZE, j1 + TILE_SIZE
             synthetic_map = torch.as_tensor(self.synthetic_map_factory(j1, i1, j2, i2))
+            synthetic_map[1] = torch.where(synthetic_map[1] > 20, synthetic_map[1], (synthetic_map[1] - 20) * 1.25 + 20)
+            synthetic_map_unnorm = synthetic_map.clone()
             synthetic_map = (synthetic_map - MODEL_MEANS[[0, 2, 3, 4, 5], None, None]) / MODEL_STDS[[0, 2, 3, 4, 5], None, None]
             synthetic_map = synthetic_map.to(self.device)[None]
             
-            cond_img = torch.cos(t_cond.view(1, -1, 1, 1)) * synthetic_map + torch.sin(t_cond.view(1, -1, 1, 1)) * torch.randn_like(synthetic_map)
+            cond_noise = torch.as_tensor(gaussian_noise_patch(self.seed, i1, j1, TILE_SIZE, TILE_SIZE, 
+                                                              channels=5, tile_h=TILE_SIZE, tile_w=TILE_SIZE), 
+                                         device=self.device)[None]
+            cond_img = torch.cos(t_cond.view(1, -1, 1, 1)) * synthetic_map + torch.sin(t_cond.view(1, -1, 1, 1)) * cond_noise
             
             scheduler.set_timesteps(20)
-            sample = torch.randn(1, 6, TILE_SIZE, TILE_SIZE, device=self.device) * scheduler.sigmas[0]
+            sample_noise = torch.as_tensor(gaussian_noise_patch(self.seed + 1, i1, j1, TILE_SIZE, TILE_SIZE,
+                                                                 channels=6, tile_h=TILE_SIZE, tile_w=TILE_SIZE),
+                                           device=self.device)[None]
+            sample = sample_noise * scheduler.sigmas[0]
+            
             for t, sigma in zip(scheduler.timesteps, scheduler.sigmas):
                 t = t.to(self.device)
                 sigma = sigma.to(self.device)
@@ -346,6 +357,7 @@ class WorldPipeline:
                 model_out = self.coarse_model(x_in, noise_labels=cnoise, conditional_inputs=cond_inputs)
                 sample = scheduler.step(model_out, t, sample).prev_sample
                 
+            
             sample = sample.cpu() / scheduler.config.sigma_data
             sample = (sample * MODEL_STDS.view(1, -1, 1, 1)) + MODEL_MEANS.view(1, -1, 1, 1)
             sample[0, 1] = sample[0, 0] - sample[0, 1]
@@ -365,7 +377,7 @@ class WorldPipeline:
         COND_INPUT_MEAN = torch.tensor([14.99, 11.65, 15.87, 619.26, 833.12, 69.40, 0.66])
         COND_INPUT_STD = torch.tensor([21.72, 21.78, 10.40, 452.29, 738.09, 34.59, 0.47])
         HISTOGRAM_RAW = torch.tensor([self.kwargs.get('histogram_raw', [0.0, 0.0, 0.0, 0.0, 0.0])])
-        COND_MAX_NOISE = 0.1
+        COND_MAX_NOISE = 0.0
         NOISE_LEVEL = 0.0
         
         scheduler = EDMDPMSolverMultistepScheduler(sigma_min=0.002, sigma_max=80, sigma_data=0.5)
@@ -409,67 +421,100 @@ class WorldPipeline:
             noise_level = (noise_level - 0.5) * np.sqrt(12)
             return mp_concat([means_crop.flatten(1), p5_crop.flatten(1), climate_means_crop.flatten(1), mask_crop.flatten(1), histogram_raw, noise_level.view(-1, 1)], dim=1).float()
 
-        def f(ctx, sample, cond_img, t, seed_offset=0):
+        def f(ctxs, samples, cond_imgs, t, seed_offset=0):
             if self.log_mode == 'debug':
-                print(f"Latent f at {ctx}")
+                print(f"Latent f batch size {len(ctxs)} at {ctxs}")
             if MOCK:
-                return torch.ones((6, TILE_SIZE, TILE_SIZE))
-            if sample is None:
-                sample = torch.zeros((1, 5, TILE_SIZE, TILE_SIZE), device=self.device)
-            else:
-                sample = torch.as_tensor(sample, device=self.device)
-                sample = sample[:-1] / sample[-1:] * scheduler.config.sigma_data
+                return [torch.ones((6, TILE_SIZE, TILE_SIZE)) for _ in ctxs]
             
-            mask = torch.ones((1, 4, 4))
-            cond_img = torch.cat([cond_img, mask], dim=0)[None]
+            if samples is None:
+                samples = [None] * len(ctxs)
             
-            t = torch.as_tensor(t, device=self.device)
-            cond_inputs = _process_cond_img(cond_img, HISTOGRAM_RAW, COND_INPUT_MEAN, COND_INPUT_STD, noise_level=torch.tensor(NOISE_LEVEL)).to(self.device)
+            model_in_list = []
+            cond_inputs_list = []
+            samples_processed = []
             
-            noise = torch.as_tensor(gaussian_noise_patch(self.seed + seed_offset, ctx[1]*TILE_STRIDE, ctx[2]*TILE_STRIDE, TILE_SIZE, TILE_SIZE, 
-                                                         channels=5, tile_h=TILE_SIZE, tile_w=TILE_SIZE))[None]
+            t_tensor = torch.as_tensor(t, device=self.device)
             
-            t = t.view(1, 1, 1, 1).to(self.device)
-            z = noise.to(self.device) * scheduler.config.sigma_data
-            x_t = torch.cos(t) * sample + torch.sin(t) * z
-            model_in = (x_t / scheduler.config.sigma_data).to(self.device)
-            pred = -self.base_model(model_in, noise_labels=t.flatten(), conditional_inputs=[cond_inputs])
-            sample = torch.cos(t) * x_t - torch.sin(t) * scheduler.config.sigma_data * pred
-            sample = sample.cpu() / scheduler.config.sigma_data
-            return torch.cat([sample[0] * weight_window[None], weight_window[None]], dim=0)
+            for ctx, sample, cond_img in zip(ctxs, samples, cond_imgs):
+                if sample is None:
+                    sample = torch.zeros((1, 5, TILE_SIZE, TILE_SIZE), device=self.device)
+                else:
+                    sample = torch.as_tensor(sample, device=self.device)
+                    sample = sample[:-1] / sample[-1:] * scheduler.config.sigma_data
+                
+                cond_img = cond_img[:-1] / cond_img[-1:]
+                
+                mask = torch.ones((1, 4, 4))
+                cond_img = torch.cat([cond_img, mask], dim=0)[None]
+                
+                cond_inputs = _process_cond_img(cond_img, HISTOGRAM_RAW, COND_INPUT_MEAN, COND_INPUT_STD, noise_level=torch.tensor(NOISE_LEVEL)).to(self.device)
+                
+                noise = torch.as_tensor(gaussian_noise_patch(self.seed + seed_offset, ctx[1]*TILE_STRIDE, ctx[2]*TILE_STRIDE, TILE_SIZE, TILE_SIZE, 
+                                                             channels=5, tile_h=TILE_SIZE, tile_w=TILE_SIZE))[None]
+                
+                z = noise.to(self.device) * scheduler.config.sigma_data
+                t_view = t_tensor.view(1, 1, 1, 1).to(self.device)
+                x_t = torch.cos(t_view) * sample + torch.sin(t_view) * z
+                model_in = (x_t / scheduler.config.sigma_data).to(self.device)
+                
+                model_in_list.append(model_in)
+                cond_inputs_list.append(cond_inputs)
+                samples_processed.append((sample, x_t))
+
+            if not model_in_list:
+                return []
+
+            model_in_batch = torch.cat(model_in_list, dim=0)
+            cond_inputs_batch = torch.cat(cond_inputs_list, dim=0)
+            noise_labels_batch = t_tensor.expand(len(ctxs)).to(self.device)
+            
+            pred_batch = -self.base_model(model_in_batch, noise_labels=noise_labels_batch, conditional_inputs=[cond_inputs_batch])
+            
+            outputs = []
+            for i, pred in enumerate(pred_batch):
+                sample, x_t = samples_processed[i]
+                pred = pred.unsqueeze(0)
+                t_view = t_tensor.view(1, 1, 1, 1).to(self.device)
+                sample = torch.cos(t_view) * x_t - torch.sin(t_view) * scheduler.config.sigma_data * pred
+                sample = sample.cpu() / scheduler.config.sigma_data
+                outputs.append(torch.cat([sample[0] * weight_window[None], weight_window[None]], dim=0))
+            return outputs
 
         t_init = torch.atan(scheduler.sigmas[0] / scheduler.config.sigma_data)
         output_window = TensorWindow(size=(6, TILE_SIZE, TILE_SIZE), stride=(6, TILE_STRIDE, TILE_STRIDE))
-        coarse_window = TensorWindow(size=(6, 4, 4), stride=(6, 1, 1))
+        coarse_window = TensorWindow(size=(7, 4, 4), stride=(7, 1, 1))
         tensor = self.tile_store.get_or_create("init_latent_map",
                                                shape=(6, None, None),
-                                               f=lambda ctx, cond: f(ctx, None, cond, t_init, seed_offset=5819),
+                                               f=lambda ctxs, conds: f(ctxs, None, conds, t_init, seed_offset=5819),
                                                output_window=output_window,
                                                args=(self.coarse,),
-                                               args_windows=(coarse_window,))
+                                               args_windows=(coarse_window,),
+                                               batch_size=self.latents_batch_size)
         
-        inter_t = [torch.arctan(torch.tensor(0.06) / 0.5)]
+        inter_t = [torch.arctan(torch.tensor(0.35) / 0.5)]
         #inter_t = []
         for i, t in enumerate(inter_t):
             next_tensor = self.tile_store.get_or_create("step_latent_map_{}".format(i),
                                                 shape=(6, None, None),
-                                                f=lambda ctx, sample, cond: f(ctx, sample, cond, t, seed_offset=5820+i),
+                                                f=lambda ctxs, samples, conds: f(ctxs, samples, conds, t, seed_offset=5820+i),
                                                 output_window=output_window,
                                                 args=(tensor, self.coarse,),
-                                                args_windows=(output_window, coarse_window,))
+                                                args_windows=(output_window, coarse_window,),
+                                                batch_size=self.latents_batch_size)
             tensor = next_tensor
         
         return tensor
     
     def _get_residual_90_map(self):
-        TILE_SIZE = 512
-        TILE_STRIDE = 512-TILE_SIZE//4
+        TILE_SIZE = 1024
+        TILE_STRIDE = TILE_SIZE - 128
         
         scheduler = EDMDPMSolverMultistepScheduler(sigma_min=0.002, sigma_max=80, sigma_data=0.5)
         weight_window = linear_weight_window(TILE_SIZE, 'cpu', torch.float32)
         
         t_list = [torch.atan(scheduler.sigmas[0] / scheduler.config.sigma_data)]
-        t_list += [torch.arctan(torch.tensor(0.075) / 0.5)]
+        t_list += [torch.arctan(torch.tensor(0.065) / 0.5)]
         def f(ctx, latents):
             if self.log_mode == 'debug':
                 print(f"Residual f at {ctx}")
@@ -507,14 +552,14 @@ class WorldPipeline:
         return tensor
     
     def _get_double_resolution_map(self, prev_tensor, prev_res):
-        TILE_SIZE = 512
-        TILE_STRIDE = 512-64
+        TILE_SIZE = 1024
+        TILE_STRIDE = TILE_SIZE - 64
         
         scheduler = EDMDPMSolverMultistepScheduler(sigma_min=0.002, sigma_max=80, sigma_data=0.5)
         weight_window = linear_weight_window(TILE_SIZE, 'cpu', torch.float32)
         
         t_list = [torch.arctan(torch.tensor(80.0) / 0.5)]
-        t_list += [torch.arctan(torch.tensor(0.075) / 0.5)]
+        t_list += [torch.arctan(torch.tensor(0.065) / 0.5)]
         def f(ctx, lowres):
             if self.log_mode == 'debug':
                 print(f"Residual({prev_res}->{prev_res//2}) f at {ctx}")
@@ -609,51 +654,58 @@ class WorldPipeline:
         coarse_map = coarse_init[:-1] / coarse_init[-1:]
         coarse_elev_denorm = torch.sign(coarse_map[0]) * torch.square(torch.maximum(torch.zeros_like(coarse_map[0]), coarse_map[0]))
         temp_baseline, beta = local_baseline_temperature_torch(coarse_map[2], coarse_elev_denorm, win=coarse_window_size, fallback_threshold=0.02)
+        central_coarse = coarse_map[:, coarse_window_size//2:-(coarse_window_size//2), coarse_window_size//2:-(coarse_window_size//2)]
 
-        scale_factor = 32 * scale
-        h = i2 - i1
-        w = j2 - j1
-        device = coarse_map.device
-
-        def make_grid(start_ci: int, start_cj: int, height: int, width: int) -> torch.Tensor:
-            height_f = float(height)
-            width_f = float(width)
-            row_idx = torch.arange(h, device=device, dtype=torch.float32)
-            col_idx = torch.arange(w, device=device, dtype=torch.float32)
-            rows = ((i1 + row_idx + 0.5) / scale_factor) - start_ci
-            cols = ((j1 + col_idx + 0.5) / scale_factor) - start_cj
-            rows = (rows + 0.5) / height_f * 2 - 1
-            cols = (cols + 0.5) / width_f * 2 - 1
-            grid_y = rows[:, None].expand(-1, w)
-            grid_x = cols[None, :].expand(h, -1)
-            return torch.stack((grid_x, grid_y), dim=-1)
-
-        coarse_grid = make_grid(ci1 - coarse_padding, cj1 - coarse_padding, coarse_map.shape[1], coarse_map.shape[2])
-        coarse_up = torch.nn.functional.grid_sample(
-            coarse_map.unsqueeze(0),
-            coarse_grid.unsqueeze(0),
-            mode='bilinear',
-            padding_mode='border',
-            align_corners=False,
-        )[0]
-
-        temp_baseline_core = temp_baseline[:, 1:-1, 1:-1]
-        beta_core = beta[:, 1:-1, 1:-1]
-        baseline_grid = make_grid(ci1, cj1, temp_baseline_core.shape[1], temp_baseline_core.shape[2])
-        temp_baseline_up = torch.nn.functional.grid_sample(
-            temp_baseline_core.unsqueeze(0),
-            baseline_grid.unsqueeze(0),
-            mode='bilinear',
-            padding_mode='border',
-            align_corners=False,
-        )[0]
-        beta_up = torch.nn.functional.grid_sample(
-            beta_core.unsqueeze(0),
-            baseline_grid.unsqueeze(0),
-            mode='bilinear',
-            padding_mode='border',
-            align_corners=False,
-        )[0]
+        # Calculate grid for sampling
+        S = 32 * scale
+        H_src, W_src = temp_baseline.shape[-2:]
+        
+        # Create coordinate grid for the target window
+        # coordinates are i1..i2-1, j1..j2-1
+        device = elev.device
+        grid_i = torch.arange(i1, i2, device=device)
+        grid_j = torch.arange(j1, j2, device=device)
+        ii, jj = torch.meshgrid(grid_i, grid_j, indexing='ij')
+        
+        # Map to source index coordinates (continuous)
+        # The source tensor has 1 pixel padding around [ci1, ci2) x [cj1, cj2)
+        # Index 0 corresponds to ci1-1.
+        # Index 1 corresponds to ci1.
+        # Coarse pixel C center is at (C + 0.5) * S in high-res coordinates.
+        # We want to map high-res pixel p (center p + 0.5) to coarse index u.
+        # (p + 0.5) / S = C_continuous + 0.5
+        # u = C_continuous - (ci1 - 1) = (p + 0.5) / S - 0.5 - ci1 + 1 = (p + 0.5) / S - ci1 + 0.5
+        
+        u = (ii + 0.5) / S - ci1 + 0.5
+        v = (jj + 0.5) / S - cj1 + 0.5
+        
+        # Normalize to [-1, 1] for grid_sample
+        grid_y = (u + 0.5) * 2 / H_src - 1
+        grid_x = (v + 0.5) * 2 / W_src - 1
+        
+        # Stack into (N, H_out, W_out, 2) in (x, y) order
+        grid = torch.stack([grid_x, grid_y], dim=-1).unsqueeze(0) # (1, H_out, W_out, 2)
+        
+        # Prepare source features
+        # Ensure temp_baseline and beta have channel dimension if they don't
+        if temp_baseline.ndim == 2:
+            temp_baseline = temp_baseline.unsqueeze(0)
+        if beta.ndim == 2:
+            beta = beta.unsqueeze(0)
+            
+        # Concatenate all features to sample at once
+        # temp_baseline: (1, H, W)
+        # beta: (1, H, W)
+        # central_coarse: (C, H, W)
+        features = torch.cat([temp_baseline, beta, central_coarse], dim=0).unsqueeze(0) # (1, C_total, H, W)
+        
+        # Sample
+        features_up = torch.nn.functional.grid_sample(features, grid, mode='bilinear', padding_mode='border', align_corners=False)
+        features_up = features_up.squeeze(0)
+        
+        temp_baseline_up = features_up[0:1]
+        beta_up = features_up[1:2]
+        coarse_up = features_up[2:]
         
         temp_realistic = temp_baseline_up[0] + beta_up[0] * torch.square(torch.maximum(elev, torch.zeros_like(elev)))
         climate = torch.stack([temp_realistic, coarse_up[3], coarse_up[4], coarse_up[5], beta_up[0]])

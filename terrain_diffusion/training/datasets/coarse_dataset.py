@@ -242,10 +242,12 @@ class CoarseDataset(Dataset):
                  std_precip_file,
                  crop_size=16,
                  tile_px=26,
-                 sigma_data=0.5):
+                 sigma_data=0.5,
+                 max_of_n=1):
         self.h5_file = h5_file
         self.crop_size = crop_size
         self.sigma_data = sigma_data
+        self.max_of_n = max_of_n
         if not os.path.exists(h5_file):
             print("Building HDF5 file...")
             with h5py.File(h5_file, 'w') as f:
@@ -372,18 +374,41 @@ class CoarseDataset(Dataset):
 
     def __getitem__(self, idx):
         band_weights = self.get_band_weights()
-        band_idx = np.random.choice(len(band_weights), p=band_weights)
         
-        data = self.get_band(band_idx)
-        data_shape = data.shape
+        last = None
+        best_data = None
+        best_score = -1.0
         
-        # Get random crop indices
-        max_i = data_shape[1] - self.crop_size
-        max_j = data_shape[2] - self.crop_size
-        i = random.randint(0, max_i)
-        j = random.randint(0, max_j)
+        for _ in range(self.max_of_n):
+            band_idx = np.random.choice(len(band_weights), p=band_weights)
+            
+            data = self.get_band(band_idx)
+            data_shape = data.shape
+            
+            # Get random crop indices
+            max_i = data_shape[1] - self.crop_size
+            max_j = data_shape[2] - self.crop_size
+            i = random.randint(0, max_i)
+            j = random.randint(0, max_j)
+            
+            crop = data[:, i:i+self.crop_size, j:j+self.crop_size]
+            
+            elev_sqrt = crop[0] * self.stds[0] + self.means[0]
+            elev = torch.sign(elev_sqrt) * torch.square(elev_sqrt)
+            elev_zerod = torch.where(elev < 0, torch.zeros_like(elev), elev)
+            
+            # Calculate score as mean squared difference from 3x3 blur
+            img = elev_zerod.unsqueeze(0).unsqueeze(0)
+            blurred = torch.nn.functional.avg_pool2d(img, kernel_size=3, stride=1, padding=1)
+            score = torch.quantile((img - blurred) ** 2, q=0.9)
+            
+            if score > best_score:
+                best_score = score
+                best_data = crop
+                
+            last = crop
         
-        data = data[:, i:i+self.crop_size, j:j+self.crop_size]
+        data = best_data if random.random() > 0.25 else last
         
         if random.random() > 0.5:
             data = torch.flip(data, dims=[-2])
