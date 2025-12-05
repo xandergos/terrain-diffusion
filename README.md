@@ -68,9 +68,14 @@ See [API_README.md](API_README.md) for details.
 
 ### Explore the World
 
+This opens a two-panel GUI. The left panel shows the coarse map. Click any pixel on the coarse map to generate a high resolution shaded relief map on the right.
+You can also view the temperature of the high resolution map with `Temperature` (Lapse-rate adjusted).
+
 `python -m terrain_diffusion explore`
 
 ### API for Minecraft
+
+If you are running the [minecraft mod](https://github.com/xandergos/terrain-diffusion-mc), you need to run this API in the background.
 
 `python -m terrain_diffusion mc-api`
 
