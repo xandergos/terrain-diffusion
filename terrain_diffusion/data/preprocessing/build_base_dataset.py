@@ -19,7 +19,7 @@ from terrain_diffusion.models.edm_autoencoder import EDMAutoencoder
 from terrain_diffusion.models.edm_unet import EDMUnet2D
 import multiprocessing as mp
 from functools import partial
-from terrain_diffusion.data.preprocessing.utils import ElevationDataset, process_single_file_base
+from terrain_diffusion.data.preprocessing.elevation_dataset import ElevationDataset, process_single_file_base
 from terrain_diffusion.data.preprocessing.calculate_stds import calculate_stats_welford
 
 @click.command()

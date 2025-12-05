@@ -11,6 +11,7 @@ from torchmetrics.image.fid import FrechetInceptionDistance
 from torchmetrics.image.kid import KernelInceptionDistance
 
 from terrain_diffusion.models.edm_unet import EDMUnet2D
+from terrain_diffusion.common.model_utils import resolve_model_path, MODEL_PATHS
 from terrain_diffusion.training.registry import build_registry
 from terrain_diffusion.training.datasets import LongDataset
 from terrain_diffusion.training.utils import recursive_to
@@ -67,14 +68,14 @@ def _decode_latents_to_terrain(samples: torch.Tensor, val_dataset, decoder_model
     return laplacian_decode(highfreq, lowfreq, extrapolate=True)
 
 @click.command()
-@click.option('-m', '--model', 'model_path', type=click.Path(exists=True), help='Path to the pretrained base model checkpoint directory', default='checkpoints/models/diffusion_base-192x3')
+@click.option('-m', '--model', 'model_path', type=str, default=None, help='Path to pretrained base model (local or HuggingFace repo)')
 @click.option('-c', '--config', 'config_path', type=click.Path(exists=True), help='Path to the base diffusion configuration file', default='configs/diffusion_base/diffusion_192-3.cfg')
 @click.option('--num-images', type=int, default=50000, help='Number of images to evaluate')
 @click.option('--batch-size', type=int, default=40, help='Batch size for evaluation')
 @click.option('--decoder-batch-size', type=int, default=10, help='Batch size for decoder evaluation')
 @click.option('--steps', type=int, default=32, help='Number of diffusion steps (overrides config)')
 @click.option('--metric', type=click.Choice(['fid', 'kid'], case_sensitive=False), default='fid', help='Metric to evaluate')
-@click.option('-gm', '--guide-model', 'guide_model_path', type=click.Path(exists=True), help='Path to the guide model checkpoint directory', default='checkpoints/models/diffusion_base-128x3')
+@click.option('-gm', '--guide-model', 'guide_model_path', type=str, default=None, help='Path to guide model (local or HuggingFace repo)')
 @click.option('--guidance-scale', type=float, default=2.15, help='Guidance scale')
 @click.option('--inter-t', type=float, default=0.13, help='Intermediate t for 2-step decoder sampling.')
 def main(model_path, config_path, num_images, batch_size, decoder_batch_size, steps, metric, guide_model_path, guidance_scale, inter_t):
@@ -93,25 +94,29 @@ def main(model_path, config_path, num_images, batch_size, decoder_batch_size, st
     accelerator = Accelerator(mixed_precision='fp16')
     device = accelerator.device
     
+    # Resolve model paths (user override -> local default -> HuggingFace)
+    resolved_model_path = resolve_model_path(model_path, *MODEL_PATHS["diffusion_base"])
+    resolved_guide_path = resolve_model_path(guide_model_path, *MODEL_PATHS["diffusion_base_guide"])
+    resolved_decoder_path = resolve_model_path(
+        resolved['evaluation'].get('kid_autoencoder_path'),
+        *MODEL_PATHS["decoder"]
+    )
+    
     # Load Models
-    print(f"Loading model from {model_path}...")
-    model = EDMUnet2D.from_pretrained(model_path)
+    print(f"Loading model from {resolved_model_path}...")
+    model = EDMUnet2D.from_pretrained(resolved_model_path)
     model = model.to(device)
     model.eval()
 
     guide_model = None
-    if guide_model_path:
-        print(f"Loading guide model from {guide_model_path}...")
-        guide_model = EDMUnet2D.from_pretrained(guide_model_path)
-        guide_model = guide_model.to(device)
-        guide_model.eval()
+    print(f"Loading guide model from {resolved_guide_path}...")
+    guide_model = EDMUnet2D.from_pretrained(resolved_guide_path)
+    guide_model = guide_model.to(device)
+    guide_model.eval()
         
     # Load decoder model
-    ae_path = resolved['evaluation']['kid_autoencoder_path']
-    print(f"Loading decoder model from {ae_path}...")
-    if not os.path.isdir(ae_path):
-        raise ValueError(f"Autoencoder path not found: {ae_path}")
-    decoder_model = EDMUnet2D.from_pretrained(ae_path).to(device)
+    print(f"Loading decoder model from {resolved_decoder_path}...")
+    decoder_model = EDMUnet2D.from_pretrained(resolved_decoder_path).to(device)
     decoder_model.eval()
     
     model, guide_model, decoder_model = accelerator.prepare(model, guide_model, decoder_model)

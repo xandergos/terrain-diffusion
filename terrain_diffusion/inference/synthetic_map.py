@@ -5,8 +5,45 @@ from pyfastnoiselite.pyfastnoiselite import FastNoiseLite, NoiseType, FractalTyp
 import torch
 from terrain_diffusion.inference.perlin_transform import build_quantiles, transform_perlin
 
+WC_FILES = [
+    "data/global/wc2.1_10m_bio_1.tif",
+    "data/global/wc2.1_10m_bio_4.tif",
+    "data/global/wc2.1_10m_bio_12.tif",
+    "data/global/wc2.1_10m_bio_15.tif",
+]
+WC_URL = "https://geodata.ucdavis.edu/climate/worldclim/2_1/base/wc2.1_10m_bio.zip"
+
+def _ensure_wc_files():
+    import os
+    missing = [f for f in WC_FILES if not os.path.exists(f)]
+    if not missing:
+        return
+    
+    import zipfile
+    import urllib.request
+    
+    print("Missing WorldClim files.")
+    response = input(f"Download from {WC_URL}? [y/N]: ").strip().lower()
+    if response != 'y':
+        raise FileNotFoundError(f"Required files missing: {missing}")
+    
+    os.makedirs("data/global", exist_ok=True)
+    zip_path = "data/global/wc2.1_10m_bio.zip"
+    
+    print(f"Downloading {WC_URL}...")
+    urllib.request.urlretrieve(WC_URL, zip_path)
+    
+    print("Extracting...")
+    with zipfile.ZipFile(zip_path, 'r') as zf:
+        zf.extractall("data/global")
+    
+    os.remove(zip_path)
+    print("Done.")
+
 def make_synthetic_map_factory(frequency_mult=[1.0, 1.0, 1.0, 1.0, 1.0], seed=None, drop_water_pct=0.0):
-    elev_img = rasterio.open("data/global/wc2.1_10m_elev.tif").read(1)
+    _ensure_wc_files()
+    
+    elev_img = rasterio.open("data/global/etopo_10m.tif").read(1)
     temp_img = rasterio.open("data/global/wc2.1_10m_bio_1.tif").read(1)
     temp_std_img = rasterio.open("data/global/wc2.1_10m_bio_4.tif").read(1)
     precip_img = rasterio.open("data/global/wc2.1_10m_bio_12.tif").read(1)

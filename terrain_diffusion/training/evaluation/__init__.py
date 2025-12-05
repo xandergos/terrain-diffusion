@@ -9,6 +9,9 @@ def _linear_weight_window(size: int, device: torch.device, dtype: torch.dtype) -
     wx = 1 - (1 - eps) * torch.clamp(torch.abs(x - mid).to(dtype) / mid, 0, 1)
     return (wy * wx)[None, None]
 
+def _constant_weight_window(size: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    return torch.ones(size, size, device=device, dtype=dtype)
+
 
 def _tile_starts(length: int, tile_size: int, stride: int) -> list[int]:
     if length <= tile_size:

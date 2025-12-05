@@ -1,37 +1,54 @@
 # Terrain Diffusion
 
-Terrain Diffusion is an AI-powered terrain generation framework designed to replace traditional procedural noise functions (like Perlin noise) with a fast, high-fidelity, and infinitely tileable generative model. Built on cutting-edge diffusion techniques, it can generate elevation maps that span land and ocean, produce consistent terrain on an infinite grid, and support climate and water generation.
+A practical, learned successor to Perlin noise for infinite, seed consistent, real time terrain generation.
 
-## Features
+Terrain Diffusion provides:
+- InfiniteDiffusion, an algorithm for unbounded diffusion sampling with constant time random access. Utilizes [infinite-tensor](https://github.com/xandergos/infinite-tensor).
+- A hierarchical stack of models for generating planetary terrain
+- Real time streaming of terrain and climate data
+- API for a pretty cool Minecraft mod
 
-- **Hyper-realistic terrain generation**: Trained on real-world elevation data
-- **Fast inference**: Uses a 1- or 2-step continuous-time consistency model
-- **Infinitely tileable**: Seamless stitching on an infinite 2D grid backed by [xandergos/infinite-tensor](https://github.com/xandergos/infinite-tensor)
-- **Physically accurate scale**: Outputs elevation in meters
+---
 
-## How It Works
+## Related Repositories
 
-### 1. **Model Training**
-- An autoencoder learns a latent representation for terrain features
-- A diffusion (EDM2) decoder learns to convert latent vectors to terrain with improved fidelity
-- Another diffusion model learns to generate latent terrain representations directly
-- Coarse and fine details generated separately for improved accuracy and robustness
-- A tileable GAN generates the most large-scale features, ensuring coherence on continental scales
+**Infinite Tensor**  
+Python library for managing infinite-dimensional tensors
 
-### 2. **Acceleration via sCM**
-- Diffusion models are distilled following the process in "Simplifying, Stabilizing & Scaling Continuous-Time Consistency Models".
-- Distillation code modified from [xandergos/sCM-mnist](https://github.com/xandergos/sCM-mnist)
-- Achieves near real-time generation speed with just 1–2 denoising steps
+https://github.com/xandergos/infinite-tensor
 
-### 3. **Tileability & Infinite Generation**
-- Final map is generated in tiles, and stitched together seamlessly
-- Final pipeline: `GAN → Base Consistency Model → Consistency Decoder`
-- Uses [xandergos/infinite-tensor](https://github.com/xandergos/infinite-tensor) for efficient on-demand generation
+**Minecraft Mod (For minecraft integration)**  
+Fabric mod that replaces Minecraft's world generator.
 
-## Example
+https://github.com/xandergos/terrain-diffusion-mc
 
-<img width="1920" height="920" alt="image" src="https://github.com/user-attachments/assets/f3c581a8-c9b8-4965-8158-2bf63b6155d5" />
+---
 
-## License
+## Installation
 
-MIT License
+```bash
+git clone https://github.com/xandergos/terrain-diffusion
+cd terrain-diffusion
+pip install -r requirements.txt
+````
+
+### Install with pip
+`pip install git+https://github.com/xandergos/terrain-diffusion.git`
+
+---
+
+## Quick Start
+
+### Explore the World
+
+`python -m terrain_diffusion explore`
+
+### API for Minecraft
+
+`python -m terrain_diffusion mc-api`
+
+---
+
+## Training from scratch
+
+See [TRAINING.md](TRAINING.md) for a step-by-step guide. This is, of course, pretty lengthy.

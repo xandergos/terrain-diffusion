@@ -7,7 +7,7 @@ from terrain_diffusion.inference.perlin_transform import build_quantiles, transf
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Slider
 
-elev_img = rasterio.open("data/global/wc2.1_10m_elev.tif").read(1)
+elev_img = rasterio.open("data/global/etopo_10m.tif").read(1)
 temp_img = rasterio.open("data/global/wc2.1_10m_bio_1.tif").read(1)
 temp_std_img = rasterio.open("data/global/wc2.1_10m_bio_4.tif").read(1)
 precip_img = rasterio.open("data/global/wc2.1_10m_bio_12.tif").read(1)

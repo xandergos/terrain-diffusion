@@ -2,7 +2,9 @@ import time
 import click
 import ee
 import os
+import random
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Tuple, List
 
 from tqdm import tqdm
@@ -20,7 +22,7 @@ def initialize_ee():
         opt_url='https://earthengine-highvolume.googleapis.com'
     )
 
-def download_cell_data(image, cell: Tuple[float, float, float, float], output_dir: str, cell_index: int, output_size: int = 1024, image_name: str = None):
+def download_cell_data(image, cell: Tuple[float, float, float, float], output_dir: str, cell_index: int, image_name: str = None, scale: float = None, max_retries: int = 3):
     """
     Download Earth Engine data for a specific grid cell directly to local filesystem.
     
@@ -29,66 +31,61 @@ def download_cell_data(image, cell: Tuple[float, float, float, float], output_di
         cell: Tuple of (min_lon, min_lat, max_lon, max_lat) defining the cell bounds
         output_dir: Directory to save the downloaded data
         cell_index: Index of the cell for unique naming
-        output_size: Desired width and height of the output image in pixels
         image_name: Name prefix for the saved file
+        scale: Optional scale in meters per pixel (required for mosaicked ImageCollections)
+        max_retries: Number of retry attempts on failure
     """
     min_lon, min_lat, max_lon, max_lat = cell
     region = ee.Geometry.Rectangle([min_lon, min_lat, max_lon, max_lat])
     
-    # Calculate scales to get exactly output_size pixels
-    x_scale = (max_lon - min_lon) / output_size  # degrees per pixel
-    y_scale = (max_lat - min_lat) / output_size  # degrees per pixel
+    # Save to local file
+    filename = f"{image_name}_{cell_index}.tif" if image_name else f"cell_{cell_index}.tif"
+    filepath = os.path.join(output_dir, filename)
+    temp_filepath = filepath + ".tmp"
     
-    crs_transform = [
-        x_scale,  # xScale: size of pixel in degrees
-        0,        # xShear
-        min_lon,  # xTranslation: longitude of the top-left corner
-        0,        # yShear
-        -y_scale, # yScale: negative because latitude decreases as we go down
-        max_lat   # yTranslation: latitude of the top-left corner
-    ]
-    
-    try:
-        # MERIT elevations fit safely in Int16; export native grid without resampling.
-        # Do any resampling/reprojection offline after download.
-        image_to_export = image
-        
-        # Save to local file
-        filename = f"{image_name}_{cell_index}.tif" if image_name else f"cell_{cell_index}.tif"
-        filepath = os.path.join(output_dir, filename)
-        temp_filepath = filepath + ".tmp"
-        
-        if os.path.exists(filepath):
-            return filepath
-        
-        # Get download URL
-        url = image_to_export.getDownloadURL({
-            'region': region,
-            'format': 'GEO_TIFF',
-            'filePerBand': False,
-            'maxPixels': 1e9,
-            'formatOptions': {
-                'cloudOptimized': False,
-                'compression': 'LZW'
-            }
-        })
-        
-        # Download the file to temp location
-        response = requests.get(url, stream=True, timeout=10)
-        response.raise_for_status()
-        
-        with open(temp_filepath, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
-        
-        # Move temp file to final location
-        os.rename(temp_filepath, filepath)
-                
+    if os.path.exists(filepath):
         return filepath
-        
-    except Exception as e:
-        print(f"Error downloading cell {cell_index}: {e}")
-        return None
+    
+    for attempt in range(max_retries):
+        try:
+            # MERIT elevations fit safely in Int16; export native grid without resampling.
+            # Do any resampling/reprojection offline after download.
+            image_to_export = image
+            
+            # Get download URL
+            params = {
+                'region': region,
+                'format': 'GEO_TIFF',
+                'filePerBand': False,
+                'maxPixels': 1e9,
+                'formatOptions': {
+                    'cloudOptimized': False,
+                    'compression': 'LZW'
+                }
+            }
+            if scale is not None:
+                params['scale'] = scale
+            url = image_to_export.getDownloadURL(params)
+            
+            # Download the file to temp location
+            response = requests.get(url, stream=True, timeout=10)
+            response.raise_for_status()
+            
+            with open(temp_filepath, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            
+            # Move temp file to final location
+            os.rename(temp_filepath, filepath)
+                    
+            return filepath
+            
+        except Exception as e:
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)  # Exponential backoff
+            else:
+                print(f"Error downloading cell {cell_index} after {max_retries} attempts: {e}")
+                return None
 
 def calculate_land_percentage(cell: Tuple[float, float, float, float], resolution: float = 0.1) -> float:
     """
@@ -115,12 +112,13 @@ def calculate_land_percentage(cell: Tuple[float, float, float, float], resolutio
     return 100 * np.mean(is_land)
 
 @click.command()
-@click.option('--image', type=str, help='Image to export. Options: "dem" or "landcover" or "gtopo')
+@click.option('--image', type=str, help='Image to export. Options: "dem", "copernicus", "landcover_class", "landcover_water"')
 @click.option('--output_dir', type=str, default="terrain_data", help='Directory where the exported data will be saved')
 @click.option('--output_size', type=int, default=4096, help='Output size of the image in pixels')
 @click.option('--output_resolution', type=float, default=90, help='Output resolution of the image in meters')
 @click.option('--land_threshold', type=float, default=0.1, help='Required land coverage percentage per export cell (Default 0.1%)')
-def download_data_cli(image, output_dir, output_size, output_resolution, land_threshold):
+@click.option('--num_workers', type=int, default=0, help='Number of parallel download workers (0 for sequential)')
+def download_data_cli(image, output_dir, output_size, output_resolution, land_threshold, num_workers):
     """
     Download terrain data for all grid cells using Earth Engine directly to local filesystem.
     Only processes cells with land coverage above the specified threshold.
@@ -131,6 +129,7 @@ def download_data_cli(image, output_dir, output_size, output_resolution, land_th
         output_size: Output size of the image in pixels
         output_resolution: Output resolution of the image in meters
         land_threshold: Required land coverage percentage per cell
+        num_workers: Number of parallel download workers (0 for sequential)
     """
     # Initialize Earth Engine
     initialize_ee()
@@ -141,21 +140,28 @@ def download_data_cli(image, output_dir, output_size, output_resolution, land_th
     # Get grid cells
     grid_cells = create_equal_area_grid((output_size*output_resolution, output_size*output_resolution))
         
+    # native_scale is only needed for mosaicked ImageCollections which lose projection info
     if image == "dem":
         export_image = ee.Image('MERIT/DEM/v1_0_3')
         image_name = "dem"
+        native_scale = None
+    elif image == "copernicus":
+        export_image = ee.ImageCollection('COPERNICUS/DEM/GLO30').select('DEM').mosaic()
+        image_name = "copernicus"
+        native_scale = 30.75  # GLO30 is 1 arc-second (~30.75m)
     elif image == "landcover_class":
         export_image = ee.ImageCollection("COPERNICUS/Landcover/100m/Proba-V-C3/Global") \
             .select('discrete_classification') \
             .mosaic()
         image_name = "landcover_class"
+        native_scale = 100
     elif image == "landcover_water":
         # Use JRC Global Surface Water for comprehensive water detection
         export_image = ee.Image("JRC/GSW1_4/GlobalSurfaceWater").select('occurrence')
-        #export_image = jrc_water.gte(1).uint8()
         image_name = "landcover_water"
+        native_scale = None
     else:
-        raise ValueError(f"Invalid image option: {image}. Please choose 'dem' or 'landcover'.")
+        raise ValueError(f"Invalid image option: {image}. Please choose 'dem', 'copernicus', 'landcover_class', or 'landcover_water'.")
         
     # Filter cells by land percentage first
     filtered_cells = []
@@ -171,13 +177,28 @@ def download_data_cli(image, output_dir, output_size, output_resolution, land_th
     if confirmation.lower() != 'y':
         print("Download cancelled")
         return []
+    
+    # Randomize download order (seeded for reproducibility)
+    random.seed(42)
+    random.shuffle(filtered_cells)
         
-    # Download files directly
+    # Download files
     downloaded_files = []
-    for i, cell in tqdm(filtered_cells, desc="Downloading cells"):
-        filepath = download_cell_data(export_image, cell, output_dir, i, output_size, image_name)
-        if filepath:
-            downloaded_files.append(filepath)
+    if num_workers > 0:
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            futures = {
+                executor.submit(download_cell_data, export_image, cell, output_dir, i, image_name, native_scale): i
+                for i, cell in filtered_cells
+            }
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Downloading cells"):
+                filepath = future.result()
+                if filepath:
+                    downloaded_files.append(filepath)
+    else:
+        for i, cell in tqdm(filtered_cells, desc="Downloading cells"):
+            filepath = download_cell_data(export_image, cell, output_dir, i, image_name, scale=native_scale)
+            if filepath:
+                downloaded_files.append(filepath)
         
     print(f"Downloaded {len(downloaded_files)} files to {output_dir}")
     return downloaded_files

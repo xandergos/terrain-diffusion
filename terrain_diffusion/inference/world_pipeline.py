@@ -1,12 +1,16 @@
 import random
 from tempfile import NamedTemporaryFile
 import time
+import json
+import os
 
+import h5py
 import torch
 from infinite_tensor import HDF5TileStore, TensorWindow, MemoryTileStore
 from terrain_diffusion.inference.synthetic_map import make_synthetic_map_factory
 from terrain_diffusion.data.laplacian_encoder import laplacian_decode, laplacian_denoise
 from terrain_diffusion.models.edm_unet import EDMUnet2D
+from terrain_diffusion.common.model_utils import resolve_model_path, MODEL_PATHS
 import numpy as np
 from typing import Union
 from terrain_diffusion.models.mp_layers import mp_concat
@@ -262,44 +266,39 @@ class WorldPipeline:
                  compression_opts: int | None = 4,
                  seed=None,
                  device='cpu',
-                 coarse_model="checkpoints/models/diffusion_coarse",
-                 base_model="checkpoints/models/consistency_base-192x3",
-                 decoder_model="checkpoints/models/consistency_decoder-64x3",
-                 superres_model="checkpoints/models/consistency_superres-32x2",
+                 coarse_model: str | None = None,
+                 base_model: str | None = None,
+                 decoder_model: str | None = None,
                  latents_batch_size=1,
                  **kwargs):
-        self.kwargs = kwargs
         self.device = device
-        self.tile_store = HDF5TileStore(hdf5_file, mode=mode, compression=compression, compression_opts=compression_opts, tile_cache_size=100)
-        self.seed = seed or random.randint(0, 2**31-1)
         self.latents_batch_size = latents_batch_size
-        
         self.log_mode = kwargs.get('log_mode', 'info')
         
-        self.synthetic_map_factory = make_synthetic_map_factory(seed=self.seed, frequency_mult=self.kwargs.get('frequency_mult', [1.5, 3, 3, 3, 3]), 
-                                                                drop_water_pct=kwargs.get('drop_water_pct', 0.5))
+        # Resolve model paths (user override -> local default -> HuggingFace)
+        coarse_path = resolve_model_path(coarse_model, *MODEL_PATHS["coarse"])
+        base_path = resolve_model_path(base_model, *MODEL_PATHS["base"])
+        decoder_path = resolve_model_path(decoder_model, *MODEL_PATHS["decoder"])
         
-        # Create coarse perlin
-        self.coarse_model = EDMUnet2D.from_pretrained(coarse_model).to(device)
+        # Reconcile generation params with stored values in HDF5
+        self.seed, self.kwargs, coarse_path, base_path, decoder_path = self._reconcile_params(
+            hdf5_file, seed, kwargs, coarse_path, base_path, decoder_path
+        )
+        
+        self.tile_store = HDF5TileStore(hdf5_file, mode=mode, compression=compression, compression_opts=compression_opts, tile_cache_size=100)
+        
+        self.synthetic_map_factory = make_synthetic_map_factory(seed=self.seed, frequency_mult=self.kwargs.get('frequency_mult', [1.5, 3, 3, 3, 3]), 
+                                                                drop_water_pct=self.kwargs.get('drop_water_pct', 0.5))
+        
+        self.coarse_model = EDMUnet2D.from_pretrained(coarse_path).to(device)
         self.coarse = self._get_coarse_map()
         
-        self.base_model = EDMUnet2D.from_pretrained(base_model).to(device)
+        self.base_model = EDMUnet2D.from_pretrained(base_path).to(device)
         self.latents = self._get_latent_map()
         
-        self.decoder_model = EDMUnet2D.from_pretrained(decoder_model).to(device)
+        self.decoder_model = EDMUnet2D.from_pretrained(decoder_path).to(device)
         self.residual_90 = self._get_residual_90_map()
         
-        try:
-            self.superres_model = EDMUnet2D.from_pretrained(superres_model).to(device)
-            self.residual_45 = self._get_double_resolution_map(self.residual_90, 90)
-            self.residual_22 = self._get_double_resolution_map(self.residual_45, 45)
-            self.residual_11 = self._get_double_resolution_map(self.residual_22, 22)
-        except Exception as e:
-            print(f"Error loading superres model: {e}")
-            self.superres_model = None
-            self.residual_45 = None
-            self.residual_22 = None
-            self.residual_11 = None
         
     def __enter__(self):
         return self
@@ -312,9 +311,71 @@ class WorldPipeline:
         """Release resources associated with this pipeline."""
         self.tile_store.close()
 
+    def _reconcile_params(self, hdf5_file, seed, kwargs, coarse_path, base_path, decoder_path):
+        """Check stored params vs current, use stored if they exist (with overwrite prompt on mismatch)."""
+        ATTR_KEY = 'WORLD_PIPELINE_PARAMS'
+        
+        def make_current(s):
+            return {
+                'seed': s,
+                'kwargs': kwargs,
+                'coarse_model': coarse_path,
+                'base_model': base_path,
+                'decoder_model': decoder_path,
+            }
+        
+        # New file - generate seed if needed, store params
+        if not os.path.exists(hdf5_file):
+            seed = seed if seed is not None else random.randint(0, 2**31-1)
+            with h5py.File(hdf5_file, 'w') as f:
+                f.attrs[ATTR_KEY] = json.dumps(make_current(seed), sort_keys=True)
+            return seed, kwargs, coarse_path, base_path, decoder_path
+        
+        with h5py.File(hdf5_file, 'a') as f:
+            # No stored params yet - generate seed if needed, store params
+            if ATTR_KEY not in f.attrs:
+                seed = seed if seed is not None else random.randint(0, 2**31-1)
+                f.attrs[ATTR_KEY] = json.dumps(make_current(seed), sort_keys=True)
+                return seed, kwargs, coarse_path, base_path, decoder_path
+            
+            stored = json.loads(f.attrs[ATTR_KEY])
+            
+            # If seed not provided, use stored seed (no mismatch for seed)
+            if seed is None:
+                seed = stored['seed']
+            
+            current = make_current(seed)
+            
+            # Check for mismatches
+            mismatches = [(k, stored[k], current[k]) for k in current if k in stored and stored[k] != current[k]]
+            
+            if not mismatches:
+                return seed, kwargs, coarse_path, base_path, decoder_path
+            
+            # Show mismatches and prompt
+            print("\n=== Parameter mismatch with stored world file ===")
+            for key, stored_val, current_val in mismatches:
+                print(f"  {key}:")
+                print(f"    stored:  {stored_val}")
+                print(f"    current: {current_val}")
+            
+            choice = input("\nOverwrite stored params with current? (This WILL cause artifacts unless a model was simply moved) [y/N]: ").strip().lower()
+            
+            if choice == 'y':
+                f.attrs[ATTR_KEY] = json.dumps(current, sort_keys=True)
+                return seed, kwargs, coarse_path, base_path, decoder_path
+            else:
+                return (
+                    stored['seed'],
+                    stored['kwargs'],
+                    stored['coarse_model'],
+                    stored['base_model'],
+                    stored['decoder_model'],
+                )
+
     def _get_coarse_map(self):
         TILE_SIZE = 64
-        TILE_STRIDE = TILE_SIZE//2
+        TILE_STRIDE = TILE_SIZE - 16
         MODEL_MEANS = torch.tensor([-37.67916460232751, 2.22578822145657, 18.030293275011356, 333.8442390481231, 1350.1259248456176, 52.444339366764396])
         MODEL_STDS = torch.tensor([39.68515115440358, 3.0981253981231522, 8.940333096712806, 322.25238547630295, 856.3430083394657, 30.982620765341043])
         COND_SNR = torch.tensor(self.kwargs.get('cond_snr', [0.3, 0.1, 1.0, 0.1, 1.0]))
@@ -332,7 +393,6 @@ class WorldPipeline:
             i2, j2 = i1 + TILE_SIZE, j1 + TILE_SIZE
             synthetic_map = torch.as_tensor(self.synthetic_map_factory(j1, i1, j2, i2))
             synthetic_map[1] = torch.where(synthetic_map[1] > 20, synthetic_map[1], (synthetic_map[1] - 20) * 1.25 + 20)
-            synthetic_map_unnorm = synthetic_map.clone()
             synthetic_map = (synthetic_map - MODEL_MEANS[[0, 2, 3, 4, 5], None, None]) / MODEL_STDS[[0, 2, 3, 4, 5], None, None]
             synthetic_map = synthetic_map.to(self.device)[None]
             
@@ -406,7 +466,7 @@ class WorldPipeline:
             """
             cond_img[0:1] = cond_img[0:1] + torch.randn_like(cond_img[:, 0:1]) * noise_level * COND_MAX_NOISE
             cond_img[1:2] = cond_img[1:2] + torch.randn_like(cond_img[:, 1:2]) * noise_level * COND_MAX_NOISE
-            cond_img = (cond_img - torch.tensor(cond_means, device=cond_img.device).view(1, -1, 1, 1)) / torch.tensor(cond_stds, device=cond_img.device).view(1, -1, 1, 1)
+            cond_img = (cond_img - cond_means.to(cond_img.device).view(1, -1, 1, 1)) / cond_stds.to(cond_img.device).view(1, -1, 1, 1)
             
             cond_img[0:1] = cond_img[0:1].nan_to_num(cond_means[0])
             cond_img[1:2] = cond_img[1:2].nan_to_num(cond_means[1])
@@ -422,7 +482,7 @@ class WorldPipeline:
             return mp_concat([means_crop.flatten(1), p5_crop.flatten(1), climate_means_crop.flatten(1), mask_crop.flatten(1), histogram_raw, noise_level.view(-1, 1)], dim=1).float()
 
         def f(ctxs, samples, cond_imgs, t, seed_offset=0):
-            if self.log_mode == 'debug':
+            if self.log_mode == 'verbose':
                 print(f"Latent f batch size {len(ctxs)} at {ctxs}")
             if MOCK:
                 return [torch.ones((6, TILE_SIZE, TILE_SIZE)) for _ in ctxs]
@@ -483,7 +543,7 @@ class WorldPipeline:
 
         t_init = torch.atan(scheduler.sigmas[0] / scheduler.config.sigma_data)
         output_window = TensorWindow(size=(6, TILE_SIZE, TILE_SIZE), stride=(6, TILE_STRIDE, TILE_STRIDE))
-        coarse_window = TensorWindow(size=(7, 4, 4), stride=(7, 1, 1))
+        coarse_window = TensorWindow(size=(7, 4, 4), stride=(7, 1, 1), offset=(0, -1, -1))
         tensor = self.tile_store.get_or_create("init_latent_map",
                                                shape=(6, None, None),
                                                f=lambda ctxs, conds: f(ctxs, None, conds, t_init, seed_offset=5819),
@@ -507,7 +567,7 @@ class WorldPipeline:
         return tensor
     
     def _get_residual_90_map(self):
-        TILE_SIZE = 1024
+        TILE_SIZE = 512
         TILE_STRIDE = TILE_SIZE - 128
         
         scheduler = EDMDPMSolverMultistepScheduler(sigma_min=0.002, sigma_max=80, sigma_data=0.5)
@@ -516,7 +576,7 @@ class WorldPipeline:
         t_list = [torch.atan(scheduler.sigmas[0] / scheduler.config.sigma_data)]
         t_list += [torch.arctan(torch.tensor(0.065) / 0.5)]
         def f(ctx, latents):
-            if self.log_mode == 'debug':
+            if self.log_mode == 'verbose':
                 print(f"Residual f at {ctx}")
             if MOCK:
                 return torch.ones((2, TILE_SIZE, TILE_SIZE))
@@ -550,58 +610,7 @@ class WorldPipeline:
                                                args_windows=(input_window,))
             
         return tensor
-    
-    def _get_double_resolution_map(self, prev_tensor, prev_res):
-        TILE_SIZE = 1024
-        TILE_STRIDE = TILE_SIZE - 64
-        
-        scheduler = EDMDPMSolverMultistepScheduler(sigma_min=0.002, sigma_max=80, sigma_data=0.5)
-        weight_window = linear_weight_window(TILE_SIZE, 'cpu', torch.float32)
-        
-        t_list = [torch.arctan(torch.tensor(80.0) / 0.5)]
-        t_list += [torch.arctan(torch.tensor(0.065) / 0.5)]
-        def f(ctx, lowres):
-            if self.log_mode == 'debug':
-                print(f"Residual({prev_res}->{prev_res//2}) f at {ctx}")
-            if MOCK:
-                return torch.ones((2, TILE_SIZE, TILE_SIZE))
-            
-            noise_level = torch.tensor([1.0], device=self.device)
-            
-            # Lazily normalize low-resolution input (value / weight)
-            lowres = (lowres[:1] / lowres[1:2]).view(1, 1, TILE_SIZE//2, TILE_SIZE//2)
-            upsampled_latents = torch.nn.functional.interpolate(lowres, size=(TILE_SIZE, TILE_SIZE), mode='nearest').to(self.device)
-            sample = torch.clone(upsampled_latents) * scheduler.config.sigma_data
-            
-            lowres_noisy = lowres.to(self.device) + torch.randn(lowres.shape, device=self.device) * noise_level * 0.01
-            upsampled_latents_noisy = torch.nn.functional.interpolate(lowres_noisy, size=(TILE_SIZE, TILE_SIZE), mode='nearest').to(self.device)
-            
-            for i, t in enumerate(t_list):
-                noise = torch.as_tensor(gaussian_noise_patch(self.seed + 1537 + i, ctx[1]*TILE_STRIDE, ctx[2]*TILE_STRIDE, TILE_SIZE, TILE_SIZE, 
-                                                            channels=1, tile_h=TILE_SIZE, tile_w=TILE_SIZE))[None]
-                t = t.view(1, 1, 1, 1).to(self.device)
-                z = noise.to(self.device) * scheduler.config.sigma_data
-                x_t = torch.cos(t) * sample + torch.sin(t) * z
-                model_in = (x_t / scheduler.config.sigma_data).to(self.device)
-                model_in = torch.cat([model_in, upsampled_latents_noisy], dim=1)
-                pred = -self.superres_model(model_in, noise_labels=t.flatten(), conditional_inputs=[noise_level])
-                sample = torch.cos(t) * x_t - torch.sin(t) * scheduler.config.sigma_data * pred
-                
-            sample = sample.cpu() / scheduler.config.sigma_data
-            return torch.cat([sample[0] * weight_window[None], weight_window[None]], dim=0)
-        
-        output_window = TensorWindow(size=(2, TILE_SIZE, TILE_SIZE), stride=(2, TILE_STRIDE, TILE_STRIDE))
-        input_window = TensorWindow(size=(2, TILE_SIZE//2, TILE_SIZE//2), stride=(2, TILE_STRIDE//2, TILE_STRIDE//2))
-        
-        tensor = self.tile_store.get_or_create(f"init_residual_{prev_res//2}_map",
-                                               shape=(2, None, None),
-                                               f=f,
-                                               output_window=output_window,
-                                               args=(prev_tensor,),
-                                               args_windows=(input_window,))
-            
-        return tensor
-    
+
     @torch.no_grad()
     def _compute_elev(self, i1, j1, i2, j2, residual_map, scale: int):
         LOWFREQ_MEAN = -31.4
@@ -611,7 +620,7 @@ class WorldPipeline:
         
         sigma = 5
         kernel_size = (int(sigma * 2) // 2) * 2 + 1
-        pad_lr = kernel_size // 2 + 2  # add 1 low-res pixel for resize footprint
+        pad_lr = kernel_size // 2 + 1  # add 1 low-res pixel for resize footprint
         pad_hr = pad_lr * scale
 
         def ceil_div(a: int, b: int) -> int:
@@ -720,69 +729,3 @@ class WorldPipeline:
             'elev': elev,
             'climate': climate,
         }
-    
-    def get_45(self, i1, j1, i2, j2, with_climate: bool = False):
-        elev = self._compute_elev(i1, j1, i2, j2, self.residual_45, scale=16)
-
-        climate = self._compute_climate(i1, j1, i2, j2, elev, scale=16) if with_climate else None
-        return {
-            'elev': elev,
-            'climate': climate,
-        }
-    
-    def get_22(self, i1, j1, i2, j2, with_climate: bool = False):
-        elev = self._compute_elev(i1, j1, i2, j2, self.residual_22, scale=32)
-
-        climate = self._compute_climate(i1, j1, i2, j2, elev, scale=32) if with_climate else None
-        return {
-            'elev': elev,
-            'climate': climate,
-        }
-        
-    def get_11(self, i1, j1, i2, j2, with_climate: bool = False):
-        elev = self._compute_elev(i1, j1, i2, j2, self.residual_11, scale=64)
-
-        climate = self._compute_climate(i1, j1, i2, j2, elev, scale=64) if with_climate else None
-        return {
-            'elev': elev,
-            'climate': climate,
-        }
-        
-    
-if __name__ == '__main__':
-    
-    
-    with NamedTemporaryFile(suffix='.h5') as tmp_file:
-        x = WorldPipeline('world_big.h5', device='cuda', seed=1, log_mode='debug',
-                    drop_water_pct=0.5,
-                    frequency_mult=[1.3, 1.3, 1.3, 1.3, 1.3],
-                    cond_snr=[0.5, 0.5, 0.5, 0.5, 0.5],)
-    
-        residual_11 = x.residual_11[:, 8192:8192+4096, 12288:12288+4096]
-        residual_11 = residual_11[0] / residual_11[1]
-        plt.imshow(residual_11.detach().cpu().numpy())
-        plt.show()
-        
-        res_11 = x.get_11(8192, 12288, 8192+4096, 12288+4096)['elev']**2
-        plt.imshow(res_11.detach().cpu().numpy())
-        plt.show()
-        
-        try:
-            raw_path = "elev_export.raw"
-            data_np = res_11.detach().cpu().numpy()
-            mask = np.isfinite(data_np)
-            if np.any(mask):
-                vmin = float(np.min(data_np[mask]))
-                vmax = float(np.max(data_np[mask]))
-                if vmax > vmin:
-                    norm = (data_np - vmin) / (vmax - vmin)
-                else:
-                    norm = np.zeros_like(data_np, dtype=np.float32)
-            else:
-                norm = np.zeros_like(data_np, dtype=np.float32)
-            norm[~mask] = 0.0
-            raw_u16_le = (np.clip(norm, 0.0, 1.0) * 65535.0 + 0.5).astype('<u2')
-            raw_u16_le.tofile(raw_path)
-            print(f"Exported RAW (16-bit little-endian) as {raw_path} with shape {raw_u16_le.shape}. vmin={vmin}, vmax={vmax}")
-        except Exception as e:
-            print(f"Error exporting RAW: {e}")

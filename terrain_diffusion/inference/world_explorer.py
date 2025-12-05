@@ -1,11 +1,12 @@
-import argparse
+import json
 from tempfile import NamedTemporaryFile
+import click
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Button
 
-from terrain_diffusion.inference.world_pipeline import WorldPipeline, plot_channels_slider, normalize_tensor
+from terrain_diffusion.inference.world_pipeline import WorldPipeline, normalize_tensor
 from terrain_diffusion.inference.relief_map import get_relief_map
 
 BIOME_LEGEND = {
@@ -43,13 +44,13 @@ BIOME_LEGEND = {
 }
 
 
-def start_explorer(hdf5_file: str, seed: int, coarse_window: int = 64, device: str | None = None, **kwargs) -> None:
+def start_explorer(hdf5_file: str, seed: int | None = None, coarse_window: int = 64, coarse_offset_i: int = 0, coarse_offset_j: int = 0, detail_size: int = 1024, device: str | None = None, **kwargs) -> None:
     if device is None:
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     with WorldPipeline(hdf5_file, device=device, seed=seed, **kwargs) as world:
-        ci0, ci1 = -coarse_window, coarse_window
-        cj0, cj1 = -coarse_window, coarse_window
+        ci0, ci1 = coarse_offset_i - coarse_window, coarse_offset_i + coarse_window
+        cj0, cj1 = coarse_offset_j - coarse_window, coarse_offset_j + coarse_window
 
         # Coarse elevation (signed-sqrt -> meters)
         coarse_elev_ss = normalize_tensor(world.coarse[:, ci0:ci1, cj0:cj1], dim=0)[0]
@@ -144,7 +145,7 @@ def start_explorer(hdf5_file: str, seed: int, coarse_window: int = 64, device: s
                 return
             
             relief_rgb = get_relief_map(last_elev, None, last_biome, None)
-            relief_rgb[last_elev <= 0] = np.nan
+            plt.imsave('latest_relief.png', relief_rgb)
             im_relief.set_data(relief_rgb)
             im_relief.set_cmap(None)
             im_relief.set_extent((0, W, 0, H))
@@ -167,7 +168,7 @@ def start_explorer(hdf5_file: str, seed: int, coarse_window: int = 64, device: s
             # Map coarse (i, j) to 90 m grid
             center_i_90 = ci * 256
             center_j_90 = cj * 256
-            half = 1024
+            half = detail_size // 2
             i1, i2 = center_i_90 - half, center_i_90 + half
             j1, j2 = center_j_90 - half, center_j_90 + half
 
@@ -176,8 +177,17 @@ def start_explorer(hdf5_file: str, seed: int, coarse_window: int = 64, device: s
             elev = region_dict['elev']
             biome = None
             climate = region_dict['climate']
+            elev = elev.cpu().numpy()
             elev = np.sign(elev) * elev**2
             #elev[elev == 0.0] = np.nan
+
+            # Print coordinates at different resolutions
+            print(f"Generated coarse tile: ci={ci}, cj={cj}")
+            print(f"  Note x/z coordinates are flipped.")
+            print(f"  90m (i/z, j/x): ({ci * 256}, {cj * 256})")
+            print(f"  45m (i/z, j/x): ({ci * 512}, {cj * 512})")
+            print(f"  22m (i/z, j/x): ({ci * 1024}, {cj * 1024})")
+            print(f"  11m (i/z, j/x): ({ci * 2048}, {cj * 2048})")
 
             # Store latest data and update right panel based on mode
             nonlocal last_elev, last_biome, last_climate, last_climate0, last_ci, last_cj
@@ -246,14 +256,38 @@ def start_explorer(hdf5_file: str, seed: int, coarse_window: int = 64, device: s
         fig.canvas.mpl_disconnect(cid)
 
 
+@click.command()
+@click.option("--hdf5-file", default="world.h5", help="HDF5 file path")
+@click.option("--seed", type=int, default=None, help="Random seed (default: from file or random)")
+@click.option("--coarse-window", type=int, default=50, help="Coarse window size")
+@click.option("--coarse-offset-i", type=int, default=0, help="Coarse window offset in i direction")
+@click.option("--coarse-offset-j", type=int, default=0, help="Coarse window offset in j direction")
+@click.option("--detail-size", type=int, default=1024, help="Full resolution detail window size")
+@click.option("--device", default=None, help="Device (cuda/cpu, default: auto)")
+@click.option("--drop-water-pct", type=float, default=0.5, help="Drop water percentage")
+@click.option("--frequency-mult", default="[1.0, 1.0, 1.0, 1.0, 1.0]", help="Frequency multipliers (JSON)")
+@click.option("--cond-snr", default="[0.5, 0.5, 0.5, 0.5, 0.5]", help="Conditioning SNR (JSON)")
+@click.option("--histogram-raw", default="[0.0, 0.0, 0.0, 1.0, 1.5]", help="Histogram raw values (JSON)")
+@click.option("--latents-batch-size", type=int, default=4, help="Batch size for latent generation")
+@click.option("--log-mode", type=click.Choice(["info", "verbose"]), default="verbose", help="Logging mode")
+def main(hdf5_file, seed, coarse_window, coarse_offset_i, coarse_offset_j, detail_size, device, drop_water_pct, frequency_mult, cond_snr, histogram_raw, latents_batch_size, log_mode):
+    """Explore a generated world interactively"""
+    start_explorer(
+        hdf5_file,
+        seed=seed,
+        coarse_window=coarse_window,
+        coarse_offset_i=coarse_offset_i,
+        coarse_offset_j=coarse_offset_j,
+        detail_size=detail_size,
+        device=device,
+        drop_water_pct=drop_water_pct,
+        frequency_mult=json.loads(frequency_mult),
+        cond_snr=json.loads(cond_snr),
+        histogram_raw=json.loads(histogram_raw),
+        latents_batch_size=latents_batch_size,
+        log_mode=log_mode,
+    )
+
+
 if __name__ == '__main__':
-    with NamedTemporaryFile(suffix='.h5') as tmp_file:
-        start_explorer(
-            tmp_file.name, device='cuda', seed=1, log_mode='debug', coarse_window=76,
-            drop_water_pct=0.5,
-            frequency_mult=[1.0, 1.0, 1.0, 1.0, 1.0],
-            cond_snr=[0.5, 0.5, 0.5, 0.5, 0.5],
-            histogram_raw=[0.0, 0.0, 0.0, 1.0, 1.5],
-            mode="a",
-            latents_batch_size=32,
-        )
+    main()

@@ -11,12 +11,13 @@ from torchmetrics.image.fid import FrechetInceptionDistance
 from torchmetrics.image.kid import KernelInceptionDistance
 
 from terrain_diffusion.models.edm_unet import EDMUnet2D
+from terrain_diffusion.common.model_utils import resolve_model_path, MODEL_PATHS
 from terrain_diffusion.training.registry import build_registry
 from terrain_diffusion.training.datasets import LongDataset
 from terrain_diffusion.training.utils import recursive_to
 from terrain_diffusion.data.laplacian_encoder import laplacian_denoise, laplacian_decode
 from terrain_diffusion.training.evaluation.sample_diffusion_decoder import sample_decoder_consistency_tiled
-from terrain_diffusion.training.evaluation import _linear_weight_window, _tile_starts
+from terrain_diffusion.training.evaluation import _linear_weight_window, _constant_weight_window, _tile_starts
 from terrain_diffusion.training.evaluation.sample_diffusion_base import _process_cond_img
 
 def _normalize_uint8_three_channel(images: torch.Tensor) -> torch.Tensor:
@@ -68,16 +69,16 @@ def _decode_latents_to_terrain(samples: torch.Tensor, val_dataset, decoder_model
     return laplacian_decode(highfreq, lowfreq, extrapolate=True)
 
 @click.command()
-@click.option('-m', '--model', 'model_path', type=click.Path(exists=True), help='Path to the pretrained base model checkpoint directory', default='checkpoints/models/consistency_base-192x3')
+@click.option('-m', '--model', 'model_path', type=str, default=None, help='Path to pretrained base model (local or HuggingFace repo)')
 @click.option('-c', '--config', 'config_path', type=click.Path(exists=True), help='Path to the base diffusion configuration file', default='configs/diffusion_base/consistency_base_192-3.cfg')
 @click.option('--num-images', type=int, default=50000, help='Number of images to evaluate')
 @click.option('--batch-size', type=int, default=40, help='Batch size for evaluation')
 @click.option('--decoder-batch-size', type=int, default=10, help='Batch size for decoder evaluation')
-@click.option('--steps', type=int, default=32, help='Number of diffusion steps (overrides config)')
 @click.option('--metric', type=click.Choice(['fid', 'kid'], case_sensitive=False), default='fid', help='Metric to evaluate')
 @click.option('--inter-t', type=float, default=0.61, help='Intermediate t for 2-step sampling.')
 @click.option('--decoder-inter-t', type=float, default=0.13, help='Intermediate t for 2-step decoder sampling.')
-def main(model_path, config_path, num_images, batch_size, decoder_batch_size, steps, metric, inter_t, decoder_inter_t):
+@click.option('--weight-window-fn', type=click.Choice(['linear', 'constant'], case_sensitive=False), default='linear', help='Weight window function to use for tiling')
+def main(model_path, config_path, num_images, batch_size, decoder_batch_size, metric, inter_t, decoder_inter_t, weight_window_fn):
     """Evaluate base diffusion using FID/KID on decoded terrain."""
     build_registry()
     
@@ -94,18 +95,22 @@ def main(model_path, config_path, num_images, batch_size, decoder_batch_size, st
     accelerator = Accelerator(mixed_precision='fp16')
     device = accelerator.device
     
+    # Resolve model paths (user override -> local default -> HuggingFace)
+    resolved_model_path = resolve_model_path(model_path, *MODEL_PATHS["base"])
+    resolved_decoder_path = resolve_model_path(
+        resolved['evaluation'].get('kid_autoencoder_path'),
+        *MODEL_PATHS["decoder"]
+    )
+    
     # Load Models
-    print(f"Loading model from {model_path}...")
-    model = EDMUnet2D.from_pretrained(model_path)
+    print(f"Loading model from {resolved_model_path}...")
+    model = EDMUnet2D.from_pretrained(resolved_model_path)
     model = model.to(device)
     model.eval()
         
     # Load decoder model
-    ae_path = resolved['evaluation']['kid_autoencoder_path']
-    print(f"Loading decoder model from {ae_path}...")
-    if not os.path.isdir(ae_path):
-        raise ValueError(f"Autoencoder path not found: {ae_path}")
-    decoder_model = EDMUnet2D.from_pretrained(ae_path).to(device)
+    print(f"Loading decoder model from {resolved_decoder_path}...")
+    decoder_model = EDMUnet2D.from_pretrained(resolved_decoder_path).to(device)
     decoder_model.eval()
     
     model, decoder_model = accelerator.prepare(model, decoder_model)
@@ -126,10 +131,9 @@ def main(model_path, config_path, num_images, batch_size, decoder_batch_size, st
     else:
         image_metric = FrechetInceptionDistance(normalize=True).to(device)
         
-    scheduler_steps = steps
     inter_t = [inter_t] if inter_t is not None else None
     
-    print(f"Evaluating {metric_name.upper()} on {num_images} images with {scheduler_steps} steps...")
+    print(f"Evaluating {metric_name.upper()} on {num_images} images")
     
     generator = torch.Generator(device=device).manual_seed(548)
     
@@ -170,7 +174,12 @@ def main(model_path, config_path, num_images, batch_size, decoder_batch_size, st
                 B, C, H, W = shape = images.shape
                 tile_size = 64
                 stride = 64 // 2
-                weights = _linear_weight_window(tile_size, device, dtype)
+                if weight_window_fn == 'linear':
+                    weights = _linear_weight_window(tile_size, device, dtype)
+                elif weight_window_fn == 'constant':
+                    weights = _constant_weight_window(tile_size, device, dtype)
+                else:
+                    raise ValueError(f"Invalid weight window function: {weight_window_fn}")
 
                 h_starts = _tile_starts(H, tile_size, stride)
                 w_starts = _tile_starts(W, tile_size, stride)

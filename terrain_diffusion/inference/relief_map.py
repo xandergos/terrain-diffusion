@@ -73,6 +73,7 @@ def get_relief_map(
     sigma_small: float = 1.2,
     resolution: float=90,
     rgb: np.ndarray | None = None,
+    relief: float = 1.0,
 ) -> Tuple[plt.Figure, plt.Axes]:
     """Plot a GDAL-style shaded relief map using Matplotlib, with optional river overlay.
 
@@ -152,7 +153,7 @@ def get_relief_map(
 
     # GDAL-like intensity blend (ambient term + directional light)
     intensity = 0.35 + 0.65 * hillshade  # slightly higher ambient to reduce ragged contrast
-    shaded_rgb = np.clip(base_rgb * intensity[..., None], 0.0, 1.0)
+    shaded_rgb = np.clip(base_rgb * (relief * intensity + (1 - relief))[..., None], 0.0, 1.0)
     shaded_rgb[np.isnan(elev)] = np.nan
 
     # Optional blue river overlay where flow exceeds threshold

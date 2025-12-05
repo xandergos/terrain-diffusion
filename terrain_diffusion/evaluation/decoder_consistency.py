@@ -9,6 +9,7 @@ from torchmetrics.image.fid import FrechetInceptionDistance
 from torchmetrics.image.kid import KernelInceptionDistance
 
 from terrain_diffusion.models.edm_unet import EDMUnet2D
+from terrain_diffusion.common.model_utils import resolve_model_path, MODEL_PATHS
 from terrain_diffusion.data.laplacian_encoder import laplacian_decode
 from terrain_diffusion.training.registry import build_registry
 from terrain_diffusion.training.datasets import LongDataset
@@ -33,7 +34,7 @@ def _get_weights(size):
     return (distance_y * distance_x)[None, None, :, :]
 
 @click.command()
-@click.option('-m', '--model', 'model_path', type=click.Path(exists=True), required=True, help='Path to the pretrained decoder model checkpoint directory', default='checkpoints/models/consistency_decoder-64x3')
+@click.option('-m', '--model', 'model_path', type=str, default=None, help='Path to pretrained decoder model (local or HuggingFace repo)')
 @click.option('-c', '--config', 'config_path', type=click.Path(exists=True), required=True, help='Path to the consistency decoder configuration file', default='configs/diffusion_decoder/consistency_decoder_64x3.cfg')
 @click.option('--num-images', type=int, default=50000, help='Number of images to evaluate')
 @click.option('--batch-size', type=int, default=10, help='Batch size for evaluation')
@@ -64,9 +65,12 @@ def main(model_path, config_path, num_images, batch_size, tile_size, tile_stride
     accelerator = Accelerator(mixed_precision='fp16')
     device = accelerator.device
     
+    # Resolve model path (user override -> local default -> HuggingFace)
+    resolved_model_path = resolve_model_path(model_path, *MODEL_PATHS["decoder"])
+    
     # Load Model
-    print(f"Loading model from {model_path}...")
-    model = EDMUnet2D.from_pretrained(model_path)
+    print(f"Loading model from {resolved_model_path}...")
+    model = EDMUnet2D.from_pretrained(resolved_model_path)
     model = model.to(device)
     model.eval()
     

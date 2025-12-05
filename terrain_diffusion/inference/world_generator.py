@@ -1,36 +1,52 @@
+import json
+import click
 import torch
 from terrain_diffusion.inference.world_pipeline import WorldPipeline
 from tqdm import tqdm
-import matplotlib.pyplot as plt
 
 
-def generate_world(hdf5_file: str, seed: int, coarse_window: int = 64, device: str | None = None, **kwargs) -> None:
+def generate_world(hdf5_file: str, seed: int | None = None, coarse_window: int = 64, device: str | None = None, **kwargs) -> None:
     if device is None:
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     with WorldPipeline(hdf5_file, device=device, seed=seed, **kwargs) as world:
         ci0, ci1 = -coarse_window, coarse_window
         cj0, cj1 = -coarse_window, coarse_window
+        
+        tile_size = 2048
+        pbar = tqdm(total=((ci1-ci0)//8)*((cj1-cj0)//8), desc="Generating world")
+        for i in range(ci0, ci1, tile_size//256):
+            for j in range(cj0, cj1, tile_size//256):
+                world.residual_90[:, i*256:i*256+tile_size, j*256:j*256+tile_size]
+                pbar.update(1)
 
-        pbar = tqdm(total=(ci1-ci0)*(cj1-cj0), desc="Generating world")
-        for i in range(ci0, ci1):
-            for j in range(cj0, cj1):
-                world.latents[:, i*32:i*32+64, j*32:j*32+64]
-                pbar.update(1)
-        
-        print("Generating residual")
-        
-        pbar = tqdm(total=(ci1-ci0)*(cj1-cj0), desc="Generating world")
-        for i in range(ci0, ci1):
-            for j in range(cj0, cj1):
-                world.residual_90[:, i*256:i*256+512, j*256:j*256+512]
-                pbar.update(1)
-            
-    
-    
+
+@click.command()
+@click.option("--hdf5-file", default="world.h5", help="Output HDF5 file path")
+@click.option("--seed", type=int, default=None, help="Random seed (default: random or from file)")
+@click.option("--coarse-window", type=int, default=50, help="Coarse window size")
+@click.option("--device", default=None, help="Device (cuda/cpu, default: auto)")
+@click.option("--drop-water-pct", type=float, default=0.5, help="Drop water percentage")
+@click.option("--frequency-mult", default="[1.0, 1.0, 1.0, 1.0, 1.0]", help="Frequency multipliers (JSON)")
+@click.option("--cond-snr", default="[0.5, 0.5, 0.5, 0.5, 0.5]", help="Conditioning SNR (JSON)")
+@click.option("--histogram-raw", default="[0.0, 0.0, 0.0, 1.0, 1.5]", help="Histogram raw values (JSON)")
+@click.option("--latents-batch-size", type=int, default=4, help="Batch size for latent generation")
+@click.option("--log-mode", type=click.Choice(["info", "verbose"]), default="verbose", help="Logging mode")
+def main(hdf5_file, seed, coarse_window, device, drop_water_pct, frequency_mult, cond_snr, histogram_raw, latents_batch_size, log_mode):
+    """Generate a world using the terrain diffusion pipeline"""
+    generate_world(
+        hdf5_file,
+        seed=seed,
+        coarse_window=coarse_window,
+        device=device,
+        drop_water_pct=drop_water_pct,
+        frequency_mult=json.loads(frequency_mult),
+        cond_snr=json.loads(cond_snr),
+        histogram_raw=json.loads(histogram_raw),
+        latents_batch_size=latents_batch_size,
+        log_mode=log_mode,
+    )
+
 
 if __name__ == "__main__":
-    generate_world('world_big.h5', 1, device='cuda', coarse_window=76,
-                    drop_water_pct=0.0,
-                    frequency_mult=[0.7, 0.7, 0.7, 0.7, 0.7],
-                    cond_snr=[1.0, 1.0, 1.0, 1.0, 1.0],)
+    main()
