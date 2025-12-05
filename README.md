@@ -11,10 +11,10 @@ Terrain Diffusion provides:
 - Real time streaming of terrain and climate data
 - API for a pretty cool Minecraft mod
 
-## Related Repositories
+### Related Repositories
 
 **Infinite Tensor**  
-Python library for managing infinite-dimensional tensors
+Python library for managing infinite-dimensional tensors.
 
 https://github.com/xandergos/infinite-tensor
 
@@ -31,19 +31,10 @@ cd terrain-diffusion
 pip install -r requirements.txt
 ```
 
-### Install with pip
-`pip install git+https://github.com/xandergos/terrain-diffusion.git`
+## GPU Acceleration with CUDA (NVIDIA GPU Required)
 
-## GPU Acceleration (CUDA)
-
-It is strongly recommended to ensure that PyTorch is installed with CUDA support for GPU acceleration.
-Terrain Diffusion is quite fast, and can run on a CPU as well, but it will be much slower.
-
-To use GPU acceleration you only need
-- An NVIDIA GPU
-- Updated NVIDIA drivers
-- A PyTorch build with CUDA
-- Mac is CPU-only.
+If you have an NVIDIA GPU, it is strongly recommended to ensure that PyTorch is installed with CUDA support for GPU acceleration.
+Terrain Diffusion is quite fast, and can run on a CPU as well, but it will be much slower. **Mac is CPU-only.**
 
 ### Steps on Windows or Linux
 
@@ -55,32 +46,32 @@ To use GPU acceleration you only need
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 ```
 
-3. Verify (Optional):
-
-```
-python -c "import torch; print(torch.cuda.is_available())"
-```
-
 ## Quick Start
-
-### General API
-
-`python -m terrain_diffusion api`
-
-See [API_README.md](API_README.md) for details.
 
 ### Explore the World
 
 This opens a two-panel GUI. The left panel shows the coarse map. Click any pixel on the coarse map to generate a high resolution shaded relief map on the right.
 You can also view the temperature of the high resolution map with `Temperature` (Lapse-rate adjusted).
 
-`python -m terrain_diffusion explore`
+```
+python -m terrain_diffusion explore
+```
 
 ### API for Minecraft
 
 If you are running the [minecraft mod](https://github.com/xandergos/terrain-diffusion-mc), you need to run this API in the background.
 
-`python -m terrain_diffusion mc-api`
+```
+python -m terrain_diffusion mc-api
+```
+
+### General API
+
+This runs a generalized API that can be used to query for elevation and climate data. See [API_README.md](API_README.md) for details.
+
+```
+python -m terrain_diffusion api
+```
 
 ## Training from scratch
 
@@ -92,7 +83,7 @@ There are two ways to modify world generation without training from scratch.
 
 ### Modifying the synthetic map
 
-The code for generating the base map used for everything is at `terrain_diffusion\inference\synthetic_map.py`. It is basically just a bunch of perlin noise with some transformations to have the same statistics as real world data, and make sure the climate is at least kind of reasonable. You can modify the file directly to change how the world is generated. While testing, it's recommended to use `--hdf5-file TEMP` so you don't have to delete the HDF5 file cache every time you make a change.
+The code for generating the base map used for everything is at `terrain_diffusion\inference\synthetic_map.py`. It is basically just a bunch of perlin noise with some transformations to have the same statistics as real world data, and make sure the climate is at least kind of reasonable. You can modify the file directly to change how the world is generated. While testing, it's recommended to use `--hdf5-file TEMP`, otherwise you have to delete the HDF5 file manually every time you make a change.
 
 ### Retraining the coarse model
 
