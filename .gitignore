@@ -248,5 +248,11 @@ fabric.properties
 experiments/
 experiment_data/
 
-data/
+# Data directory (with exceptions)
+data/*
+!data/splits.csv
+!data/manual_terrain_scores.csv
+!data/global/
+data/global/*
+!data/global/etopo_10m.tif
 tmp/
