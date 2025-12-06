@@ -177,7 +177,6 @@ def start_explorer(hdf5_file: str, seed: int | None = None, coarse_window: int =
             biome = None
             climate = region_dict['climate']
             elev = elev.cpu().numpy()
-            elev = np.sign(elev) * elev**2
             #elev[elev == 0.0] = np.nan
 
             # Print coordinates at different resolutions
