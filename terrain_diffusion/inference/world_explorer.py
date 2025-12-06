@@ -52,7 +52,6 @@ def start_explorer(hdf5_file: str, seed: int | None = None, coarse_window: int =
         ci0, ci1 = coarse_offset_i - coarse_window, coarse_offset_i + coarse_window
         cj0, cj1 = coarse_offset_j - coarse_window, coarse_offset_j + coarse_window
 
-        # Coarse elevation (signed-sqrt -> meters)
         coarse_elev_ss = normalize_tensor(world.coarse[:, ci0:ci1, cj0:cj1], dim=0)[0]
         coarse_elev_m = torch.sign(coarse_elev_ss) * torch.square(coarse_elev_ss)
         coarse_np = coarse_elev_m.detach().cpu().numpy()

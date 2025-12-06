@@ -60,10 +60,9 @@ def _parse_quad() -> Tuple[int, int, int, int]:
 
 
 def _elev_to_int16(elev: torch.Tensor) -> np.ndarray:
-    """Convert signed-sqrt elevation to int16 (squared back to meters, clamped)."""
+    """Convert elevation (meters) to int16, clamped."""
     arr = elev.detach().cpu().numpy().astype(np.float32, copy=False)
-    trans = np.sign(arr) * (arr ** 2)
-    trans = np.floor(trans)
+    trans = np.floor(arr)
     return np.clip(trans, -32768, 32767).astype('<i2', copy=False)
 
 
@@ -88,7 +87,6 @@ def _binary_response(elev: torch.Tensor, climate: Optional[torch.Tensor]) -> Res
     resp.headers["X-Height"] = str(h)
     resp.headers["X-Width"] = str(w)
     resp.headers["X-Elev-Dtype"] = "int16-le"
-    resp.headers["X-Elev-Transform"] = "signed_square_floor"
     resp.headers["X-Climate-Dtype"] = "float32-le"
     resp.headers["X-Climate-Channels"] = "temp,t_season,precip,p_cv"
     return resp
@@ -176,7 +174,7 @@ def terrain():
                1 = 90m, 2 = 45m, 4 = 22.5m, 8 = 11.25m, etc.
     
     Returns binary data:
-        - elevation: int16-le (H*W*2 bytes), squared back to meters
+        - elevation: int16-le (H*W*2 bytes), meters
         - climate: float32-le interleaved (H*W*4*4 bytes)
                    channels: temp, t_season, precip, p_cv
     """

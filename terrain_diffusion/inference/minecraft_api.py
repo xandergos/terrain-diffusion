@@ -71,8 +71,7 @@ def _tensor_to_json(t: torch.Tensor):
 
 def _transform_to_int16_bytes(t: torch.Tensor) -> Tuple[bytes, Tuple[int, int]]:
     arr = t.detach().cpu().numpy().astype(np.float32, copy=False)
-    trans = np.sign(arr) * (arr ** 2)
-    trans = np.floor(trans)
+    trans = np.floor(arr)
     trans = np.clip(trans, -32768, 32767).astype('<i2', copy=False)
     return trans.tobytes(), (int(trans.shape[0]), int(trans.shape[1]))
 
@@ -86,7 +85,6 @@ def _binary_response(elev: torch.Tensor, biome: Optional[torch.Tensor] = None) -
     resp.headers["X-Height"] = str(h)
     resp.headers["X-Width"] = str(w)
     resp.headers["X-Dtype"] = "int16-le"
-    resp.headers["X-Transform"] = "signed_square_floor"
     return resp
 
 
@@ -310,8 +308,7 @@ def _classify_biome(elev: torch.Tensor, climate: Optional[torch.Tensor], i0: int
         return torch.full((h, w), _BIOME_ID["plains"], dtype=torch.int16, device=device)
 
     # === ELEVATION ===
-    alt_m_signed = torch.sign(elev) * torch.square(torch.abs(elev))
-    alt_m = torch.clamp(alt_m_signed, min=0.0)
+    alt_m = torch.clamp(elev, min=0.0)
 
     # === RAW CLIMATE ===
     temp = climate[0]
@@ -350,9 +347,7 @@ def _classify_biome(elev: torch.Tensor, climate: Optional[torch.Tensor], i0: int
     growing_season = cv['growing_season']
 
     # === SLOPE CALCULATION ===
-    # Compute gradient using 3x3 Sobel kernel on real elevation (meters)
-    # Convert padded elevation to real meters (undo signed-sqrt transform)
-    elev_m = torch.sign(elev_padded) * torch.square(elev_padded)
+    elev_m = elev_padded
     
     # Sobel kernels (normalized by 8 to get proper gradient estimate)
     sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=elev.dtype, device=device).view(1, 1, 3, 3) / 8.0
@@ -447,7 +442,7 @@ def _classify_biome(elev: torch.Tensor, climate: Optional[torch.Tensor], i0: int
     has_snow = would_have_snow & ~is_steep
 
     # === ELEVATION BANDS ===
-    is_ocean = alt_m_signed < 0.0
+    is_ocean = elev < 0.0
     mountains = alt_m > 2500.0
     lowland = alt_m < 200.0
 

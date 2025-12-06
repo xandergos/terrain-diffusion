@@ -68,7 +68,6 @@ def view_world(hdf5_file: str, seed: int, i0: int, j0: int, i1: int, j1: int,
 
                 region = world.get_90(is_, js, is_ + h, js + w, with_climate=False)
                 elev = region['elev'].detach().cpu().numpy()
-                elev = np.sign(elev) * elev**2
 
                 if stride > 1:
                     elev_t = torch.from_numpy(elev).to(torch.float32)[None, None]
