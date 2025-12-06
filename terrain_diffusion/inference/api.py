@@ -8,7 +8,8 @@ import numpy as np
 import torch
 from flask import Flask, Response, jsonify, request
 
-from terrain_diffusion.inference.world_pipeline import WorldPipeline, resolve_hdf5_path
+from terrain_diffusion.inference.world_pipeline import WorldPipeline
+from terrain_diffusion.common.cli_helpers import parse_kwargs
 
 app = Flask(__name__)
 
@@ -203,7 +204,8 @@ def terrain():
 @click.option("--log-mode", type=click.Choice(["info", "verbose"]), default="verbose", help="Logging mode")
 @click.option("--host", default="0.0.0.0", help="Server host")
 @click.option("--port", type=int, default=int(os.getenv("PORT", "8000")), help="Server port")
-def main(hdf5_file, seed, device, drop_water_pct, frequency_mult, cond_snr, histogram_raw, latents_batch_size, log_mode, host, port):
+@click.option("--kwarg", "extra_kwargs", multiple=True, help="Additional key=value kwargs (e.g. --kwarg coarse_pooling=2)")
+def main(hdf5_file, seed, device, drop_water_pct, frequency_mult, cond_snr, histogram_raw, latents_batch_size, log_mode, host, port, extra_kwargs):
     """Terrain API server"""
     global _PIPELINE_CONFIG
     hdf5_file = resolve_hdf5_path(hdf5_file)
@@ -217,6 +219,7 @@ def main(hdf5_file, seed, device, drop_water_pct, frequency_mult, cond_snr, hist
         'histogram_raw': json.loads(histogram_raw),
         'latents_batch_size': latents_batch_size,
         'log_mode': log_mode,
+        **parse_kwargs(extra_kwargs),
     }
     app.run(host=host, port=port, debug=False, threaded=False)
 

@@ -527,6 +527,16 @@ class WorldPipeline:
     # Latent Stage
     # =========================================================================
     
+    def _pool_coarse_conditioning(self, cond_img, pool_size):
+        """Pool coarse conditioning from (C, H*n, W*n) to (C, H, W)."""
+        if pool_size == 1:
+            return cond_img
+        n = pool_size
+        ch0_pooled = torch.nn.functional.max_pool2d(cond_img[0:1].unsqueeze(0), kernel_size=n, stride=n).squeeze(0)
+        ch1_pooled = -torch.nn.functional.max_pool2d(-cond_img[1:2].unsqueeze(0), kernel_size=n, stride=n).squeeze(0)
+        ch_rest_pooled = torch.nn.functional.avg_pool2d(cond_img[2:].unsqueeze(0), kernel_size=n, stride=n).squeeze(0)
+        return torch.cat([ch0_pooled, ch1_pooled, ch_rest_pooled], dim=0)
+
     def _process_latent_conditioning(self, cond_img, histogram_raw, cond_means, cond_stds, noise_level):
         """Process conditioning for latent stage."""
         COND_MAX_NOISE = 0.0
@@ -571,6 +581,7 @@ class WorldPipeline:
         
         t_tensor = torch.as_tensor(t, device=self.device)
         
+        coarse_pool = self.kwargs.get('coarse_pooling', 1)
         for ctx, sample, cond_img in zip(ctxs, samples, cond_imgs):
             if sample is None:
                 sample = torch.zeros((1, 5, TILE_SIZE, TILE_SIZE), device=self.device)
@@ -579,6 +590,7 @@ class WorldPipeline:
                 sample = sample[:-1] / sample[-1:] * scheduler.config.sigma_data
             
             cond_img = cond_img[:-1] / cond_img[-1:]
+            cond_img = self._pool_coarse_conditioning(cond_img, coarse_pool)
             
             mask = torch.ones((1, 4, 4))
             cond_img = torch.cat([cond_img, mask], dim=0)[None]
@@ -633,7 +645,8 @@ class WorldPipeline:
 
         t_init = torch.atan(scheduler.sigmas[0] / scheduler.config.sigma_data)
         output_window = TensorWindow(size=(6, TILE_SIZE, TILE_SIZE), stride=(6, TILE_STRIDE, TILE_STRIDE))
-        coarse_window = TensorWindow(size=(7, 4, 4), stride=(7, 1, 1), offset=(0, -1, -1))
+        coarse_pool = self.kwargs.get('coarse_pooling', 1)
+        coarse_window = TensorWindow(size=(7, 4*coarse_pool, 4*coarse_pool), stride=(7, coarse_pool, coarse_pool), offset=(0, -coarse_pool, -coarse_pool))
         
         tensor = self.tile_store.get_or_create(
             "init_latent_map",

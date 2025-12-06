@@ -1,7 +1,8 @@
 import json
 import click
 import torch
-from terrain_diffusion.inference.world_pipeline import WorldPipeline, resolve_hdf5_path
+from terrain_diffusion.inference.world_pipeline import WorldPipeline
+from terrain_diffusion.common.cli_helpers import parse_kwargs
 from tqdm import tqdm
 
 
@@ -34,7 +35,8 @@ def generate_world(hdf5_file: str, seed: int | None = None, coarse_window: int =
 @click.option("--histogram-raw", default="[0.0, 0.0, 0.0, 1.0, 1.5]", help="Histogram raw values (JSON)")
 @click.option("--latents-batch-size", type=int, default=4, help="Batch size for latent generation")
 @click.option("--log-mode", type=click.Choice(["info", "verbose"]), default="verbose", help="Logging mode")
-def main(hdf5_file, seed, coarse_window, device, drop_water_pct, frequency_mult, cond_snr, histogram_raw, latents_batch_size, log_mode):
+@click.option("--kwarg", "extra_kwargs", multiple=True, help="Additional key=value kwargs (e.g. --kwarg coarse_pooling=2)")
+def main(hdf5_file, seed, coarse_window, device, drop_water_pct, frequency_mult, cond_snr, histogram_raw, latents_batch_size, log_mode, extra_kwargs):
     """Generate a world using the terrain diffusion pipeline"""
     hdf5_file = resolve_hdf5_path(hdf5_file)
     generate_world(
@@ -48,6 +50,7 @@ def main(hdf5_file, seed, coarse_window, device, drop_water_pct, frequency_mult,
         histogram_raw=json.loads(histogram_raw),
         latents_batch_size=latents_batch_size,
         log_mode=log_mode,
+        **parse_kwargs(extra_kwargs),
     )
 
 

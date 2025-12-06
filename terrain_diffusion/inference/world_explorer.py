@@ -8,6 +8,7 @@ from matplotlib.widgets import Button
 
 from terrain_diffusion.inference.world_pipeline import WorldPipeline, normalize_tensor, resolve_hdf5_path
 from terrain_diffusion.inference.relief_map import get_relief_map
+from terrain_diffusion.common.cli_helpers import parse_kwargs
 
 BIOME_LEGEND = {
     0: "Unknown",
@@ -275,7 +276,8 @@ def start_explorer(hdf5_file: str, seed: int | None = None, coarse_window: int =
 @click.option("--histogram-raw", default="[0.0, 0.0, 0.0, 1.0, 1.5]", help="Histogram raw values (JSON)")
 @click.option("--latents-batch-size", type=int, default=4, help="Batch size for latent generation")
 @click.option("--log-mode", type=click.Choice(["info", "verbose"]), default="verbose", help="Logging mode")
-def main(hdf5_file, seed, coarse_window, coarse_offset_i, coarse_offset_j, detail_size, device, drop_water_pct, frequency_mult, cond_snr, histogram_raw, latents_batch_size, log_mode):
+@click.option("--kwarg", "extra_kwargs", multiple=True, help="Additional key=value kwargs (e.g. --kwarg coarse_pooling=2)")
+def main(hdf5_file, seed, coarse_window, coarse_offset_i, coarse_offset_j, detail_size, device, drop_water_pct, frequency_mult, cond_snr, histogram_raw, latents_batch_size, log_mode, extra_kwargs):
     """Explore a generated world interactively"""
     hdf5_file = resolve_hdf5_path(hdf5_file)
     start_explorer(
@@ -292,6 +294,7 @@ def main(hdf5_file, seed, coarse_window, coarse_offset_i, coarse_offset_j, detai
         histogram_raw=json.loads(histogram_raw),
         latents_batch_size=latents_batch_size,
         log_mode=log_mode,
+        **parse_kwargs(extra_kwargs),
     )
 
 
