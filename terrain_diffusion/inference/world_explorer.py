@@ -6,7 +6,7 @@ import torch
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Button
 
-from terrain_diffusion.inference.world_pipeline import WorldPipeline, normalize_tensor
+from terrain_diffusion.inference.world_pipeline import WorldPipeline, normalize_tensor, resolve_hdf5_path
 from terrain_diffusion.inference.relief_map import get_relief_map
 
 BIOME_LEGEND = {
@@ -47,6 +47,8 @@ BIOME_LEGEND = {
 def start_explorer(hdf5_file: str, seed: int | None = None, coarse_window: int = 64, coarse_offset_i: int = 0, coarse_offset_j: int = 0, detail_size: int = 1024, device: str | None = None, **kwargs) -> None:
     if device is None:
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        if device == 'cpu':
+            print("Warning: Using CPU (CUDA not available).")
 
     with WorldPipeline(hdf5_file, device=device, seed=seed, **kwargs) as world:
         ci0, ci1 = coarse_offset_i - coarse_window, coarse_offset_i + coarse_window
@@ -257,7 +259,7 @@ def start_explorer(hdf5_file: str, seed: int | None = None, coarse_window: int =
 
 
 @click.command()
-@click.option("--hdf5-file", default="world.h5", help="HDF5 file path")
+@click.option("--hdf5-file", default="world.h5", help="HDF5 file path (use 'TEMP' for temporary file)")
 @click.option("--seed", type=int, default=None, help="Random seed (default: from file or random)")
 @click.option("--coarse-window", type=int, default=50, help="Coarse window size")
 @click.option("--coarse-offset-i", type=int, default=0, help="Coarse window offset in i direction")
@@ -272,6 +274,7 @@ def start_explorer(hdf5_file: str, seed: int | None = None, coarse_window: int =
 @click.option("--log-mode", type=click.Choice(["info", "verbose"]), default="verbose", help="Logging mode")
 def main(hdf5_file, seed, coarse_window, coarse_offset_i, coarse_offset_j, detail_size, device, drop_water_pct, frequency_mult, cond_snr, histogram_raw, latents_batch_size, log_mode):
     """Explore a generated world interactively"""
+    hdf5_file = resolve_hdf5_path(hdf5_file)
     start_explorer(
         hdf5_file,
         seed=seed,

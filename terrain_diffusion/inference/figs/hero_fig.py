@@ -48,6 +48,8 @@ def view_world(hdf5_file: str, seed: int, i0: int, j0: int, i1: int, j1: int,
     from PIL import Image
     if device is None:
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        if device == 'cpu':
+            print("Warning: Using CPU (CUDA not available).")
 
     with WorldPipeline(hdf5_file, device=device, seed=seed, mode='r', **kwargs) as world:
         H_out = (i1 - i0) // stride
