@@ -506,6 +506,7 @@ class WorldPipeline:
         
         scheduler = EDMDPMSolverMultistepScheduler(sigma_min=0.002, sigma_max=80, sigma_data=0.5)
         weight_window = linear_weight_window(TILE_SIZE, 'cpu', torch.float32)
+        COND_MAX_NOISE = 0.1
         
         t_cond = torch.atan(COND_SNR).to(self.device)
         vals = torch.log(torch.tan(t_cond) / 8.0)

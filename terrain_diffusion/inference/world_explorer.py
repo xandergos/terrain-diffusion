@@ -54,6 +54,9 @@ def start_explorer(hdf5_file: str, seed: int | None = None, coarse_window: int =
         ci0, ci1 = coarse_offset_i - coarse_window, coarse_offset_i + coarse_window
         cj0, cj1 = coarse_offset_j - coarse_window, coarse_offset_j + coarse_window
 
+        # Coarse elevation (signed-sqrt -> meters)
+        channel_names = ['Elev', 'p5', 'Temp', 'T std', 'Precip', 'Precip CV']
+
         coarse_elev_ss = normalize_tensor(world.coarse[:, ci0:ci1, cj0:cj1], dim=0)[0]
         coarse_elev_m = torch.sign(coarse_elev_ss) * torch.square(coarse_elev_ss)
         coarse_np = coarse_elev_m.detach().cpu().numpy()
@@ -67,7 +70,7 @@ def start_explorer(hdf5_file: str, seed: int | None = None, coarse_window: int =
             extent=[cj0, cj1, ci0, ci1],  # x: j, y: i in coarse tile space
             cmap='viridis',
         )
-        ax_coarse.set_title('Coarse channel 0 (click a tile)')
+        ax_coarse.set_title('Coarse Elevation (click a tile)')
 
         # Placeholder for relief map panel (RGB placeholder to match later updates)
         im_relief = ax_relief.imshow(
@@ -86,7 +89,7 @@ def start_explorer(hdf5_file: str, seed: int | None = None, coarse_window: int =
         last_climate0 = None
         last_ci = None
         last_cj = None
-        right_mode = 'relief'  # 'relief' or 'climate0'
+        right_mode = 'relief'  # 'relief' or 'temperature'
 
         def relief_format_coord(x, y):
             nonlocal last_elev, last_biome
@@ -121,8 +124,8 @@ def start_explorer(hdf5_file: str, seed: int | None = None, coarse_window: int =
             iy = int(np.floor(y)) - ci0
             C, H, W = coarse_ss_all_np.shape
             if 0 <= ix < W and 0 <= iy < H:
-                vals = [f"{coarse_ss_all_np[c, iy, ix]:.3f}" for c in range(C)]
-                return f"i={iy+ci0}, j={ix+cj0} | ch=[{', '.join(vals)}]"
+                vals = [f"{channel_names[c] if c < len(channel_names) else f'C{c}'}={coarse_ss_all_np[c, iy, ix]:.3f}" for c in range(C)]
+                return f"i={iy+ci0}, j={ix+cj0} | {', '.join(vals)}"
             return f"x={x:.1f}, y={y:.1f}"
 
         ax_coarse.format_coord = coarse_format_coord
@@ -132,7 +135,7 @@ def start_explorer(hdf5_file: str, seed: int | None = None, coarse_window: int =
             if last_elev is None:
                 return
             H, W = last_elev.shape
-            if right_mode == 'climate0' and last_climate0 is not None:
+            if right_mode == 'temperature' and last_climate0 is not None:
                 im_relief.set_data(last_climate0)
                 im_relief.set_cmap('viridis')
                 im_relief.set_extent((0, W, 0, H))
@@ -140,7 +143,7 @@ def start_explorer(hdf5_file: str, seed: int | None = None, coarse_window: int =
                 ax_relief.set_xlim(0, W)
                 ax_relief.set_ylim(0, H)
                 ax_relief.set_aspect('equal', adjustable='box')
-                ax_relief.set_title(f'Climate ch0 (ci={last_ci}, cj={last_cj})')
+                ax_relief.set_title(f'Temperature (ci={last_ci}, cj={last_cj})')
                 ax_relief.axis('off')
                 fig.canvas.draw_idle()
                 return
@@ -221,7 +224,8 @@ def start_explorer(hdf5_file: str, seed: int | None = None, coarse_window: int =
             vmin = float(np.nanmin(data)) if np.isfinite(np.nanmin(data)) else 0.0
             vmax = float(np.nanmax(data)) if np.isfinite(np.nanmax(data)) else 1.0
             im.set_clim(vmin, vmax)
-            ax_coarse.set_title(f'Coarse channel {selected_channel} (click a tile)')
+            channel_label = channel_names[selected_channel] if selected_channel < len(channel_names) else f'C{selected_channel}'
+            ax_coarse.set_title(f'Coarse {channel_label} (click a tile)')
             fig.canvas.draw_idle()
 
         # Create six buttons along the bottom
@@ -230,7 +234,8 @@ def start_explorer(hdf5_file: str, seed: int | None = None, coarse_window: int =
         start_x, width, height, bottom = 0.08, 0.12, 0.06, 0.06
         for idx in range(6):
             ax_btn = fig.add_axes([start_x + idx * (width + 0.01), bottom, width, height])
-            btn = Button(ax_btn, f'C{idx}')
+            btn_label = channel_names[idx] if idx < len(channel_names) else f'C{idx}'
+            btn = Button(ax_btn, btn_label)
             btn.on_clicked(lambda _evt, ch=idx: set_channel(ch))
             btn_axes.append(ax_btn)
             btns.append(btn)
@@ -247,9 +252,9 @@ def start_explorer(hdf5_file: str, seed: int | None = None, coarse_window: int =
         ax_mode_relief = fig.add_axes([0.76, mode_bottom, mode_width, mode_height])
         ax_mode_clim0 = fig.add_axes([0.87, mode_bottom, mode_width, mode_height])
         btn_mode_relief = Button(ax_mode_relief, 'Relief')
-        btn_mode_clim0 = Button(ax_mode_clim0, 'Climate0')
+        btn_mode_clim0 = Button(ax_mode_clim0, 'Temperature')
         btn_mode_relief.on_clicked(lambda _evt: set_mode('relief'))
-        btn_mode_clim0.on_clicked(lambda _evt: set_mode('climate0'))
+        btn_mode_clim0.on_clicked(lambda _evt: set_mode('temperature'))
 
         cid = fig.canvas.mpl_connect('button_press_event', onclick)
         plt.show()
