@@ -3,6 +3,7 @@ from tempfile import NamedTemporaryFile
 import time
 import json
 import os
+import atexit
 
 import h5py
 import torch
@@ -18,6 +19,39 @@ from terrain_diffusion.scheduler.dpmsolver import EDMDPMSolverMultistepScheduler
 import matplotlib.pyplot as plt
 import skimage
 from terrain_diffusion.inference.postprocessing import *
+
+_TEMP_FILES = set()
+
+
+def resolve_hdf5_path(hdf5_file: str) -> str:
+    """Resolve 'TEMP' to a temporary file path, otherwise return the path as-is."""
+    if hdf5_file.upper() == 'TEMP':
+        temp_file = NamedTemporaryFile(delete=False, suffix='.h5', prefix='terrain_')
+        temp_path = temp_file.name
+        temp_file.close()
+        _TEMP_FILES.add(temp_path)
+        return temp_path
+    return hdf5_file
+
+
+def cleanup_temp_file(temp_path: str):
+    """Clean up a specific temporary file."""
+    if temp_path in _TEMP_FILES:
+        try:
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+            _TEMP_FILES.discard(temp_path)
+        except Exception:
+            pass
+
+
+def _cleanup_all_temp_files():
+    """Clean up all temporary files created via resolve_hdf5_path."""
+    for temp_path in list(_TEMP_FILES):
+        cleanup_temp_file(temp_path)
+
+
+atexit.register(_cleanup_all_temp_files)
     
 def gaussian_noise_patch(
     base_seed: int,
@@ -278,6 +312,18 @@ class WorldPipeline:
         self.latents_batch_size = latents_batch_size
         self.log_mode = kwargs.get('log_mode', 'info')
         
+        # Resolve 'TEMP' to temporary file path if needed
+        original_hdf5_file = hdf5_file
+        hdf5_file = resolve_hdf5_path(hdf5_file)
+        self._is_temp_file = original_hdf5_file.upper() == 'TEMP'
+        self._hdf5_file_path = hdf5_file
+        
+        # Resolve 'TEMP' to temporary file path if needed
+        original_hdf5_file = hdf5_file
+        hdf5_file = resolve_hdf5_path(hdf5_file)
+        self._is_temp_file = original_hdf5_file.upper() == 'TEMP'
+        self._hdf5_file_path = hdf5_file
+        
         self._init_config(hdf5_file, seed, kwargs, coarse_model, base_model, decoder_model)
         self._init_tile_store(hdf5_file, mode, compression, compression_opts)
         self._init_conditioning()
@@ -343,6 +389,9 @@ class WorldPipeline:
     def close(self):
         """Release resources associated with this pipeline."""
         self.tile_store.close()
+        # Clean up temporary file if this pipeline created one
+        if self._is_temp_file:
+            cleanup_temp_file(self._hdf5_file_path)
 
     def _reconcile_params(self, hdf5_file, seed, kwargs, coarse_path, base_path, decoder_path):
         """Check stored params vs current, use stored if they exist (with overwrite prompt on mismatch)."""

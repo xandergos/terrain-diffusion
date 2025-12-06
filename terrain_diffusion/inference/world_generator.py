@@ -1,13 +1,15 @@
 import json
 import click
 import torch
-from terrain_diffusion.inference.world_pipeline import WorldPipeline
+from terrain_diffusion.inference.world_pipeline import WorldPipeline, resolve_hdf5_path
 from tqdm import tqdm
 
 
 def generate_world(hdf5_file: str, seed: int | None = None, coarse_window: int = 64, device: str | None = None, **kwargs) -> None:
     if device is None:
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        if device == 'cpu':
+            print("Warning: Using CPU (CUDA not available).")
 
     with WorldPipeline(hdf5_file, device=device, seed=seed, **kwargs) as world:
         ci0, ci1 = -coarse_window, coarse_window
@@ -22,7 +24,7 @@ def generate_world(hdf5_file: str, seed: int | None = None, coarse_window: int =
 
 
 @click.command()
-@click.option("--hdf5-file", default="world.h5", help="Output HDF5 file path")
+@click.option("--hdf5-file", default="world.h5", help="Output HDF5 file path (use 'TEMP' for temporary file)")
 @click.option("--seed", type=int, default=None, help="Random seed (default: random or from file)")
 @click.option("--coarse-window", type=int, default=50, help="Coarse window size")
 @click.option("--device", default=None, help="Device (cuda/cpu, default: auto)")
@@ -34,6 +36,7 @@ def generate_world(hdf5_file: str, seed: int | None = None, coarse_window: int =
 @click.option("--log-mode", type=click.Choice(["info", "verbose"]), default="verbose", help="Logging mode")
 def main(hdf5_file, seed, coarse_window, device, drop_water_pct, frequency_mult, cond_snr, histogram_raw, latents_batch_size, log_mode):
     """Generate a world using the terrain diffusion pipeline"""
+    hdf5_file = resolve_hdf5_path(hdf5_file)
     generate_world(
         hdf5_file,
         seed=seed,

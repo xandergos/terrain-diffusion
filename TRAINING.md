@@ -14,7 +14,7 @@ Sometimes downloading certain files can fail. You may have to run the script mul
 
 #### 2. Download ETOPO
 
-Download the file [here](https://www.ngdc.noaa.gov/thredds/catalog/global/ETOPO2022/30s/30s_bed_elev_netcdf/catalog.html?dataset=globalDatasetScan/ETOPO2022/30s/30s_bed_elev_netcdf/ETOPO_2022_v1_30s_N90W180_bed.nc) and place it in `data/global`
+Download the "30 Arc-Second Resolution GeoTIFF" [here](https://www.ncei.noaa.gov/products/etopo-global-relief-model) and place it in `data/global`.
 
 #### 3. Download WorldClim data
 

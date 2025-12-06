@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from flask import Flask, Response, jsonify, request
 
-from terrain_diffusion.inference.world_pipeline import WorldPipeline
+from terrain_diffusion.inference.world_pipeline import WorldPipeline, resolve_hdf5_path
 
 app = Flask(__name__)
 
@@ -20,7 +20,10 @@ def _select_device() -> str:
     env_device = os.getenv("TERRAIN_DEVICE")
     if env_device:
         return env_device
-    return "cuda" if torch.cuda.is_available() else "cpu"
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    if dev == "cpu":
+        print("Warning: Using CPU (CUDA not available).")
+    return dev
 
 
 def _get_pipeline() -> WorldPipeline:
@@ -192,7 +195,7 @@ def terrain():
 
 
 @click.command()
-@click.option("--hdf5-file", default="world.h5", help="HDF5 file path")
+@click.option("--hdf5-file", default="world.h5", help="HDF5 file path (use 'TEMP' for temporary file)")
 @click.option("--seed", type=int, default=None, help="Random seed (default: from file or random)")
 @click.option("--device", default=None, help="Device (cuda/cpu, default: auto)")
 @click.option("--drop-water-pct", type=float, default=0.5, help="Drop water percentage")
@@ -206,6 +209,7 @@ def terrain():
 def main(hdf5_file, seed, device, drop_water_pct, frequency_mult, cond_snr, histogram_raw, latents_batch_size, log_mode, host, port):
     """Terrain API server"""
     global _PIPELINE_CONFIG
+    hdf5_file = resolve_hdf5_path(hdf5_file)
     _PIPELINE_CONFIG = {
         'hdf5_file': hdf5_file,
         'seed': seed,
