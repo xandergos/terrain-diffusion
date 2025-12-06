@@ -519,7 +519,7 @@ class WorldPipeline:
             climate_means_crop = cond_img[:, 2:6, 1:3, 1:3].mean(dim=(2, 3))
             mask_crop = cond_img[:, 6:7]
             
-            assert torch.isnan(climate_means_crop).all(), "Climate means are nan"
+            assert not torch.isnan(climate_means_crop).all(), "Climate means are nan"
             
             noise_level = (noise_level - 0.5) * np.sqrt(12)
             return mp_concat([means_crop.flatten(1), p5_crop.flatten(1), climate_means_crop.flatten(1), mask_crop.flatten(1), histogram_raw, noise_level.view(-1, 1)], dim=1).float()
