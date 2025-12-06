@@ -60,6 +60,12 @@ python -c "import torch; print(torch.cuda.is_available())"
 
 ## Quick Start
 
+### General API
+
+`python -m terrain_diffusion api`
+
+See [API_README.md](API_README.md) for details.
+
 ### Explore the World
 
 `python -m terrain_diffusion explore`
