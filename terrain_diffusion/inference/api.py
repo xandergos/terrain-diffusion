@@ -90,10 +90,6 @@ def _binary_response(elev: torch.Tensor, climate: Optional[torch.Tensor]) -> Res
     resp = Response(payload, mimetype="application/octet-stream")
     resp.headers["X-Height"] = str(h)
     resp.headers["X-Width"] = str(w)
-    resp.headers["X-Elev-Dtype"] = "int16-le"
-    resp.headers["X-Elev-Transform"] = "signed_square_floor"
-    resp.headers["X-Climate-Dtype"] = "float32-le"
-    resp.headers["X-Climate-Channels"] = "temp,t_season,precip,p_cv"
     return resp
 
 
