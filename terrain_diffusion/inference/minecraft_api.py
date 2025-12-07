@@ -10,6 +10,7 @@ from flask import Flask, Response, jsonify, request
 from pyfastnoiselite.pyfastnoiselite import FastNoiseLite, NoiseType, FractalType
 
 from terrain_diffusion.inference.world_pipeline import WorldPipeline, resolve_hdf5_path
+from terrain_diffusion.common.cli_helpers import parse_kwargs
 
 app = Flask(__name__)
 
@@ -43,7 +44,9 @@ def _get_pipeline() -> WorldPipeline:
         cond_snr=cfg.get('cond_snr', [0.5, 0.5, 0.5, 0.5, 0.5]),
         histogram_raw=cfg.get('histogram_raw', [0.0, 0.0, 0.0, 1.0, 1.5]),
         latents_batch_size=cfg.get('latents_batch_size', 4),
+        **cfg.get('kwargs', {}),
     )
+    print(f"World seed: {_PIPELINE.seed}")
     return _PIPELINE
 
 
@@ -74,8 +77,7 @@ def _tensor_to_json(t: torch.Tensor):
 
 def _transform_to_int16_bytes(t: torch.Tensor) -> Tuple[bytes, Tuple[int, int]]:
     arr = t.detach().cpu().numpy().astype(np.float32, copy=False)
-    trans = np.sign(arr) * (arr ** 2)
-    trans = np.floor(trans)
+    trans = np.floor(arr)
     trans = np.clip(trans, -32768, 32767).astype('<i2', copy=False)
     return trans.tobytes(), (int(trans.shape[0]), int(trans.shape[1]))
 
@@ -89,7 +91,6 @@ def _binary_response(elev: torch.Tensor, biome: Optional[torch.Tensor] = None) -
     resp.headers["X-Height"] = str(h)
     resp.headers["X-Width"] = str(w)
     resp.headers["X-Dtype"] = "int16-le"
-    resp.headers["X-Transform"] = "signed_square_floor"
     return resp
 
 
@@ -313,8 +314,7 @@ def _classify_biome(elev: torch.Tensor, climate: Optional[torch.Tensor], i0: int
         return torch.full((h, w), _BIOME_ID["plains"], dtype=torch.int16, device=device)
 
     # === ELEVATION ===
-    alt_m_signed = torch.sign(elev) * torch.square(torch.abs(elev))
-    alt_m = torch.clamp(alt_m_signed, min=0.0)
+    alt_m = torch.clamp(elev, min=0.0)
 
     # === RAW CLIMATE ===
     temp = climate[0]
@@ -353,9 +353,7 @@ def _classify_biome(elev: torch.Tensor, climate: Optional[torch.Tensor], i0: int
     growing_season = cv['growing_season']
 
     # === SLOPE CALCULATION ===
-    # Compute gradient using 3x3 Sobel kernel on real elevation (meters)
-    # Convert padded elevation to real meters (undo signed-sqrt transform)
-    elev_m = torch.sign(elev_padded) * torch.square(elev_padded)
+    elev_m = elev_padded
     
     # Sobel kernels (normalized by 8 to get proper gradient estimate)
     sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=elev.dtype, device=device).view(1, 1, 3, 3) / 8.0
@@ -450,7 +448,7 @@ def _classify_biome(elev: torch.Tensor, climate: Optional[torch.Tensor], i0: int
     has_snow = would_have_snow & ~is_steep
 
     # === ELEVATION BANDS ===
-    is_ocean = alt_m_signed < 0.0
+    is_ocean = elev < 0.0
     mountains = alt_m > 2500.0
     lowland = alt_m < 200.0
 
@@ -716,7 +714,8 @@ def elev_11():
 @click.option("--log-mode", type=click.Choice(["info", "verbose"]), default="verbose", help="Logging mode")
 @click.option("--host", default="0.0.0.0", help="Server host")
 @click.option("--port", type=int, default=int(os.getenv("PORT", "8000")), help="Server port")
-def main(hdf5_file, seed, device, drop_water_pct, frequency_mult, cond_snr, histogram_raw, latents_batch_size, log_mode, host, port):
+@click.option("--kwarg", "extra_kwargs", multiple=True, help="Additional key=value kwargs (e.g. --kwarg coarse_pooling=2)")
+def main(hdf5_file, seed, device, drop_water_pct, frequency_mult, cond_snr, histogram_raw, latents_batch_size, log_mode, host, port, extra_kwargs):
     """Minecraft terrain API server"""
     global _PIPELINE_CONFIG
     hdf5_file = resolve_hdf5_path(hdf5_file)
@@ -730,6 +729,7 @@ def main(hdf5_file, seed, device, drop_water_pct, frequency_mult, cond_snr, hist
         'histogram_raw': json.loads(histogram_raw),
         'latents_batch_size': latents_batch_size,
         'log_mode': log_mode,
+        'kwargs': parse_kwargs(extra_kwargs),
     }
     app.run(host=host, port=port, debug=False, threaded=False)
 

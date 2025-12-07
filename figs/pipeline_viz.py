@@ -124,7 +124,7 @@ def visualize_pipeline(hdf5_file: str, seed: int, device: str | None = None, **k
         elev = region_dict['elev']
         if hasattr(elev, 'detach'):
             elev = elev.detach().cpu().numpy()
-        elev_m = np.sign(elev) * elev**2
+        elev_m = elev
         
         relief_rgb = get_relief_map(elev_m, None, None, None)
         relief_rgb[elev_m <= 0] = np.nan

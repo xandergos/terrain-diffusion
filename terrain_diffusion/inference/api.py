@@ -9,6 +9,7 @@ import torch
 from flask import Flask, Response, jsonify, request
 
 from terrain_diffusion.inference.world_pipeline import WorldPipeline, resolve_hdf5_path
+from terrain_diffusion.common.cli_helpers import parse_kwargs
 
 app = Flask(__name__)
 
@@ -43,6 +44,7 @@ def _get_pipeline() -> WorldPipeline:
         histogram_raw=cfg.get('histogram_raw', [0.0, 0.0, 0.0, 1.0, 1.5]),
         latents_batch_size=cfg.get('latents_batch_size', 4),
     )
+    print(f"World seed: {_PIPELINE.seed}")
     return _PIPELINE
 
 
@@ -63,10 +65,9 @@ def _parse_quad() -> Tuple[int, int, int, int]:
 
 
 def _elev_to_int16(elev: torch.Tensor) -> np.ndarray:
-    """Convert signed-sqrt elevation to int16 (squared back to meters, clamped)."""
+    """Convert elevation (meters) to int16, clamped."""
     arr = elev.detach().cpu().numpy().astype(np.float32, copy=False)
-    trans = np.sign(arr) * (arr ** 2)
-    trans = np.floor(trans)
+    trans = np.floor(arr)
     return np.clip(trans, -32768, 32767).astype('<i2', copy=False)
 
 
@@ -175,7 +176,7 @@ def terrain():
                1 = 90m, 2 = 45m, 4 = 22.5m, 8 = 11.25m, etc.
     
     Returns binary data:
-        - elevation: int16-le (H*W*2 bytes), squared back to meters
+        - elevation: int16-le (H*W*2 bytes), meters
         - climate: float32-le interleaved (H*W*4*4 bytes)
                    channels: temp, t_season, precip, p_cv
     """
@@ -204,7 +205,8 @@ def terrain():
 @click.option("--log-mode", type=click.Choice(["info", "verbose"]), default="verbose", help="Logging mode")
 @click.option("--host", default="0.0.0.0", help="Server host")
 @click.option("--port", type=int, default=int(os.getenv("PORT", "8000")), help="Server port")
-def main(hdf5_file, seed, device, drop_water_pct, frequency_mult, cond_snr, histogram_raw, latents_batch_size, log_mode, host, port):
+@click.option("--kwarg", "extra_kwargs", multiple=True, help="Additional key=value kwargs (e.g. --kwarg coarse_pooling=2)")
+def main(hdf5_file, seed, device, drop_water_pct, frequency_mult, cond_snr, histogram_raw, latents_batch_size, log_mode, host, port, extra_kwargs):
     """Terrain API server"""
     global _PIPELINE_CONFIG
     hdf5_file = resolve_hdf5_path(hdf5_file)
@@ -218,6 +220,7 @@ def main(hdf5_file, seed, device, drop_water_pct, frequency_mult, cond_snr, hist
         'histogram_raw': json.loads(histogram_raw),
         'latents_batch_size': latents_batch_size,
         'log_mode': log_mode,
+        **parse_kwargs(extra_kwargs),
     }
     app.run(host=host, port=port, debug=False, threaded=False)
 

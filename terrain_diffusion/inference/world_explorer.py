@@ -8,6 +8,7 @@ from matplotlib.widgets import Button
 
 from terrain_diffusion.inference.world_pipeline import WorldPipeline, normalize_tensor, resolve_hdf5_path
 from terrain_diffusion.inference.relief_map import get_relief_map
+from terrain_diffusion.common.cli_helpers import parse_kwargs
 
 BIOME_LEGEND = {
     0: "Unknown",
@@ -51,18 +52,20 @@ def start_explorer(hdf5_file: str, seed: int | None = None, coarse_window: int =
             print("Warning: Using CPU (CUDA not available).")
 
     with WorldPipeline(hdf5_file, device=device, seed=seed, **kwargs) as world:
+        print(f"World seed: {world.seed}")
         ci0, ci1 = coarse_offset_i - coarse_window, coarse_offset_i + coarse_window
         cj0, cj1 = coarse_offset_j - coarse_window, coarse_offset_j + coarse_window
 
+        # Coarse elevation (signed-sqrt -> meters)
         channel_names = ['Elev', 'p5', 'Temp', 'T std', 'Precip', 'Precip CV']
 
-        # Coarse elevation (signed-sqrt -> meters)
         coarse_elev_ss = normalize_tensor(world.coarse[:, ci0:ci1, cj0:cj1], dim=0)[0]
         coarse_elev_m = torch.sign(coarse_elev_ss) * torch.square(coarse_elev_ss)
         coarse_np = coarse_elev_m.detach().cpu().numpy()
 
         fig, (ax_coarse, ax_relief) = plt.subplots(1, 2, figsize=(12, 6))
-        fig.subplots_adjust(bottom=0.2)
+        fig.suptitle(f'Seed: {world.seed}', fontsize=10)
+        fig.subplots_adjust(bottom=0.2, top=0.92)
         im = ax_coarse.imshow(
             coarse_np,
             origin='lower',
@@ -182,7 +185,6 @@ def start_explorer(hdf5_file: str, seed: int | None = None, coarse_window: int =
             biome = None
             climate = region_dict['climate']
             elev = elev.cpu().numpy()
-            elev = np.sign(elev) * elev**2
             #elev[elev == 0.0] = np.nan
 
             # Print coordinates at different resolutions
@@ -276,7 +278,8 @@ def start_explorer(hdf5_file: str, seed: int | None = None, coarse_window: int =
 @click.option("--histogram-raw", default="[0.0, 0.0, 0.0, 1.0, 1.5]", help="Histogram raw values (JSON)")
 @click.option("--latents-batch-size", type=int, default=4, help="Batch size for latent generation")
 @click.option("--log-mode", type=click.Choice(["info", "verbose"]), default="verbose", help="Logging mode")
-def main(hdf5_file, seed, coarse_window, coarse_offset_i, coarse_offset_j, detail_size, device, drop_water_pct, frequency_mult, cond_snr, histogram_raw, latents_batch_size, log_mode):
+@click.option("--kwarg", "extra_kwargs", multiple=True, help="Additional key=value kwargs (e.g. --kwarg coarse_pooling=2)")
+def main(hdf5_file, seed, coarse_window, coarse_offset_i, coarse_offset_j, detail_size, device, drop_water_pct, frequency_mult, cond_snr, histogram_raw, latents_batch_size, log_mode, extra_kwargs):
     """Explore a generated world interactively"""
     hdf5_file = resolve_hdf5_path(hdf5_file)
     start_explorer(
@@ -293,6 +296,7 @@ def main(hdf5_file, seed, coarse_window, coarse_offset_i, coarse_offset_j, detai
         histogram_raw=json.loads(histogram_raw),
         latents_batch_size=latents_batch_size,
         log_mode=log_mode,
+        **parse_kwargs(extra_kwargs),
     )
 
 
