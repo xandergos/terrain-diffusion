@@ -45,7 +45,7 @@ BIOME_LEGEND = {
 }
 
 
-def start_explorer(hdf5_file: str, seed: int | None = None, coarse_window: int = 64, coarse_offset_i: int = 0, coarse_offset_j: int = 0, detail_size: int = 1024, device: str | None = None, **kwargs) -> None:
+def start_explorer(hdf5_file: str, seed: int, coarse_window: int = 64, coarse_offset_i: int = 0, coarse_offset_j: int = 0, detail_size: int = 1024, device: str | None = None, **kwargs) -> None:
     if device is None:
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         if device == 'cpu':
@@ -265,8 +265,8 @@ def start_explorer(hdf5_file: str, seed: int | None = None, coarse_window: int =
 
 
 @click.command()
-@click.option("--hdf5-file", default="world.h5", help="HDF5 file path (use 'TEMP' for temporary file)")
-@click.option("--seed", type=int, default=None, help="Random seed (default: from file or random)")
+@click.option("--hdf5-file", default="TEMP", help="HDF5 file path (use 'TEMP' for temporary file)")
+@click.option("--seed", type=int, required=True, help="Random seed")
 @click.option("--coarse-window", type=int, default=50, help="Coarse window size")
 @click.option("--coarse-offset-i", type=int, default=0, help="Coarse window offset in i direction")
 @click.option("--coarse-offset-j", type=int, default=0, help="Coarse window offset in j direction")
