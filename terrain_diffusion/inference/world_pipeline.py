@@ -311,13 +311,7 @@ class WorldPipeline:
         self.device = device
         self.latents_batch_size = latents_batch_size
         self.log_mode = kwargs.get('log_mode', 'info')
-        
-        # Resolve 'TEMP' to temporary file path if needed
-        original_hdf5_file = hdf5_file
-        hdf5_file = resolve_hdf5_path(hdf5_file)
-        self._is_temp_file = original_hdf5_file.upper() == 'TEMP'
-        self._hdf5_file_path = hdf5_file
-        
+                
         # Resolve 'TEMP' to temporary file path if needed
         original_hdf5_file = hdf5_file
         hdf5_file = resolve_hdf5_path(hdf5_file)
