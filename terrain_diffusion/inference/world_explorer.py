@@ -52,6 +52,7 @@ def start_explorer(hdf5_file: str, seed: int | None = None, coarse_window: int =
             print("Warning: Using CPU (CUDA not available).")
 
     with WorldPipeline(hdf5_file, device=device, seed=seed, **kwargs) as world:
+        print(f"World seed: {world.seed}")
         ci0, ci1 = coarse_offset_i - coarse_window, coarse_offset_i + coarse_window
         cj0, cj1 = coarse_offset_j - coarse_window, coarse_offset_j + coarse_window
 
@@ -63,7 +64,8 @@ def start_explorer(hdf5_file: str, seed: int | None = None, coarse_window: int =
         coarse_np = coarse_elev_m.detach().cpu().numpy()
 
         fig, (ax_coarse, ax_relief) = plt.subplots(1, 2, figsize=(12, 6))
-        fig.subplots_adjust(bottom=0.2)
+        fig.suptitle(f'Seed: {world.seed}', fontsize=10)
+        fig.subplots_adjust(bottom=0.2, top=0.92)
         im = ax_coarse.imshow(
             coarse_np,
             origin='lower',

@@ -453,7 +453,7 @@ class WorldPipeline:
     # Coarse Stage
     # =========================================================================
     
-    def _coarse_inference(self, ctx, scheduler, weight_window, t_cond, cond_inputs):
+    def _coarse_inference(self, ctx, scheduler, weight_window, t_cond, cond_inputs, pool_size=1):
         """Run inference for one coarse tile."""
         TILE_SIZE = 64
         TILE_STRIDE = TILE_SIZE - 16
@@ -461,7 +461,8 @@ class WorldPipeline:
         MODEL_STDS = torch.tensor([39.68515115440358, 3.0981253981231522, 8.940333096712806, 322.25238547630295, 856.3430083394657, 30.982620765341043])
         
         _, i, j = ctx
-        i1, j1 = i * TILE_STRIDE, j * TILE_STRIDE
+        i1, j1 = i * (TILE_STRIDE // pool_size), j * (TILE_STRIDE // pool_size)
+        i1, j1 = i1 * pool_size, j1 * pool_size
         i2, j2 = i1 + TILE_SIZE, j1 + TILE_SIZE
         
         synthetic_map = torch.as_tensor(self.synthetic_map_factory(j1, i1, j2, i2))
@@ -495,6 +496,10 @@ class WorldPipeline:
         sample = sample.cpu() / scheduler.config.sigma_data
         sample = (sample * MODEL_STDS.view(1, -1, 1, 1)) + MODEL_MEANS.view(1, -1, 1, 1)
         sample[0, 1] = sample[0, 0] - sample[0, 1]
+        
+        if pool_size > 1:
+            sample = self._pool_coarse_conditioning(sample[0], pool_size)[None]
+        
         output = torch.cat([sample[0] * weight_window[None], weight_window[None]], dim=0)
         return output
     
@@ -504,18 +509,24 @@ class WorldPipeline:
         TILE_STRIDE = TILE_SIZE - 16
         COND_SNR = torch.tensor(self.kwargs.get('cond_snr', [0.3, 0.1, 1.0, 0.1, 1.0]))
         
+        coarse_pool = self.kwargs.get('coarse_pooling', 1)
+        assert TILE_SIZE % coarse_pool == 0, f"coarse_pooling {coarse_pool} must divide TILE_SIZE {TILE_SIZE}"
+        assert TILE_STRIDE % coarse_pool == 0, f"coarse_pooling {coarse_pool} must divide TILE_STRIDE {TILE_STRIDE}"
+        
         scheduler = EDMDPMSolverMultistepScheduler(sigma_min=0.002, sigma_max=80, sigma_data=0.5)
-        weight_window = linear_weight_window(TILE_SIZE, 'cpu', torch.float32)
-        COND_MAX_NOISE = 0.1
+        weight_window = linear_weight_window(TILE_SIZE // coarse_pool, 'cpu', torch.float32)
         
         t_cond = torch.atan(COND_SNR).to(self.device)
         vals = torch.log(torch.tan(t_cond) / 8.0)
         cond_inputs = [v.detach().view(-1) for v in vals]
         
         def f(ctx):
-            return self._coarse_inference(ctx, scheduler, weight_window, t_cond, cond_inputs)
+            return self._coarse_inference(ctx, scheduler, weight_window, t_cond, cond_inputs, pool_size=coarse_pool)
                     
-        output_window = TensorWindow(size=(7, TILE_SIZE, TILE_SIZE), stride=(7, TILE_STRIDE, TILE_STRIDE))
+        output_window = TensorWindow(
+            size=(7, TILE_SIZE // coarse_pool, TILE_SIZE // coarse_pool), 
+            stride=(7, TILE_STRIDE // coarse_pool, TILE_STRIDE // coarse_pool)
+        )
         return self.tile_store.get_or_create(
             "base_coarse_map",
             shape=(7, None, None),
@@ -581,7 +592,6 @@ class WorldPipeline:
         
         t_tensor = torch.as_tensor(t, device=self.device)
         
-        coarse_pool = self.kwargs.get('coarse_pooling', 1)
         for ctx, sample, cond_img in zip(ctxs, samples, cond_imgs):
             if sample is None:
                 sample = torch.zeros((1, 5, TILE_SIZE, TILE_SIZE), device=self.device)
@@ -590,7 +600,6 @@ class WorldPipeline:
                 sample = sample[:-1] / sample[-1:] * scheduler.config.sigma_data
             
             cond_img = cond_img[:-1] / cond_img[-1:]
-            cond_img = self._pool_coarse_conditioning(cond_img, coarse_pool)
             
             mask = torch.ones((1, 4, 4))
             cond_img = torch.cat([cond_img, mask], dim=0)[None]
@@ -645,8 +654,7 @@ class WorldPipeline:
 
         t_init = torch.atan(scheduler.sigmas[0] / scheduler.config.sigma_data)
         output_window = TensorWindow(size=(6, TILE_SIZE, TILE_SIZE), stride=(6, TILE_STRIDE, TILE_STRIDE))
-        coarse_pool = self.kwargs.get('coarse_pooling', 1)
-        coarse_window = TensorWindow(size=(7, 4*coarse_pool, 4*coarse_pool), stride=(7, coarse_pool, coarse_pool), offset=(0, -coarse_pool, -coarse_pool))
+        coarse_window = TensorWindow(size=(7, 4, 4), stride=(7, 1, 1), offset=(0, -1, -1))
         
         tensor = self.tile_store.get_or_create(
             "init_latent_map",

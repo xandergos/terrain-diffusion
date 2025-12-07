@@ -1,7 +1,7 @@
 import json
 import click
 import torch
-from terrain_diffusion.inference.world_pipeline import WorldPipeline
+from terrain_diffusion.inference.world_pipeline import WorldPipeline, resolve_hdf5_path
 from terrain_diffusion.common.cli_helpers import parse_kwargs
 from tqdm import tqdm
 
@@ -13,6 +13,7 @@ def generate_world(hdf5_file: str, seed: int | None = None, coarse_window: int =
             print("Warning: Using CPU (CUDA not available).")
 
     with WorldPipeline(hdf5_file, device=device, seed=seed, **kwargs) as world:
+        print(f"World seed: {world.seed}")
         ci0, ci1 = -coarse_window, coarse_window
         cj0, cj1 = -coarse_window, coarse_window
         

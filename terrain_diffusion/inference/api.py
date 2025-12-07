@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from flask import Flask, Response, jsonify, request
 
-from terrain_diffusion.inference.world_pipeline import WorldPipeline
+from terrain_diffusion.inference.world_pipeline import WorldPipeline, resolve_hdf5_path
 from terrain_diffusion.common.cli_helpers import parse_kwargs
 
 app = Flask(__name__)
@@ -44,6 +44,7 @@ def _get_pipeline() -> WorldPipeline:
         histogram_raw=cfg.get('histogram_raw', [0.0, 0.0, 0.0, 1.0, 1.5]),
         latents_batch_size=cfg.get('latents_batch_size', 4),
     )
+    print(f"World seed: {_PIPELINE.seed}")
     return _PIPELINE
 
 

@@ -9,7 +9,7 @@ import torch
 from flask import Flask, Response, jsonify, request
 from pyfastnoiselite.pyfastnoiselite import FastNoiseLite, NoiseType, FractalType
 
-from terrain_diffusion.inference.world_pipeline import WorldPipeline
+from terrain_diffusion.inference.world_pipeline import WorldPipeline, resolve_hdf5_path
 from terrain_diffusion.common.cli_helpers import parse_kwargs
 
 app = Flask(__name__)
@@ -44,7 +44,9 @@ def _get_pipeline() -> WorldPipeline:
         cond_snr=cfg.get('cond_snr', [0.5, 0.5, 0.5, 0.5, 0.5]),
         histogram_raw=cfg.get('histogram_raw', [0.0, 0.0, 0.0, 1.0, 1.5]),
         latents_batch_size=cfg.get('latents_batch_size', 4),
+        **cfg.get('kwargs', {}),
     )
+    print(f"World seed: {_PIPELINE.seed}")
     return _PIPELINE
 
 
@@ -727,7 +729,7 @@ def main(hdf5_file, seed, device, drop_water_pct, frequency_mult, cond_snr, hist
         'histogram_raw': json.loads(histogram_raw),
         'latents_batch_size': latents_batch_size,
         'log_mode': log_mode,
-        **parse_kwargs(extra_kwargs),
+        'kwargs': parse_kwargs(extra_kwargs),
     }
     app.run(host=host, port=port, debug=False, threaded=False)
 
