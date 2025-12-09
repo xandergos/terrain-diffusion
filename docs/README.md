@@ -1,6 +1,4 @@
-# Terrain Diffusion
-
-This is the repository for the [Terrain Diffusion project website](https://terrain-diffusion.github.io).
+# Terrain Diffusion Website
 
 If you find Terrain Diffusion useful for your work please cite:
 ```
