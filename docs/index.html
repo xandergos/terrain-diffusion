@@ -1,1 +1,278 @@
-Test file.
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="description"
+        content="Terrain Diffusion: A Diffusion-Based Successor to Perlin Noise in Infinite, Real-Time Terrain Generation">
+  <meta name="keywords" content="Terrain Generation, Diffusion Models, Procedural Generation, Perlin Noise">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Terrain Diffusion</title>
+
+  <link href="https://fonts.googleapis.com/css?family=Google+Sans|Noto+Sans|Castoro"
+        rel="stylesheet">
+
+  <link rel="stylesheet" href="./static/css/bulma.min.css">
+  <link rel="stylesheet" href="./static/css/bulma-carousel.min.css">
+  <link rel="stylesheet" href="./static/css/bulma-slider.min.css">
+  <link rel="stylesheet" href="./static/css/fontawesome.all.min.css">
+  <link rel="stylesheet"
+        href="https://cdn.jsdelivr.net/gh/jpswalsh/academicons@1/css/academicons.min.css">
+  <link rel="stylesheet" href="./static/css/index.css">
+  <link rel="icon" href="./static/images/favicon.svg">
+
+  <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.5.1/jquery.min.js"></script>
+  <script defer src="./static/js/fontawesome.all.min.js"></script>
+  <script src="./static/js/bulma-carousel.min.js"></script>
+  <script src="./static/js/bulma-slider.min.js"></script>
+  <script src="./static/js/index.js"></script>
+</head>
+<body>
+
+<section class="hero">
+  <div class="hero-body">
+    <div class="container is-max-desktop">
+      <div class="columns is-centered">
+        <div class="column has-text-centered">
+          <img src="./static/world_combined.jpeg" alt="Terrain Diffusion world visualization" style="width: 100%; max-width: 900px; margin-bottom: 1.5rem; border-radius: 12px;">
+          <h1 class="title is-1 publication-title">Terrain Diffusion: A Diffusion-Based Successor to Perlin Noise in Infinite, Real-Time Terrain Generation</h1>
+          <div class="is-size-5 publication-authors">
+            <span class="author-block">
+              <a href="mailto:alexander.goslin@gmail.com">Alexander Goslin</a>
+            </span>
+          </div>
+
+          <div class="is-size-6 publication-authors">
+            <span class="author-block">alexander.goslin@gmail.com</span>
+          </div>
+
+          <div class="column has-text-centered">
+            <div class="publication-links">
+              <!-- Code Link. -->
+              <span class="link-block">
+                <a href="https://github.com/xandergos/terrain-diffusion"
+                   class="external-link button is-normal is-rounded is-dark">
+                  <span class="icon">
+                      <i class="fab fa-github"></i>
+                  </span>
+                  <span>Code</span>
+                </a>
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="container is-max-desktop">
+    <!-- Abstract. -->
+    <div class="columns is-centered has-text-centered">
+      <div class="column is-four-fifths">
+        <h2 class="title is-3">Abstract</h2>
+        <div class="content has-text-justified">
+          <p>
+            For decades, procedural worlds have been built on procedural noise
+            functions such as Perlin noise, which are fast and infinite, yet fun-
+            damentally limited in realism and large-scale coherence. We in-
+            troduce Terrain Diffusion, an AI-era successor to Perlin noise that
+            bridges the fidelity of diffusion models with the properties that
+            made procedural noise indispensable: seamless unbounded extent,
+            seed-consistency, and constant-time random access. At its core is
+            InfiniteDiffusion, a novel algorithm for infinite generation, enabling
+            seamless, real-time synthesis of boundless landscapes. A hierar-
+            chical stack of diffusion models couples planetary context with
+            local detail, while a compact Laplacian encoding stabilizes outputs
+            across Earth-scale dynamic ranges. An open-source infinite-tensor
+            framework supports constant-memory manipulation of unbounded
+            tensors, and few-step consistency distillation enables efficient gen-
+            eration. Together, these components establish diffusion models as
+            a practical foundation for procedural world generation, capable of
+            synthesizing entire planets coherently, controllably, and without
+            limits.          
+          </p>
+        </div>
+      </div>
+    </div>
+    <!--/ Abstract. -->
+  </div>
+</section>
+
+<!-- Terrain Results Carousel -->
+<section class="hero is-light is-small">
+  <div class="hero-body">
+    <div class="container">
+      <h2 class="title is-3 has-text-centered">Terrain Generation</h2>
+      <div id="terrain-carousel" class="carousel results-carousel">
+        <div class="item">
+          <img src="./static/terrain/1.jpg" alt="Terrain sample 1">
+        </div>
+        <div class="item">
+          <img src="./static/terrain/2.jpg" alt="Terrain sample 2">
+        </div>
+        <div class="item">
+          <img src="./static/terrain/3.jpg" alt="Terrain sample 3">
+        </div>
+        <div class="item">
+          <img src="./static/terrain/4.jpg" alt="Terrain sample 4">
+        </div>
+        <div class="item">
+          <img src="./static/terrain/5.jpg" alt="Terrain sample 5">
+        </div>
+        <div class="item">
+          <img src="./static/terrain/6.jpg" alt="Terrain sample 6">
+        </div>
+        <div class="item">
+          <img src="./static/terrain/7.jpg" alt="Terrain sample 7">
+        </div>
+        <div class="item">
+          <img src="./static/terrain/8.jpg" alt="Terrain sample 8">
+        </div>
+        <div class="item">
+          <img src="./static/terrain/9.jpg" alt="Terrain sample 9">
+        </div>
+        <div class="item">
+          <img src="./static/terrain/10.jpg" alt="Terrain sample 10">
+        </div>
+        <div class="item">
+          <img src="./static/terrain/11.jpg" alt="Terrain sample 11">
+        </div>
+        <div class="item">
+          <img src="./static/terrain/12.jpg" alt="Terrain sample 12">
+        </div>
+        <div class="item">
+          <img src="./static/terrain/13.jpg" alt="Terrain sample 13">
+        </div>
+        <div class="item">
+          <img src="./static/terrain/14.jpg" alt="Terrain sample 14">
+        </div>
+        <div class="item">
+          <img src="./static/terrain/15.jpg" alt="Terrain sample 15">
+        </div>
+        <div class="item">
+          <img src="./static/terrain/16.jpg" alt="Terrain sample 16">
+        </div>
+        <div class="item">
+          <img src="./static/terrain/17.jpg" alt="Terrain sample 17">
+        </div>
+        <div class="item">
+          <img src="./static/terrain/18.jpg" alt="Terrain sample 18">
+        </div>
+        <div class="item">
+          <img src="./static/terrain/19.jpg" alt="Terrain sample 19">
+        </div>
+        <div class="item">
+          <img src="./static/terrain/20.jpg" alt="Terrain sample 20">
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Minecraft Results Carousel -->
+<section class="hero is-small">
+  <div class="hero-body">
+    <div class="container">
+      <h2 class="title is-3 has-text-centered">Minecraft Integration</h2>
+      <div id="minecraft-carousel" class="carousel results-carousel">
+        <div class="item">
+          <img src="./static/minecraft_pics/12.jpg" alt="Minecraft sample 11">
+        </div>
+        <div class="item">
+          <img src="./static/minecraft_pics/13.jpg" alt="Minecraft sample 13">
+        </div>
+        <div class="item">
+          <img src="./static/minecraft_pics/1.jpg" alt="Minecraft sample 1">
+        </div>
+        <div class="item">
+          <img src="./static/minecraft_pics/3.jpg" alt="Minecraft sample 3">
+        </div>
+        <div class="item">
+          <img src="./static/minecraft_pics/5.jpg" alt="Minecraft sample 5">
+        </div>
+        <div class="item">
+          <img src="./static/minecraft_pics/4.jpg" alt="Minecraft sample 4">
+        </div>
+        <div class="item">
+          <img src="./static/minecraft_pics/0.jpg" alt="Minecraft sample 0">
+        </div>
+        <div class="item">
+          <img src="./static/minecraft_pics/16.jpg" alt="Minecraft sample 16">
+        </div>
+        <div class="item">
+          <img src="./static/minecraft_pics/6.jpg" alt="Minecraft sample 6">
+        </div>
+        <div class="item">
+          <img src="./static/minecraft_pics/18.jpg" alt="Minecraft sample 18">
+        </div>
+        <div class="item">
+          <img src="./static/minecraft_pics/7.jpg" alt="Minecraft sample 7">
+        </div>
+        <div class="item">
+          <img src="./static/minecraft_pics/8.jpg" alt="Minecraft sample 8">
+        </div>
+        <div class="item">
+          <img src="./static/minecraft_pics/9.jpg" alt="Minecraft sample 9">
+        </div>
+        <div class="item">
+          <img src="./static/minecraft_pics/10.jpg" alt="Minecraft sample 10">
+        </div>
+        <div class="item">
+          <img src="./static/minecraft_pics/17.jpg" alt="Minecraft sample 17">
+        </div>
+        <div class="item">
+          <img src="./static/minecraft_pics/11.jpg" alt="Minecraft sample 11">
+        </div>
+        <div class="item">
+          <img src="./static/minecraft_pics/14.jpg" alt="Minecraft sample 14">
+        </div>
+        <div class="item">
+          <img src="./static/minecraft_pics/15.jpg" alt="Minecraft sample 15">
+        </div>
+        <div class="item">
+          <img src="./static/minecraft_pics/19.jpg" alt="Minecraft sample 19">
+        </div>
+        <div class="item">
+          <img src="./static/minecraft_pics/20.jpg" alt="Minecraft sample 20">
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+
+<footer class="footer">
+  <div class="container">
+    <div class="content has-text-centered">
+      <a href="https://x.com/xandurglar" style="display: inline-flex; align-items: center; gap: 0.35rem; color: inherit;">
+        Follow me on
+        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" style="vertical-align: middle;">
+          <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
+        </svg>
+      </a>
+    </div>
+    <div class="columns is-centered">
+      <div class="column is-8">
+        <div class="content">
+          <p>
+            Website template borrowed from <a href="https://nerfies.github.io">Nerfies</a>.
+          </p>
+          <p>
+            This website is licensed under a <a rel="license"
+                                                href="http://creativecommons.org/licenses/by-sa/4.0/">Creative
+            Commons Attribution-ShareAlike 4.0 International License</a>.
+          </p>
+        </div>
+      </div>
+    </div>
+  </div>
+</footer>
+
+<!-- Lightbox -->
+<div id="lightbox" class="lightbox">
+  <img id="lightbox-img" src="" alt="Enlarged image">
+</div>
+
+</body>
+</html>
