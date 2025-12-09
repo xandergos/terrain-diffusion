@@ -532,13 +532,23 @@ class WorldPipeline:
     # Latent Stage
     # =========================================================================
     
+    def _pool_channel(self, x, pool_size, mode):
+        """Pool a single channel with the specified mode (max/avg/min)."""
+        x = x.unsqueeze(0)
+        if mode == 'max':
+            return torch.nn.functional.max_pool2d(x, kernel_size=pool_size, stride=pool_size).squeeze(0)
+        elif mode == 'min':
+            return -torch.nn.functional.max_pool2d(-x, kernel_size=pool_size, stride=pool_size).squeeze(0)
+        else:  # avg
+            return torch.nn.functional.avg_pool2d(x, kernel_size=pool_size, stride=pool_size).squeeze(0)
+
     def _pool_coarse_conditioning(self, cond_img, pool_size):
         """Pool coarse conditioning from (C, H*n, W*n) to (C, H, W)."""
         if pool_size == 1:
             return cond_img
         n = pool_size
-        ch0_pooled = torch.nn.functional.max_pool2d(cond_img[0:1].unsqueeze(0), kernel_size=n, stride=n).squeeze(0)
-        ch1_pooled = -torch.nn.functional.max_pool2d(-cond_img[1:2].unsqueeze(0), kernel_size=n, stride=n).squeeze(0)
+        ch0_pooled = self._pool_channel(cond_img[0:1], n, self.kwargs.get('elev_coarse_pool_mode', 'avg'))
+        ch1_pooled = self._pool_channel(cond_img[1:2], n, self.kwargs.get('p5_coarse_pool_mode', 'avg'))
         ch_rest_pooled = torch.nn.functional.avg_pool2d(cond_img[2:].unsqueeze(0), kernel_size=n, stride=n).squeeze(0)
         return torch.cat([ch0_pooled, ch1_pooled, ch_rest_pooled], dim=0)
 

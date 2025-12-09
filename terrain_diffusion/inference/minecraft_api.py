@@ -161,6 +161,25 @@ _SNOW_NOISE_FINE.fractal_octaves = 2
 _SNOW_NOISE_FINE.fractal_lacunarity = 2.0
 _SNOW_NOISE_FINE.fractal_gain = 0.5
 
+# Perlin noise for elevation detail (adds texture to smooth upsampled terrain)
+# Coarse layer for larger bumps/ridges
+_ELEV_NOISE_COARSE = FastNoiseLite(seed=99999)
+_ELEV_NOISE_COARSE.noise_type = NoiseType.NoiseType_Perlin
+_ELEV_NOISE_COARSE.frequency = 1.0 / 24.0  # ~24-block wavelength
+_ELEV_NOISE_COARSE.fractal_type = FractalType.FractalType_FBm
+_ELEV_NOISE_COARSE.fractal_octaves = 3
+_ELEV_NOISE_COARSE.fractal_lacunarity = 2.0
+_ELEV_NOISE_COARSE.fractal_gain = 0.5
+
+# Fine layer for small-scale roughness
+_ELEV_NOISE_FINE = FastNoiseLite(seed=88888)
+_ELEV_NOISE_FINE.noise_type = NoiseType.NoiseType_Perlin
+_ELEV_NOISE_FINE.frequency = 1.0 / 6.0  # ~6-block wavelength for block-scale detail
+_ELEV_NOISE_FINE.fractal_type = FractalType.FractalType_FBm
+_ELEV_NOISE_FINE.fractal_octaves = 2
+_ELEV_NOISE_FINE.fractal_lacunarity = 2.0
+_ELEV_NOISE_FINE.fractal_gain = 0.6  # slightly more high-freq contribution
+
 
 def _compute_climate_vars(temp: torch.Tensor, t_season: torch.Tensor, 
                           precip: torch.Tensor, p_cv: torch.Tensor) -> dict:
@@ -238,11 +257,12 @@ def _compute_climate_vars(temp: torch.Tensor, t_season: torch.Tensor,
         'coldest_month': coldest_month,
     }
 
-def _get_upsampled_90(world: WorldPipeline, i1: int, j1: int, i2: int, j2: int, scale: int) -> dict:
+def _get_upsampled_90(world: WorldPipeline, i1: int, j1: int, i2: int, j2: int, scale: int, add_noise: bool = True) -> dict:
     """
     Get 90m data and upsample by `scale` factor using bilinear interpolation.
     Coordinates are in the target (upsampled) resolution.
     Adds 2 pixel padding in 90m space to ensure correct edge interpolation and slope calculation.
+    Optionally adds Perlin noise scaled by local relief to restore detail lost in upsampling.
     """
     # Convert to 90m coordinates
     i1_90 = i1 // scale
@@ -277,7 +297,7 @@ def _get_upsampled_90(world: WorldPipeline, i1: int, j1: int, i2: int, j2: int, 
     crop_i2 = crop_i1 + (i2 - i1)
     crop_j2 = crop_j1 + (j2 - j1)
 
-    elev = elev_up[crop_i1:crop_i2, crop_j1:crop_j2]
+    elev_smooth = elev_up[crop_i1:crop_i2, crop_j1:crop_j2]
     # Include 1 pixel padding for slope calculation
     elev_padded = elev_up[crop_i1-1:crop_i2+1, crop_j1-1:crop_j2+1]
 
@@ -291,7 +311,42 @@ def _get_upsampled_90(world: WorldPipeline, i1: int, j1: int, i2: int, j2: int, 
         ).squeeze(0)
         climate = climate_up[:, crop_i1:crop_i2, crop_j1:crop_j2]
 
-    return {"elev": elev, "climate": climate, "elev_padded": elev_padded}
+    # Add Perlin noise to restore detail lost in upsampling
+    if add_noise:
+        elev = elev_smooth.clone()
+        h, w = elev.shape
+        if h > 0 and w > 0:
+            x = np.arange(j1, j1 + w, dtype=np.float32)
+            y = np.arange(i1, i1 + h, dtype=np.float32)
+            xx, yy = np.meshgrid(x, y)
+            coords = np.array([xx.ravel(), yy.ravel()], dtype=np.float32)
+            
+            # Generate coarse + fine noise layers
+            noise_coarse = _ELEV_NOISE_COARSE.gen_from_coords(coords).astype(np.float32).reshape(h, w)
+            noise_fine = _ELEV_NOISE_FINE.gen_from_coords(coords).astype(np.float32).reshape(h, w)
+            noise_coarse_t = torch.from_numpy(noise_coarse).to(device=elev.device, dtype=elev.dtype)
+            noise_fine_t = torch.from_numpy(noise_fine).to(device=elev.device, dtype=elev.dtype)
+            
+            # Compute local relief using a Sobel-like gradient on the smooth elevation
+            sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=elev.dtype, device=elev.device).view(1, 1, 3, 3) / 8.0
+            sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=elev.dtype, device=elev.device).view(1, 1, 3, 3) / 8.0
+            dx = torch.nn.functional.conv2d(elev_padded.unsqueeze(0).unsqueeze(0), sobel_x, padding=0).squeeze()
+            dy = torch.nn.functional.conv2d(elev_padded.unsqueeze(0).unsqueeze(0), sobel_y, padding=0).squeeze()
+            gradient = torch.sqrt(dx**2 + dy**2)
+            
+            # Scale noise amplitude by local gradient (steeper = more noise)
+            # Gamma > 1 concentrates noise on very steep slopes
+            slope_factor = (gradient / 40.0).clamp(0.0, 1.0).pow(1.5)
+            amp_coarse = 0.0 + 100.0 * slope_factor
+            amp_fine = 0.0 + 70.0 * slope_factor
+            
+            # Apply noise only to land (elev >= 0)
+            is_land = elev_smooth >= 0.0
+            elev = elev + (noise_coarse_t * amp_coarse + noise_fine_t * amp_fine) * is_land.float()
+    else:
+        elev = elev_smooth
+
+    return {"elev": elev, "elev_smooth": elev_smooth, "climate": climate, "elev_padded": elev_padded}
 
 
 def _classify_biome(elev: torch.Tensor, climate: Optional[torch.Tensor], i0: int, j0: int,
@@ -651,16 +706,29 @@ def elev_90():
         return jsonify({"error": str(e)}), 400
 
 
+def _parse_noise() -> bool:
+    """Parse noise query param. Defaults to True. Accepts 0/1/true/false."""
+    val = request.args.get("noise", "1").lower()
+    return val not in ("0", "false")
+
+
+def _parse_seed() -> Optional[int]:
+    """Parse seed query param. Returns None if not provided."""
+    return request.args.get("seed", type=int)
+
+
 @app.get("/45")
 def elev_45():
     try:
         i1, j1, i2, j2 = _parse_quad()
+        add_noise = _parse_noise()
         world = _get_pipeline()
-        out = _get_upsampled_90(world, i1, j1, i2, j2, scale=2)
+        out = _get_upsampled_90(world, i1, j1, i2, j2, scale=2, add_noise=add_noise)
         elev = out["elev"]
+        elev_smooth = out["elev_smooth"]
         climate = out.get("climate")
         elev_padded = out["elev_padded"]
-        biome = _classify_biome(elev, climate, i1, j1, elev_padded=elev_padded, pixel_size_m=45.0)
+        biome = _classify_biome(elev_smooth, climate, i1, j1, elev_padded=elev_padded, pixel_size_m=45.0)
         if request.args.get("format") == "json":
             return jsonify(_tensor_to_json(elev))
         return _binary_response(elev, biome=biome)
@@ -672,12 +740,14 @@ def elev_45():
 def elev_22():
     try:
         i1, j1, i2, j2 = _parse_quad()
+        add_noise = _parse_noise()
         world = _get_pipeline()
-        out = _get_upsampled_90(world, i1, j1, i2, j2, scale=4)
+        out = _get_upsampled_90(world, i1, j1, i2, j2, scale=4, add_noise=add_noise)
         elev = out["elev"]
+        elev_smooth = out["elev_smooth"]
         climate = out.get("climate")
         elev_padded = out["elev_padded"]
-        biome = _classify_biome(elev, climate, i1, j1, elev_padded=elev_padded, pixel_size_m=22.5)
+        biome = _classify_biome(elev_smooth, climate, i1, j1, elev_padded=elev_padded, pixel_size_m=22.5)
         if request.args.get("format") == "json":
             return jsonify(_tensor_to_json(elev))
         return _binary_response(elev, biome=biome)
@@ -689,12 +759,14 @@ def elev_22():
 def elev_11():
     try:
         i1, j1, i2, j2 = _parse_quad()
+        add_noise = _parse_noise()
         world = _get_pipeline()
-        out = _get_upsampled_90(world, i1, j1, i2, j2, scale=8)
+        out = _get_upsampled_90(world, i1, j1, i2, j2, scale=8, add_noise=add_noise)
         elev = out["elev"]
+        elev_smooth = out["elev_smooth"]
         climate = out.get("climate")
         elev_padded = out["elev_padded"]
-        biome = _classify_biome(elev, climate, i1, j1, elev_padded=elev_padded, pixel_size_m=11.25)
+        biome = _classify_biome(elev_smooth, climate, i1, j1, elev_padded=elev_padded, pixel_size_m=11.25)
         if request.args.get("format") == "json":
             return jsonify(_tensor_to_json(elev))
         return _binary_response(elev, biome=biome)
@@ -703,7 +775,7 @@ def elev_11():
 
 
 @click.command()
-@click.option("--hdf5-file", default="world.h5", help="HDF5 file path (use 'TEMP' for temporary file)")
+@click.option("--hdf5-file", default="TEMP", help="HDF5 file path (use 'TEMP' for temporary file)")
 @click.option("--seed", type=int, default=None, help="Random seed (default: from file or random)")
 @click.option("--device", default=None, help="Device (cuda/cpu, default: auto)")
 @click.option("--drop-water-pct", type=float, default=0.5, help="Drop water percentage")
