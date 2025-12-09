@@ -110,3 +110,7 @@ python -m terrain_diffusion.training.save_model -c checkpoints/diffusion_coarse/
 ```
 
 Move the output folder (Probably `checkpoints/diffusion_coarse/latest_checkpoint/saved_model`) to `checkpoints/models/diffusion_coarse`
+
+### Modifying the coarse model output
+
+You can also do some shenanigans with the coarse model's output directly. For example, I incorporated a `coarse_pooling` argument to apply pooling to the outputs, essentially compressing horizontal space. I found this worked really well for making terrain more intense without breaking realism (too much). It can be made even more extreme with max pooling on the elevation map and min pooling on p5, this becomes more unrealistic though. This is an interesting direction to explore with limited compute. See `WorldPipeline._build_coarse_stage`.
