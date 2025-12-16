@@ -124,6 +124,9 @@ def assign_beauty_scores(dataset_file, visualize):
             residual = torch.from_numpy(obj['residual'][:]).float()
             
             score = calculate_beauty_score(lowfreq, residual)
+            if np.isnan(score):
+                print("Score is NaN for", path)
+                score = 1.0
             pending_scores.append((path, score))
 
             # Visualize if requested and haven't reached limit
