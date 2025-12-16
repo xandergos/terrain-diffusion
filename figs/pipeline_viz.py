@@ -120,7 +120,7 @@ def visualize_pipeline(hdf5_file: str, seed: int, device: str | None = None, **k
         i1, i2 = size * offset, size * (coarse_window + 1 + offset)
         j1, j2 = size * offset, size * (coarse_window + 1 + offset)
         
-        region_dict = world.get_90(i1, j1, i2, j2, with_climate=True)
+        region_dict = world.get(i1, j1, i2, j2, with_climate=True)
         elev = region_dict['elev']
         if hasattr(elev, 'detach'):
             elev = elev.detach().cpu().numpy()

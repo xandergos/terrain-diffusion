@@ -68,7 +68,7 @@ def view_world(hdf5_file: str, seed: int, i0: int, j0: int, i1: int, j1: int,
                 js = j0 + oj * stride
                 w = w_out * stride
 
-                region = world.get_90(is_, js, is_ + h, js + w, with_climate=False)
+                region = world.get(is_, js, is_ + h, js + w, with_climate=False)
                 elev = region['elev'].detach().cpu().numpy()
 
                 if stride > 1:

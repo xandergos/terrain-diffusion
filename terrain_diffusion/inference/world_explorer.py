@@ -51,7 +51,10 @@ def start_explorer(hdf5_file: str, seed: int | None = None, coarse_window: int =
         if device == 'cpu':
             print("Warning: Using CPU (CUDA not available).")
 
-    with WorldPipeline(hdf5_file, device=device, seed=seed, **kwargs) as world:
+    world = WorldPipeline.from_local_models(seed=seed, **kwargs)
+    world.to(device)
+    world.bind(hdf5_file)
+    with world:
         print(f"World seed: {world.seed}")
         ci0, ci1 = coarse_offset_i - coarse_window, coarse_offset_i + coarse_window
         cj0, cj1 = coarse_offset_j - coarse_window, coarse_offset_j + coarse_window
@@ -172,15 +175,15 @@ def start_explorer(hdf5_file: str, seed: int | None = None, coarse_window: int =
             cj = int(np.floor(event.xdata))
             ci = int(np.floor(event.ydata))
 
-            # Map coarse (i, j) to 90 m grid
-            center_i_90 = ci * 256
-            center_j_90 = cj * 256
+            # Map coarse (i, j) to native resolution grid
+            center_i = ci * 256
+            center_j = cj * 256
             half = detail_size // 2
-            i1, i2 = center_i_90 - half, center_i_90 + half
-            j1, j2 = center_j_90 - half, center_j_90 + half
+            i1, i2 = center_i - half, center_i + half
+            j1, j2 = center_j - half, center_j + half
 
-            # Fetch elevation at 90 m resolution
-            region_dict = world.get_90(i1, j1, i2, j2)
+            # Fetch elevation at native resolution
+            region_dict = world.get(i1, j1, i2, j2)
             elev = region_dict['elev']
             biome = None
             climate = region_dict['climate']
@@ -188,12 +191,13 @@ def start_explorer(hdf5_file: str, seed: int | None = None, coarse_window: int =
             #elev[elev == 0.0] = np.nan
 
             # Print coordinates at different resolutions
+            res = world.native_resolution
             print(f"Generated coarse tile: ci={ci}, cj={cj}")
             print(f"  Note x/z coordinates are flipped.")
-            print(f"  90m (i/z, j/x): ({ci * 256}, {cj * 256})")
-            print(f"  45m (i/z, j/x): ({ci * 512}, {cj * 512})")
-            print(f"  22m (i/z, j/x): ({ci * 1024}, {cj * 1024})")
-            print(f"  11m (i/z, j/x): ({ci * 2048}, {cj * 2048})")
+            print(f"  1x/{res:.0f}m (i/z, j/x): ({ci * 256}, {cj * 256})")
+            print(f"  2x/{res/2:.0f}m (i/z, j/x): ({ci * 512}, {cj * 512})")
+            print(f"  4x/{res/4:.1f}m (i/z, j/x): ({ci * 1024}, {cj * 1024})")
+            print(f"  8x/{res/8:.2f}m (i/z, j/x): ({ci * 2048}, {cj * 2048})")
 
             # Store latest data and update right panel based on mode
             nonlocal last_elev, last_biome, last_climate, last_climate0, last_ci, last_cj

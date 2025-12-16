@@ -34,10 +34,10 @@ def _get_pipeline() -> WorldPipeline:
         return _PIPELINE
 
     cfg = _PIPELINE_CONFIG
-    _PIPELINE = WorldPipeline(
-        cfg.get('hdf5_file', 'world.h5'),
-        device=cfg.get('device') or _select_device(),
+    device = cfg.get('device') or _select_device()
+    _PIPELINE = WorldPipeline.from_local_models(
         seed=cfg.get('seed'),
+        native_resolution=cfg.get('native_resolution', 90.0),
         log_mode=cfg.get('log_mode', 'verbose'),
         drop_water_pct=cfg.get('drop_water_pct', 0.5),
         frequency_mult=cfg.get('frequency_mult', [1.0, 1.0, 1.0, 1.0, 1.0]),
@@ -46,6 +46,8 @@ def _get_pipeline() -> WorldPipeline:
         latents_batch_size=cfg.get('latents_batch_size', 4),
         **cfg.get('kwargs', {}),
     )
+    _PIPELINE.to(device)
+    _PIPELINE.bind(cfg.get('hdf5_file', 'world.h5'))
     print(f"World seed: {_PIPELINE.seed}")
     return _PIPELINE
 
@@ -257,41 +259,41 @@ def _compute_climate_vars(temp: torch.Tensor, t_season: torch.Tensor,
         'coldest_month': coldest_month,
     }
 
-def _get_upsampled_90(world: WorldPipeline, i1: int, j1: int, i2: int, j2: int, scale: int, add_noise: bool = True) -> dict:
+def _get_upsampled(world: WorldPipeline, i1: int, j1: int, i2: int, j2: int, scale: int, add_noise: bool = True, pixel_size_m: float = 90.0) -> dict:
     """
-    Get 90m data and upsample by `scale` factor using bilinear interpolation.
+    Get native resolution data and upsample by `scale` factor using bilinear interpolation.
     Coordinates are in the target (upsampled) resolution.
-    Adds 2 pixel padding in 90m space to ensure correct edge interpolation and slope calculation.
+    Adds 2 pixel padding in native space to ensure correct edge interpolation and slope calculation.
     Optionally adds Perlin noise scaled by local relief to restore detail lost in upsampling.
     """
-    # Convert to 90m coordinates
-    i1_90 = i1 // scale
-    j1_90 = j1 // scale
-    i2_90 = -(-i2 // scale)  # ceil division
-    j2_90 = -(-j2 // scale)
+    # Convert to native resolution coordinates
+    i1_native = i1 // scale
+    j1_native = j1 // scale
+    i2_native = -(-i2 // scale)  # ceil division
+    j2_native = -(-j2 // scale)
 
     # Add 2 pixel padding: 1 for bilinear interpolation + 1 for slope calculation
-    i1_90_pad = i1_90 - 2
-    j1_90_pad = j1_90 - 2
-    i2_90_pad = i2_90 + 2
-    j2_90_pad = j2_90 + 2
+    i1_native_pad = i1_native - 2
+    j1_native_pad = j1_native - 2
+    i2_native_pad = i2_native + 2
+    j2_native_pad = j2_native + 2
 
-    out_90 = world.get_90(i1_90_pad, j1_90_pad, i2_90_pad, j2_90_pad, with_climate=True)
-    elev_90 = out_90["elev"]
-    climate_90 = out_90.get("climate")
+    out_native = world.get(i1_native_pad, j1_native_pad, i2_native_pad, j2_native_pad, with_climate=True)
+    elev_native = out_native["elev"]
+    climate_native = out_native.get("climate")
 
     # Upsample elevation
     elev_up = torch.nn.functional.interpolate(
-        elev_90.unsqueeze(0).unsqueeze(0),
+        elev_native.unsqueeze(0).unsqueeze(0),
         scale_factor=scale,
         mode='bilinear',
         align_corners=False
     ).squeeze()
 
-    # Calculate crop indices: 2 pixel padding in 90m = 2*scale pixels in upsampled space
+    # Calculate crop indices: 2 pixel padding in native = 2*scale pixels in upsampled space
     pad_up = 2 * scale
-    offset_i = i1 - i1_90 * scale
-    offset_j = j1 - j1_90 * scale
+    offset_i = i1 - i1_native * scale
+    offset_j = j1 - j1_native * scale
     crop_i1 = pad_up + offset_i
     crop_j1 = pad_up + offset_j
     crop_i2 = crop_i1 + (i2 - i1)
@@ -302,9 +304,9 @@ def _get_upsampled_90(world: WorldPipeline, i1: int, j1: int, i2: int, j2: int, 
     elev_padded = elev_up[crop_i1-1:crop_i2+1, crop_j1-1:crop_j2+1]
 
     climate = None
-    if climate_90 is not None:
+    if climate_native is not None:
         climate_up = torch.nn.functional.interpolate(
-            climate_90.unsqueeze(0),
+            climate_native.unsqueeze(0),
             scale_factor=scale,
             mode='bilinear',
             align_corners=False
@@ -337,8 +339,8 @@ def _get_upsampled_90(world: WorldPipeline, i1: int, j1: int, i2: int, j2: int, 
             # Scale noise amplitude by local gradient (steeper = more noise)
             # Gamma > 1 concentrates noise on very steep slopes
             slope_factor = (gradient / 40.0).clamp(0.0, 1.0).pow(1.5)
-            amp_coarse = 0.0 + 100.0 * slope_factor
-            amp_fine = 0.0 + 70.0 * slope_factor
+            amp_coarse = 0.0 + 100.0 * slope_factor * pixel_size_m / world.native_resolution
+            amp_fine = 0.0 + 70.0 * slope_factor * pixel_size_m / world.native_resolution
             
             # Apply noise only to land (elev >= 0)
             is_land = elev_smooth >= 0.0
@@ -687,25 +689,6 @@ def health():
     return jsonify({"status": "ok"})
 
 
-@app.get("/90")
-def elev_90():
-    try:
-        i1, j1, i2, j2 = _parse_quad()
-        world = _get_pipeline()
-        # Fetch padded region for slope calculation
-        out_pad = world.get_90(i1 - 1, j1 - 1, i2 + 1, j2 + 1, with_climate=False)
-        elev_padded = out_pad["elev"]
-        out = world.get_90(i1, j1, i2, j2, with_climate=True)
-        elev = out["elev"]
-        climate = out.get("climate")
-        biome = _classify_biome(elev, climate, i1, j1, elev_padded=elev_padded, pixel_size_m=90.0)
-        if request.args.get("format") == "json":
-            return jsonify(_tensor_to_json(elev))
-        return _binary_response(elev, biome=biome)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 400
-
-
 def _parse_noise() -> bool:
     """Parse noise query param. Defaults to True. Accepts 0/1/true/false."""
     val = request.args.get("noise", "1").lower()
@@ -717,59 +700,74 @@ def _parse_seed() -> Optional[int]:
     return request.args.get("seed", type=int)
 
 
+def _get_base_pixel_size() -> float:
+    return _PIPELINE_CONFIG.get('native_resolution', 90.0)
+
+
+def _handle_1x():
+    """Handler for 1x (base) resolution."""
+    i1, j1, i2, j2 = _parse_quad()
+    world = _get_pipeline()
+    out_pad = world.get(i1 - 1, j1 - 1, i2 + 1, j2 + 1, with_climate=False)
+    elev_padded = out_pad["elev"]
+    out = world.get(i1, j1, i2, j2, with_climate=True)
+    elev = out["elev"]
+    climate = out.get("climate")
+    biome = _classify_biome(elev, climate, i1, j1, elev_padded=elev_padded, pixel_size_m=_get_base_pixel_size())
+    if request.args.get("format") == "json":
+        return jsonify(_tensor_to_json(elev))
+    return _binary_response(elev, biome=biome)
+
+
+def _handle_upsampled(scale: int):
+    """Handler for upsampled resolutions (2x, 4x, 8x)."""
+    i1, j1, i2, j2 = _parse_quad()
+    add_noise = _parse_noise()
+    world = _get_pipeline()
+    pixel_size_m = _get_base_pixel_size() / scale
+    out = _get_upsampled(world, i1, j1, i2, j2, scale=scale, add_noise=add_noise, pixel_size_m=pixel_size_m)
+    elev = out["elev"]
+    elev_smooth = out["elev_smooth"]
+    climate = out.get("climate")
+    elev_padded = out["elev_padded"]
+    biome = _classify_biome(elev_smooth, climate, i1, j1, elev_padded=elev_padded, pixel_size_m=pixel_size_m)
+    if request.args.get("format") == "json":
+        return jsonify(_tensor_to_json(elev))
+    return _binary_response(elev, biome=biome)
+
+
+@app.get("/1x")
+@app.get("/90")
+def elev_1x():
+    try:
+        return _handle_1x()
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.get("/2x")
 @app.get("/45")
-def elev_45():
+def elev_2x():
     try:
-        i1, j1, i2, j2 = _parse_quad()
-        add_noise = _parse_noise()
-        world = _get_pipeline()
-        out = _get_upsampled_90(world, i1, j1, i2, j2, scale=2, add_noise=add_noise)
-        elev = out["elev"]
-        elev_smooth = out["elev_smooth"]
-        climate = out.get("climate")
-        elev_padded = out["elev_padded"]
-        biome = _classify_biome(elev_smooth, climate, i1, j1, elev_padded=elev_padded, pixel_size_m=45.0)
-        if request.args.get("format") == "json":
-            return jsonify(_tensor_to_json(elev))
-        return _binary_response(elev, biome=biome)
+        return _handle_upsampled(scale=2)
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
 
+@app.get("/4x")
 @app.get("/22")
-def elev_22():
+def elev_4x():
     try:
-        i1, j1, i2, j2 = _parse_quad()
-        add_noise = _parse_noise()
-        world = _get_pipeline()
-        out = _get_upsampled_90(world, i1, j1, i2, j2, scale=4, add_noise=add_noise)
-        elev = out["elev"]
-        elev_smooth = out["elev_smooth"]
-        climate = out.get("climate")
-        elev_padded = out["elev_padded"]
-        biome = _classify_biome(elev_smooth, climate, i1, j1, elev_padded=elev_padded, pixel_size_m=22.5)
-        if request.args.get("format") == "json":
-            return jsonify(_tensor_to_json(elev))
-        return _binary_response(elev, biome=biome)
+        return _handle_upsampled(scale=4)
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
 
+@app.get("/8x")
 @app.get("/11")
-def elev_11():
+def elev_8x():
     try:
-        i1, j1, i2, j2 = _parse_quad()
-        add_noise = _parse_noise()
-        world = _get_pipeline()
-        out = _get_upsampled_90(world, i1, j1, i2, j2, scale=8, add_noise=add_noise)
-        elev = out["elev"]
-        elev_smooth = out["elev_smooth"]
-        climate = out.get("climate")
-        elev_padded = out["elev_padded"]
-        biome = _classify_biome(elev_smooth, climate, i1, j1, elev_padded=elev_padded, pixel_size_m=11.25)
-        if request.args.get("format") == "json":
-            return jsonify(_tensor_to_json(elev))
-        return _binary_response(elev, biome=biome)
+        return _handle_upsampled(scale=8)
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
@@ -778,6 +776,7 @@ def elev_11():
 @click.option("--hdf5-file", default="TEMP", help="HDF5 file path (use 'TEMP' for temporary file)")
 @click.option("--seed", type=int, default=None, help="Random seed (default: from file or random)")
 @click.option("--device", default=None, help="Device (cuda/cpu, default: auto)")
+@click.option("--native-resolution", type=float, default=90.0, help="Native resolution in meters (default: 90)")
 @click.option("--drop-water-pct", type=float, default=0.5, help="Drop water percentage")
 @click.option("--frequency-mult", default="[1.0, 1.0, 1.0, 1.0, 1.0]", help="Frequency multipliers (JSON)")
 @click.option("--cond-snr", default="[0.5, 0.5, 0.5, 0.5, 0.5]", help="Conditioning SNR (JSON)")
@@ -787,7 +786,7 @@ def elev_11():
 @click.option("--host", default="0.0.0.0", help="Server host")
 @click.option("--port", type=int, default=int(os.getenv("PORT", "8000")), help="Server port")
 @click.option("--kwarg", "extra_kwargs", multiple=True, help="Additional key=value kwargs (e.g. --kwarg coarse_pooling=2)")
-def main(hdf5_file, seed, device, drop_water_pct, frequency_mult, cond_snr, histogram_raw, latents_batch_size, log_mode, host, port, extra_kwargs):
+def main(hdf5_file, seed, device, native_resolution, drop_water_pct, frequency_mult, cond_snr, histogram_raw, latents_batch_size, log_mode, host, port, extra_kwargs):
     """Minecraft terrain API server"""
     global _PIPELINE_CONFIG
     hdf5_file = resolve_hdf5_path(hdf5_file)
@@ -795,6 +794,7 @@ def main(hdf5_file, seed, device, drop_water_pct, frequency_mult, cond_snr, hist
         'hdf5_file': hdf5_file,
         'seed': seed,
         'device': device,
+        'native_resolution': native_resolution,
         'drop_water_pct': drop_water_pct,
         'frequency_mult': json.loads(frequency_mult),
         'cond_snr': json.loads(cond_snr),

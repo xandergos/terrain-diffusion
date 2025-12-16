@@ -1,4 +1,3 @@
-import random
 import numpy as np
 import torch
 from torch.utils.data import Dataset
@@ -93,7 +92,7 @@ class H5AutoencoderDataset(Dataset):
         running_m2 = None
 
         for _ in tqdm(range(num_samples), desc="Calculating stats"):
-            sample = self.__getitem__(random.randrange(len(self)))
+            sample = self.__getitem__(torch.randint(len(self), (1,), generator=self.rng).item())
             x = sample['image']
             if not torch.is_tensor(x):
                 x = torch.as_tensor(x)

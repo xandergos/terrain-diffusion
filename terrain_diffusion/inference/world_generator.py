@@ -12,7 +12,10 @@ def generate_world(hdf5_file: str, seed: int | None = None, coarse_window: int =
         if device == 'cpu':
             print("Warning: Using CPU (CUDA not available).")
 
-    with WorldPipeline(hdf5_file, device=device, seed=seed, **kwargs) as world:
+    world = WorldPipeline.from_local_models(seed=seed, **kwargs)
+    world.to(device)
+    world.bind(hdf5_file)
+    with world:
         print(f"World seed: {world.seed}")
         ci0, ci1 = -coarse_window, coarse_window
         cj0, cj1 = -coarse_window, coarse_window
@@ -21,7 +24,7 @@ def generate_world(hdf5_file: str, seed: int | None = None, coarse_window: int =
         pbar = tqdm(total=((ci1-ci0)//8)*((cj1-cj0)//8), desc="Generating world")
         for i in range(ci0, ci1, tile_size//256):
             for j in range(cj0, cj1, tile_size//256):
-                world.residual_90[:, i*256:i*256+tile_size, j*256:j*256+tile_size]
+                world.residual[:, i*256:i*256+tile_size, j*256:j*256+tile_size]
                 pbar.update(1)
 
 

@@ -33,10 +33,10 @@ def _get_pipeline() -> WorldPipeline:
         return _PIPELINE
 
     cfg = _PIPELINE_CONFIG
-    _PIPELINE = WorldPipeline(
-        cfg.get('hdf5_file', 'world.h5'),
-        device=cfg.get('device') or _select_device(),
+    device = cfg.get('device') or _select_device()
+    _PIPELINE = WorldPipeline.from_local_models(
         seed=cfg.get('seed'),
+        native_resolution=cfg.get('native_resolution', 90.0),
         log_mode=cfg.get('log_mode', 'verbose'),
         drop_water_pct=cfg.get('drop_water_pct', 0.5),
         frequency_mult=cfg.get('frequency_mult', [1.0, 1.0, 1.0, 1.0, 1.0]),
@@ -44,6 +44,8 @@ def _get_pipeline() -> WorldPipeline:
         histogram_raw=cfg.get('histogram_raw', [0.0, 0.0, 0.0, 1.0, 1.5]),
         latents_batch_size=cfg.get('latents_batch_size', 4),
     )
+    _PIPELINE.to(device)
+    _PIPELINE.bind(cfg.get('hdf5_file', 'world.h5'))
     print(f"World seed: {_PIPELINE.seed}")
     return _PIPELINE
 
@@ -101,30 +103,30 @@ def _get_terrain(world: WorldPipeline, i1: int, j1: int, i2: int, j2: int, scale
     Args:
         world: WorldPipeline instance
         i1, j1, i2, j2: Coordinates in target (scaled) resolution
-        scale: Scale factor relative to 90m (1.0 = 90m, 2.0 = 45m, etc.)
+        scale: Scale factor relative to native resolution (1 = native, 2 = 2x, etc.)
     
     Returns dict with 'elev' (H, W) and 'climate' (4, H, W) tensors.
     """
     if scale == 1:
-        # Native 90m - just fetch directly
-        out = world.get_90(i1, j1, i2, j2, with_climate=True)
+        # Native - just fetch directly
+        out = world.get(i1, j1, i2, j2, with_climate=True)
         return {"elev": out["elev"], "climate": out.get("climate")}
 
-    # Convert target coordinates to 90m space
-    i1_90 = i1 // scale
-    j1_90 = j1 // scale
-    i2_90 = -(-i2 // scale)  # ceil division
-    j2_90 = -(-j2 // scale)
+    # Convert target coordinates to native resolution space
+    i1_native = i1 // scale
+    j1_native = j1 // scale
+    i2_native = -(-i2 // scale)  # ceil division
+    j2_native = -(-j2 // scale)
 
     # Add 1 pixel padding for bilinear interpolation edge handling
-    i1_90_pad = i1_90 - 1
-    j1_90_pad = j1_90 - 1
-    i2_90_pad = i2_90 + 1
-    j2_90_pad = j2_90 + 1
+    i1_native_pad = i1_native - 1
+    j1_native_pad = j1_native - 1
+    i2_native_pad = i2_native + 1
+    j2_native_pad = j2_native + 1
 
-    out_90 = world.get_90(i1_90_pad, j1_90_pad, i2_90_pad, j2_90_pad, with_climate=True)
-    elev_90 = out_90["elev"]
-    climate_90 = out_90.get("climate")
+    out_native = world.get(i1_native_pad, j1_native_pad, i2_native_pad, j2_native_pad, with_climate=True)
+    elev_native = out_native["elev"]
+    climate_native = out_native.get("climate")
 
     # Compute output size
     out_h = i2 - i1
@@ -132,25 +134,25 @@ def _get_terrain(world: WorldPipeline, i1: int, j1: int, i2: int, j2: int, scale
 
     # Upsample elevation using bilinear interpolation
     elev_up = torch.nn.functional.interpolate(
-        elev_90.unsqueeze(0).unsqueeze(0),
+        elev_native.unsqueeze(0).unsqueeze(0),
         scale_factor=scale,
         mode='bilinear',
         align_corners=False
     ).squeeze()
 
     # Calculate crop indices
-    pad_up = scale  # 1 pixel padding in 90m = scale pixels in upsampled space
-    offset_i = i1 - i1_90 * scale
-    offset_j = j1 - j1_90 * scale
+    pad_up = scale  # 1 pixel padding in native = scale pixels in upsampled space
+    offset_i = i1 - i1_native * scale
+    offset_j = j1 - j1_native * scale
     crop_i1 = pad_up + offset_i
     crop_j1 = pad_up + offset_j
 
     elev = elev_up[crop_i1:crop_i1 + out_h, crop_j1:crop_j1 + out_w]
 
     climate = None
-    if climate_90 is not None:
+    if climate_native is not None:
         climate_up = torch.nn.functional.interpolate(
-            climate_90.unsqueeze(0),
+            climate_native.unsqueeze(0),
             scale_factor=scale,
             mode='bilinear',
             align_corners=False
@@ -172,8 +174,8 @@ def terrain():
     
     Query params:
         i1, j1, i2, j2: Bounding box in target resolution coordinates
-        scale: Integer scale factor relative to 90m (default: 1)
-               1 = 90m, 2 = 45m, 4 = 22.5m, 8 = 11.25m, etc.
+        scale: Integer scale factor relative to native resolution (default: 1)
+               1 = native, 2 = 2x, 4 = 4x, 8 = 8x, etc.
     
     Returns binary data:
         - elevation: int16-le (H*W*2 bytes), meters
@@ -197,6 +199,7 @@ def terrain():
 @click.option("--hdf5-file", default="world.h5", help="HDF5 file path (use 'TEMP' for temporary file)")
 @click.option("--seed", type=int, default=None, help="Random seed (default: from file or random)")
 @click.option("--device", default=None, help="Device (cuda/cpu, default: auto)")
+@click.option("--native-resolution", type=float, default=90.0, help="Native resolution in meters (default: 90)")
 @click.option("--drop-water-pct", type=float, default=0.5, help="Drop water percentage")
 @click.option("--frequency-mult", default="[1.0, 1.0, 1.0, 1.0, 1.0]", help="Frequency multipliers (JSON)")
 @click.option("--cond-snr", default="[0.5, 0.5, 0.5, 0.5, 0.5]", help="Conditioning SNR (JSON)")
@@ -206,7 +209,7 @@ def terrain():
 @click.option("--host", default="0.0.0.0", help="Server host")
 @click.option("--port", type=int, default=int(os.getenv("PORT", "8000")), help="Server port")
 @click.option("--kwarg", "extra_kwargs", multiple=True, help="Additional key=value kwargs (e.g. --kwarg coarse_pooling=2)")
-def main(hdf5_file, seed, device, drop_water_pct, frequency_mult, cond_snr, histogram_raw, latents_batch_size, log_mode, host, port, extra_kwargs):
+def main(hdf5_file, seed, device, native_resolution, drop_water_pct, frequency_mult, cond_snr, histogram_raw, latents_batch_size, log_mode, host, port, extra_kwargs):
     """Terrain API server"""
     global _PIPELINE_CONFIG
     hdf5_file = resolve_hdf5_path(hdf5_file)
@@ -214,6 +217,7 @@ def main(hdf5_file, seed, device, drop_water_pct, frequency_mult, cond_snr, hist
         'hdf5_file': hdf5_file,
         'seed': seed,
         'device': device,
+        'native_resolution': native_resolution,
         'drop_water_pct': drop_water_pct,
         'frequency_mult': json.loads(frequency_mult),
         'cond_snr': json.loads(cond_snr),
