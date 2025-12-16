@@ -171,6 +171,7 @@ def process_single_file_base(
     num_chunks=1,
     climate_folder=None,
     edge_margin=0,
+    data_source='merit',
 ):
     """
     Process a single elevation file and return the preprocessed chunks.
@@ -197,11 +198,15 @@ def process_single_file_base(
     
     highres_margin = edge_margin * highres_size // lowres_size
     
-    highres_path = os.path.join(highres_elevation_folder, 'dem_' + file)
+    prefix = 'dem_' if data_source == 'merit' else 'copernicus_'
+    highres_path = os.path.join(highres_elevation_folder, prefix + file)
     if os.path.exists(highres_path):
         highres_dem, new_bounds = read_raster(highres_path, include_bounds=True)
         bounds = new_bounds
-        highres_dem = np.where(highres_dem < -1000, np.nan, highres_dem)
+        if data_source == 'merit':
+            highres_dem = np.where(highres_dem < -1000, np.nan, highres_dem)
+        elif data_source == 'copernicus':
+            highres_dem = np.where(highres_dem == 0.0, np.nan, highres_dem)
         highres_dem = highres_dem.astype(np.float32)
         if not np.isnan(highres_dem).all():
             highres_dem = skimage.transform.resize(highres_dem, (highres_size, highres_size), order=1, preserve_range=True)
@@ -307,7 +312,8 @@ class ElevationDataset(torch.utils.data.Dataset):
                  num_chunks=1,
                  climate_folder=None,
                  skip_chunk_ids=None,
-                 edge_margin=0):
+                 edge_margin=0,
+                 data_source='merit'):
         self.grid_cells = create_equal_area_grid((highres_size*resolution, highres_size*resolution))
         self.chunk_ids = [str(i) for i in range(len(self.grid_cells))]
         
@@ -322,6 +328,7 @@ class ElevationDataset(torch.utils.data.Dataset):
             skip_chunk_ids = set(str(x) for x in skip_chunk_ids)
             self.chunk_ids = [f for f in self.chunk_ids if str(f) not in skip_chunk_ids]
         self.edge_margin = edge_margin
+        self.data_source = data_source
         
     def __len__(self):
         return len(self.chunk_ids)
@@ -337,4 +344,5 @@ class ElevationDataset(torch.utils.data.Dataset):
                                         self.lowres_sigma,
                                         self.num_chunks, 
                                         self.climate_folder,
-                                        self.edge_margin)
+                                        self.edge_margin,
+                                        self.data_source)
