@@ -44,13 +44,13 @@ BIOME_LEGEND = {
 }
 
 
-def start_explorer(hdf5_file: str, seed: int | None = None, coarse_window: int = 64, coarse_offset_i: int = 0, coarse_offset_j: int = 0, detail_size: int = 1024, device: str | None = None, **kwargs) -> None:
+def start_explorer(model_path: str, hdf5_file: str, seed: int | None = None, coarse_window: int = 64, coarse_offset_i: int = 0, coarse_offset_j: int = 0, detail_size: int = 1024, device: str | None = None, **kwargs) -> None:
     if device is None:
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         if device == 'cpu':
             print("Warning: Using CPU (CUDA not available).")
 
-    world = WorldPipeline.from_local_models(seed=seed, **kwargs)
+    world = WorldPipeline.from_pretrained(model_path, seed=seed, **kwargs)
     world.to(device)
     world.bind(hdf5_file)
     with world:
@@ -268,6 +268,7 @@ def start_explorer(hdf5_file: str, seed: int | None = None, coarse_window: int =
 
 
 @click.command()
+@click.argument("model_path", default="xandergos/terrain-diffusion-90m")
 @click.option("--hdf5-file", default="TEMP", help="HDF5 file path (use 'TEMP' for temporary file)")
 @click.option("--seed", type=int, default=None, help="Random seed (default: random)")
 @click.option("--device", default=None, help="Device (cuda/cpu, default: auto)")
@@ -278,10 +279,11 @@ def start_explorer(hdf5_file: str, seed: int | None = None, coarse_window: int =
 @click.option("--coarse-offset-j", type=int, default=0, help="Coarse window offset in j direction")
 @click.option("--detail-size", type=int, default=1024, help="Full resolution detail window size")
 @click.option("--kwarg", "extra_kwargs", multiple=True, help="Additional key=value kwargs (e.g. --kwarg native_resolution=30)")
-def main(hdf5_file, seed, device, batch_size, log_mode, coarse_window, coarse_offset_i, coarse_offset_j, detail_size, extra_kwargs):
+def main(model_path, hdf5_file, seed, device, batch_size, log_mode, coarse_window, coarse_offset_i, coarse_offset_j, detail_size, extra_kwargs):
     """Explore a generated world interactively"""
     hdf5_file = resolve_hdf5_path(hdf5_file)
     start_explorer(
+        model_path,
         hdf5_file,
         seed=seed,
         coarse_window=coarse_window,

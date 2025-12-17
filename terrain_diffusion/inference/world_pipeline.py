@@ -1,5 +1,5 @@
 import random
-from tempfile import NamedTemporaryFile
+from tempfile import NamedTemporaryFile, TemporaryDirectory
 import time
 import json
 import os
@@ -8,7 +8,6 @@ import atexit
 import h5py
 import torch
 from diffusers.configuration_utils import ConfigMixin, register_to_config
-from diffusers.models.modeling_utils import ModelMixin
 from infinite_tensor import HDF5TileStore, TensorWindow, MemoryTileStore
 from terrain_diffusion.inference.synthetic_map import make_synthetic_map_factory
 from terrain_diffusion.data.laplacian_encoder import laplacian_decode, laplacian_denoise
@@ -295,13 +294,17 @@ def normalize_tensor(tensor, dim=0):
     return tensor[tuple(idx_num)] / tensor[tuple(idx_den)]
 
 
-class WorldPipeline(ModelMixin, ConfigMixin):
+class WorldPipeline(ConfigMixin):
     """Multi-scale terrain generation pipeline."""
+    
+    config_name = "config.json"
     
     # Subfolders for each model when saving/loading
     COARSE_MODEL_FOLDER = "coarse_model"
     BASE_MODEL_FOLDER = "base_model"
     DECODER_MODEL_FOLDER = "decoder_model"
+    
+    ignore_for_config = ["seed", "latents_batch_size", "log_mode"]
     
     @register_to_config
     def __init__(
@@ -309,7 +312,18 @@ class WorldPipeline(ModelMixin, ConfigMixin):
         seed: int | None = None,
         latents_batch_size: int = 1,
         native_resolution: float = 90.0,
-        **kwargs,
+        *,
+        log_mode: str = 'info',
+        latent_compression: int = 8,
+        frequency_mult: list = None,
+        drop_water_pct: float = 0.5,
+        cond_snr: list = None,
+        coarse_pooling: int = 1,
+        elev_coarse_pool_mode: str = 'avg',
+        p5_coarse_pool_mode: str = 'avg',
+        histogram_raw: list = None,
+        residual_mean: float = 0.0,
+        residual_std: float = 1.1678,
     ):
         super().__init__()
         
@@ -317,9 +331,21 @@ class WorldPipeline(ModelMixin, ConfigMixin):
         self.seed = seed if seed is not None else random.randint(0, 2**31-1)
         self.latents_batch_size = latents_batch_size
         self.native_resolution = native_resolution
-        self.latent_compression = kwargs.get('latent_compression', 8)
-        self.log_mode = kwargs.get('log_mode', 'info')
-        self.kwargs = kwargs
+        self.latent_compression = latent_compression
+        self.log_mode = log_mode
+        self.kwargs = {
+            'latent_compression': latent_compression,
+            'log_mode': log_mode,
+            'frequency_mult': frequency_mult if frequency_mult is not None else [1.5, 3, 3, 3, 3],
+            'drop_water_pct': drop_water_pct,
+            'cond_snr': cond_snr if cond_snr is not None else [0.3, 0.1, 1.0, 0.1, 1.0],
+            'coarse_pooling': coarse_pooling,
+            'elev_coarse_pool_mode': elev_coarse_pool_mode,
+            'p5_coarse_pool_mode': p5_coarse_pool_mode,
+            'histogram_raw': histogram_raw if histogram_raw is not None else [0.0, 0.0, 0.0, 0.0, 0.0],
+            'residual_mean': residual_mean,
+            'residual_std': residual_std,
+        }
         
         # Models as submodules - set via from_local_models() or from_pretrained()
         self.coarse_model: EDMUnet2D | None = None
@@ -372,8 +398,8 @@ class WorldPipeline(ModelMixin, ConfigMixin):
         """
         os.makedirs(save_directory, exist_ok=True)
         
-        # Save pipeline config
-        super().save_pretrained(save_directory, **kwargs)
+        # Save pipeline config only (no weights for the pipeline itself)
+        self.save_config(save_directory)
         
         # Save each submodel in its own subfolder
         if self.coarse_model is not None:
@@ -383,35 +409,69 @@ class WorldPipeline(ModelMixin, ConfigMixin):
         if self.decoder_model is not None:
             self.decoder_model.save_pretrained(os.path.join(save_directory, self.DECODER_MODEL_FOLDER), **kwargs)
     
+    def push_to_hub(self, repo_id: str, commit_message: str = "Initial commit", private: bool = False, token: str = None, **kwargs):
+        """Push pipeline and all submodels to HuggingFace Hub.
+        
+        Args:
+            repo_id: HF Hub repo ID (e.g. "username/model-name").
+            commit_message: Commit message for the upload.
+            private: Whether to create a private repo.
+            token: HF token for authentication (uses cached token if None).
+            **kwargs: Additional arguments passed to HfApi.upload_folder.
+            
+        Returns:
+            URL of the uploaded model on HuggingFace Hub.
+        """
+        from huggingface_hub import HfApi
+        api = HfApi(token=token)
+        api.create_repo(repo_id, exist_ok=True, private=private)
+        with TemporaryDirectory() as tmpdir:
+            self.save_pretrained(tmpdir)
+            api.upload_folder(repo_id=repo_id, folder_path=tmpdir, commit_message=commit_message, **kwargs)
+        return f"https://huggingface.co/{repo_id}"
+    
     @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path: str, **kwargs) -> "WorldPipeline":
+    def from_pretrained(cls, pretrained_model_name_or_path: str, token: str = None, **kwargs) -> "WorldPipeline":
         """Load pipeline and all submodels from a directory or HuggingFace Hub.
         
         Args:
             pretrained_model_name_or_path: Directory or HF Hub model ID.
-            **kwargs: Additional arguments.
+            token: HF token for private repos (uses cached token if None).
+            **kwargs: Additional arguments passed to __init__.
         """
-        # Load pipeline config and create instance
-        pipeline = super().from_pretrained(pretrained_model_name_or_path, **kwargs)
+        # Load pipeline config only (no weights for the pipeline itself)
+        config = cls.load_config(pretrained_model_name_or_path, token=token)
+        pipeline = cls(**config, **kwargs)
         
-        # Load each submodel from its subfolder
-        coarse_path = os.path.join(pretrained_model_name_or_path, cls.COARSE_MODEL_FOLDER)
-        base_path = os.path.join(pretrained_model_name_or_path, cls.BASE_MODEL_FOLDER)
-        decoder_path = os.path.join(pretrained_model_name_or_path, cls.DECODER_MODEL_FOLDER)
-        
-        if os.path.exists(coarse_path):
-            pipeline.coarse_model = EDMUnet2D.from_pretrained(coarse_path)
-        if os.path.exists(base_path):
-            pipeline.base_model = EDMUnet2D.from_pretrained(base_path)
-        if os.path.exists(decoder_path):
-            pipeline.decoder_model = EDMUnet2D.from_pretrained(decoder_path)
+        pipeline.coarse_model = EDMUnet2D.from_pretrained(
+            pretrained_model_name_or_path, subfolder=cls.COARSE_MODEL_FOLDER, token=token
+        )
+        pipeline.base_model = EDMUnet2D.from_pretrained(
+            pretrained_model_name_or_path, subfolder=cls.BASE_MODEL_FOLDER, token=token
+        )
+        pipeline.decoder_model = EDMUnet2D.from_pretrained(
+            pretrained_model_name_or_path, subfolder=cls.DECODER_MODEL_FOLDER, token=token
+        )
         
         return pipeline
     
     @property
     def device(self):
-        """Infer device from model parameters."""
-        return next(self.parameters()).device
+        """Infer device from submodel parameters."""
+        for model in (self.coarse_model, self.base_model, self.decoder_model):
+            if model is not None:
+                return next(model.parameters()).device
+        return torch.device('cpu')
+    
+    def to(self, device):
+        """Move all submodels to the specified device."""
+        if self.coarse_model is not None:
+            self.coarse_model = self.coarse_model.to(device)
+        if self.base_model is not None:
+            self.base_model = self.base_model.to(device)
+        if self.decoder_model is not None:
+            self.decoder_model = self.decoder_model.to(device)
+        return self
     
     def bind(
         self,
@@ -494,8 +554,8 @@ class WorldPipeline(ModelMixin, ConfigMixin):
         """Initialize conditioning (synthetic maps, etc)."""
         self.synthetic_map_factory = make_synthetic_map_factory(
             seed=self.seed, 
-            frequency_mult=self.kwargs.get('frequency_mult', [1.5, 3, 3, 3, 3]), 
-            drop_water_pct=self.kwargs.get('drop_water_pct', 0.5)
+            frequency_mult=self.kwargs['frequency_mult'], 
+            drop_water_pct=self.kwargs['drop_water_pct']
         )
     
     def _build_hierarchy(self):
@@ -577,9 +637,9 @@ class WorldPipeline(ModelMixin, ConfigMixin):
         """Build and register the coarse stage."""
         TILE_SIZE = 64
         TILE_STRIDE = TILE_SIZE - 16
-        COND_SNR = torch.tensor(self.kwargs.get('cond_snr', [0.3, 0.1, 1.0, 0.1, 1.0]))
+        COND_SNR = torch.tensor(self.kwargs['cond_snr'])
         
-        coarse_pool = self.kwargs.get('coarse_pooling', 1)
+        coarse_pool = self.kwargs['coarse_pooling']
         assert TILE_SIZE % coarse_pool == 0, f"coarse_pooling {coarse_pool} must divide TILE_SIZE {TILE_SIZE}"
         assert TILE_STRIDE % coarse_pool == 0, f"coarse_pooling {coarse_pool} must divide TILE_STRIDE {TILE_STRIDE}"
         
@@ -623,8 +683,8 @@ class WorldPipeline(ModelMixin, ConfigMixin):
         if pool_size == 1:
             return cond_img
         n = pool_size
-        ch0_pooled = self._pool_channel(cond_img[0:1], n, self.kwargs.get('elev_coarse_pool_mode', 'avg'))
-        ch1_pooled = self._pool_channel(cond_img[1:2], n, self.kwargs.get('p5_coarse_pool_mode', 'avg'))
+        ch0_pooled = self._pool_channel(cond_img[0:1], n, self.kwargs['elev_coarse_pool_mode'])
+        ch1_pooled = self._pool_channel(cond_img[1:2], n, self.kwargs['p5_coarse_pool_mode'])
         ch_rest_pooled = torch.nn.functional.avg_pool2d(cond_img[2:].unsqueeze(0), kernel_size=n, stride=n).squeeze(0)
         return torch.cat([ch0_pooled, ch1_pooled, ch_rest_pooled], dim=0)
 
@@ -727,7 +787,7 @@ class WorldPipeline(ModelMixin, ConfigMixin):
         TILE_STRIDE = TILE_SIZE // 2
         COND_INPUT_MEAN = torch.tensor([14.99, 11.65, 15.87, 619.26, 833.12, 69.40, 0.66])
         COND_INPUT_STD = torch.tensor([21.72, 21.78, 10.40, 452.29, 738.09, 34.59, 0.47])
-        HISTOGRAM_RAW = torch.tensor([self.kwargs.get('histogram_raw', [0.0, 0.0, 0.0, 0.0, 0.0])])
+        HISTOGRAM_RAW = torch.tensor([self.kwargs['histogram_raw']])
         
         scheduler = EDMDPMSolverMultistepScheduler(sigma_min=0.002, sigma_max=80, sigma_data=0.5)
         weight_window = linear_weight_window(TILE_SIZE, 'cpu', torch.float32)
@@ -837,8 +897,8 @@ class WorldPipeline(ModelMixin, ConfigMixin):
         """Compute elevation from residual map."""
         LOWFREQ_MEAN = -31.4
         LOWFREQ_STD = 38.6
-        RESIDUAL_MEAN = self.kwargs.get('residual_mean', 0.0)
-        RESIDUAL_STD = self.kwargs.get('residual_std', 1.1678)
+        RESIDUAL_MEAN = self.kwargs['residual_mean']
+        RESIDUAL_STD = self.kwargs['residual_std']
         
         sigma = 5
         kernel_size = (int(sigma * 2) // 2) * 2 + 1

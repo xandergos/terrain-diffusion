@@ -34,7 +34,8 @@ def _get_pipeline() -> WorldPipeline:
 
     cfg = _PIPELINE_CONFIG
     device = cfg.get('device') or _select_device()
-    _PIPELINE = WorldPipeline.from_local_models(
+    _PIPELINE = WorldPipeline.from_pretrained(
+        cfg.get('model_path', 'xandergos/terrain-diffusion-90m'),
         seed=cfg.get('seed'),
         latents_batch_size=cfg.get('latents_batch_size', 4),
         log_mode=cfg.get('log_mode', 'verbose'),
@@ -786,6 +787,7 @@ def elev_8x():
 
 
 @click.command()
+@click.argument("model_path", default="xandergos/terrain-diffusion-90m")
 @click.option("--hdf5-file", default="TEMP", help="HDF5 file path (use 'TEMP' for temporary file)")
 @click.option("--seed", type=int, default=None, help="Random seed (default: from file or random)")
 @click.option("--device", default=None, help="Device (cuda/cpu, default: auto)")
@@ -794,11 +796,12 @@ def elev_8x():
 @click.option("--host", default="0.0.0.0", help="Server host")
 @click.option("--port", type=int, default=int(os.getenv("PORT", "8000")), help="Server port")
 @click.option("--kwarg", "extra_kwargs", multiple=True, help="Additional key=value kwargs (e.g. --kwarg native_resolution=30)")
-def main(hdf5_file, seed, device, batch_size, log_mode, host, port, extra_kwargs):
+def main(model_path, hdf5_file, seed, device, batch_size, log_mode, host, port, extra_kwargs):
     """Minecraft terrain API server"""
     global _PIPELINE_CONFIG
     hdf5_file = resolve_hdf5_path(hdf5_file)
     _PIPELINE_CONFIG = {
+        'model_path': model_path,
         'hdf5_file': hdf5_file,
         'seed': seed,
         'device': device,
