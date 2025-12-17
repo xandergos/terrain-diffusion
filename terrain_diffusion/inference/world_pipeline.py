@@ -440,8 +440,8 @@ class WorldPipeline(ConfigMixin):
             **kwargs: Additional arguments passed to __init__.
         """
         # Load pipeline config only (no weights for the pipeline itself)
-        config = cls.load_config(pretrained_model_name_or_path, token=token)
-        pipeline = cls(**config, **kwargs)
+        config = {**cls.load_config(pretrained_model_name_or_path, token=token), **kwargs}
+        pipeline = cls(**config)
         
         pipeline.coarse_model = EDMUnet2D.from_pretrained(
             pretrained_model_name_or_path, subfolder=cls.COARSE_MODEL_FOLDER, token=token
