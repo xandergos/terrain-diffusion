@@ -1,4 +1,3 @@
-import json
 from tempfile import NamedTemporaryFile
 import click
 import numpy as np
@@ -271,19 +270,15 @@ def start_explorer(hdf5_file: str, seed: int | None = None, coarse_window: int =
 @click.command()
 @click.option("--hdf5-file", default="TEMP", help="HDF5 file path (use 'TEMP' for temporary file)")
 @click.option("--seed", type=int, default=None, help="Random seed (default: random)")
+@click.option("--device", default=None, help="Device (cuda/cpu, default: auto)")
+@click.option("--batch-size", type=int, default=4, help="Batch size for latent generation")
+@click.option("--log-mode", type=click.Choice(["info", "verbose"]), default="verbose", help="Logging mode")
 @click.option("--coarse-window", type=int, default=50, help="Coarse window size")
 @click.option("--coarse-offset-i", type=int, default=0, help="Coarse window offset in i direction")
 @click.option("--coarse-offset-j", type=int, default=0, help="Coarse window offset in j direction")
 @click.option("--detail-size", type=int, default=1024, help="Full resolution detail window size")
-@click.option("--device", default=None, help="Device (cuda/cpu, default: auto)")
-@click.option("--drop-water-pct", type=float, default=0.5, help="Drop water percentage")
-@click.option("--frequency-mult", default="[1.0, 1.0, 1.0, 1.0, 1.0]", help="Frequency multipliers (JSON)")
-@click.option("--cond-snr", default="[0.5, 0.5, 0.5, 0.5, 0.5]", help="Conditioning SNR (JSON)")
-@click.option("--histogram-raw", default="[0.0, 0.0, 0.0, 1.0, 1.5]", help="Histogram raw values (JSON)")
-@click.option("--latents-batch-size", type=int, default=4, help="Batch size for latent generation")
-@click.option("--log-mode", type=click.Choice(["info", "verbose"]), default="verbose", help="Logging mode")
-@click.option("--kwarg", "extra_kwargs", multiple=True, help="Additional key=value kwargs (e.g. --kwarg coarse_pooling=2)")
-def main(hdf5_file, seed, coarse_window, coarse_offset_i, coarse_offset_j, detail_size, device, drop_water_pct, frequency_mult, cond_snr, histogram_raw, latents_batch_size, log_mode, extra_kwargs):
+@click.option("--kwarg", "extra_kwargs", multiple=True, help="Additional key=value kwargs (e.g. --kwarg native_resolution=30)")
+def main(hdf5_file, seed, device, batch_size, log_mode, coarse_window, coarse_offset_i, coarse_offset_j, detail_size, extra_kwargs):
     """Explore a generated world interactively"""
     hdf5_file = resolve_hdf5_path(hdf5_file)
     start_explorer(
@@ -294,11 +289,7 @@ def main(hdf5_file, seed, coarse_window, coarse_offset_i, coarse_offset_j, detai
         coarse_offset_j=coarse_offset_j,
         detail_size=detail_size,
         device=device,
-        drop_water_pct=drop_water_pct,
-        frequency_mult=json.loads(frequency_mult),
-        cond_snr=json.loads(cond_snr),
-        histogram_raw=json.loads(histogram_raw),
-        latents_batch_size=latents_batch_size,
+        latents_batch_size=batch_size,
         log_mode=log_mode,
         **parse_kwargs(extra_kwargs),
     )

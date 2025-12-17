@@ -1,4 +1,3 @@
-import json
 import os
 from typing import Optional, Tuple
 
@@ -37,13 +36,8 @@ def _get_pipeline() -> WorldPipeline:
     device = cfg.get('device') or _select_device()
     _PIPELINE = WorldPipeline.from_local_models(
         seed=cfg.get('seed'),
-        native_resolution=cfg.get('native_resolution', 90.0),
-        log_mode=cfg.get('log_mode', 'verbose'),
-        drop_water_pct=cfg.get('drop_water_pct', 0.5),
-        frequency_mult=cfg.get('frequency_mult', [1.0, 1.0, 1.0, 1.0, 1.0]),
-        cond_snr=cfg.get('cond_snr', [0.5, 0.5, 0.5, 0.5, 0.5]),
-        histogram_raw=cfg.get('histogram_raw', [0.0, 0.0, 0.0, 1.0, 1.5]),
         latents_batch_size=cfg.get('latents_batch_size', 4),
+        log_mode=cfg.get('log_mode', 'verbose'),
         **cfg.get('kwargs', {}),
     )
     _PIPELINE.to(device)
@@ -701,7 +695,7 @@ def _parse_seed() -> Optional[int]:
 
 
 def _get_base_pixel_size() -> float:
-    return _PIPELINE_CONFIG.get('native_resolution', 90.0)
+    return _get_pipeline().native_resolution
 
 
 def _handle_1x():
@@ -736,7 +730,29 @@ def _handle_upsampled(scale: int):
     return _binary_response(elev, biome=biome)
 
 
-@app.get("/1x")
+@app.get("/terrain")
+def terrain():
+    """
+    Get terrain data at arbitrary scale.
+    
+    Query params:
+        i1, j1, i2, j2: Bounding box in target resolution coordinates
+        scale: Integer scale factor relative to native resolution (default: 1)
+        noise: Whether to add detail noise for upsampled (default: 1)
+        format: 'json' for JSON output, otherwise binary
+    """
+    try:
+        scale = request.args.get("scale", default=1, type=int)
+        if scale < 1:
+            raise ValueError("scale must be >= 1")
+        if scale == 1:
+            return _handle_1x()
+        return _handle_upsampled(scale=scale)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+# Backwards compatibility endpoints
 @app.get("/90")
 def elev_1x():
     try:
@@ -745,7 +761,6 @@ def elev_1x():
         return jsonify({"error": str(e)}), 400
 
 
-@app.get("/2x")
 @app.get("/45")
 def elev_2x():
     try:
@@ -754,7 +769,6 @@ def elev_2x():
         return jsonify({"error": str(e)}), 400
 
 
-@app.get("/4x")
 @app.get("/22")
 def elev_4x():
     try:
@@ -763,7 +777,6 @@ def elev_4x():
         return jsonify({"error": str(e)}), 400
 
 
-@app.get("/8x")
 @app.get("/11")
 def elev_8x():
     try:
@@ -776,17 +789,12 @@ def elev_8x():
 @click.option("--hdf5-file", default="TEMP", help="HDF5 file path (use 'TEMP' for temporary file)")
 @click.option("--seed", type=int, default=None, help="Random seed (default: from file or random)")
 @click.option("--device", default=None, help="Device (cuda/cpu, default: auto)")
-@click.option("--native-resolution", type=float, default=90.0, help="Native resolution in meters (default: 90)")
-@click.option("--drop-water-pct", type=float, default=0.5, help="Drop water percentage")
-@click.option("--frequency-mult", default="[1.0, 1.0, 1.0, 1.0, 1.0]", help="Frequency multipliers (JSON)")
-@click.option("--cond-snr", default="[0.5, 0.5, 0.5, 0.5, 0.5]", help="Conditioning SNR (JSON)")
-@click.option("--histogram-raw", default="[0.0, 0.0, 0.0, 1.0, 1.5]", help="Histogram raw values (JSON)")
-@click.option("--latents-batch-size", type=int, default=4, help="Batch size for latent generation")
+@click.option("--batch-size", type=int, default=4, help="Batch size for latent generation")
 @click.option("--log-mode", type=click.Choice(["info", "verbose"]), default="verbose", help="Logging mode")
 @click.option("--host", default="0.0.0.0", help="Server host")
 @click.option("--port", type=int, default=int(os.getenv("PORT", "8000")), help="Server port")
-@click.option("--kwarg", "extra_kwargs", multiple=True, help="Additional key=value kwargs (e.g. --kwarg coarse_pooling=2)")
-def main(hdf5_file, seed, device, native_resolution, drop_water_pct, frequency_mult, cond_snr, histogram_raw, latents_batch_size, log_mode, host, port, extra_kwargs):
+@click.option("--kwarg", "extra_kwargs", multiple=True, help="Additional key=value kwargs (e.g. --kwarg native_resolution=30)")
+def main(hdf5_file, seed, device, batch_size, log_mode, host, port, extra_kwargs):
     """Minecraft terrain API server"""
     global _PIPELINE_CONFIG
     hdf5_file = resolve_hdf5_path(hdf5_file)
@@ -794,12 +802,7 @@ def main(hdf5_file, seed, device, native_resolution, drop_water_pct, frequency_m
         'hdf5_file': hdf5_file,
         'seed': seed,
         'device': device,
-        'native_resolution': native_resolution,
-        'drop_water_pct': drop_water_pct,
-        'frequency_mult': json.loads(frequency_mult),
-        'cond_snr': json.loads(cond_snr),
-        'histogram_raw': json.loads(histogram_raw),
-        'latents_batch_size': latents_batch_size,
+        'latents_batch_size': batch_size,
         'log_mode': log_mode,
         'kwargs': parse_kwargs(extra_kwargs),
     }
