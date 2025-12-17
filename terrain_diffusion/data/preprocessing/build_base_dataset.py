@@ -38,6 +38,8 @@ from terrain_diffusion.data.preprocessing.calculate_stds import calculate_stats_
 @click.option('--prefetch', type=int, default=2, help='Number of prefetch factor for the dataloader')
 @click.option('--edge-margin', type=int, default=0, help='Number of pixels to remove from the edges of the lowres image, automatically scaled up for the highres image')
 @click.option('--min-stat-landcover-pct', type=float, default=0.1, help='Minimum percentage of landcover to include in the statistics calculation')
+@click.option('--data-source', type=click.Choice(['merit', 'copernicus']), default='merit', help='Data source type (merit uses <-1000 as void, copernicus uses 0.0 as void)')
+@click.option('--ocean-tile-divisor', type=int, default=1, help='Only include ocean tiles (pct_land=0) if chunk_id is a multiple of this number. 1 = include all.')
 def process_base_dataset(
     highres_elevation_folder,
     lowres_elevation_file,
@@ -53,7 +55,9 @@ def process_base_dataset(
     overwrite,
     prefetch,
     edge_margin,
-    min_stat_landcover_pct
+    min_stat_landcover_pct,
+    data_source,
+    ocean_tile_divisor
 ):
     """
     Process elevation dataset into encoded HDF5 format.
@@ -110,13 +114,17 @@ def process_base_dataset(
             num_chunks,
             climate_folder,
             skip_chunk_ids,
-            edge_margin
+            edge_margin,
+            data_source
         )
         dataloader = torch.utils.data.DataLoader(dataset, batch_size=None, shuffle=False, num_workers=num_workers, prefetch_factor=prefetch)
         
         # Process files in parallel with hierarchical storage
         for chunks_data in tqdm(dataloader, desc="Saving datasets"):
             for chunk in chunks_data:
+                # Skip ocean tiles unless chunk_id is a multiple of ocean_tile_divisor
+                if chunk['pct_land'] == 0 and int(chunk['chunk_id']) % ocean_tile_divisor != 0:
+                    continue
                 chunk_group = res_group.require_group(chunk['chunk_id'])
                 subchunk_group = chunk_group.require_group(chunk['subchunk_id'])
                 

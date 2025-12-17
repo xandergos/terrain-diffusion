@@ -1,4 +1,3 @@
-import json
 from tempfile import NamedTemporaryFile
 import click
 import numpy as np
@@ -45,13 +44,16 @@ BIOME_LEGEND = {
 }
 
 
-def start_explorer(hdf5_file: str, seed: int | None = None, coarse_window: int = 64, coarse_offset_i: int = 0, coarse_offset_j: int = 0, detail_size: int = 1024, device: str | None = None, **kwargs) -> None:
+def start_explorer(model_path: str, hdf5_file: str, seed: int | None = None, coarse_window: int = 64, coarse_offset_i: int = 0, coarse_offset_j: int = 0, detail_size: int = 1024, device: str | None = None, **kwargs) -> None:
     if device is None:
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         if device == 'cpu':
             print("Warning: Using CPU (CUDA not available).")
 
-    with WorldPipeline(hdf5_file, device=device, seed=seed, **kwargs) as world:
+    world = WorldPipeline.from_pretrained(model_path, seed=seed, **kwargs)
+    world.to(device)
+    world.bind(hdf5_file)
+    with world:
         print(f"World seed: {world.seed}")
         ci0, ci1 = coarse_offset_i - coarse_window, coarse_offset_i + coarse_window
         cj0, cj1 = coarse_offset_j - coarse_window, coarse_offset_j + coarse_window
@@ -172,15 +174,15 @@ def start_explorer(hdf5_file: str, seed: int | None = None, coarse_window: int =
             cj = int(np.floor(event.xdata))
             ci = int(np.floor(event.ydata))
 
-            # Map coarse (i, j) to 90 m grid
-            center_i_90 = ci * 256
-            center_j_90 = cj * 256
+            # Map coarse (i, j) to native resolution grid
+            center_i = ci * 256
+            center_j = cj * 256
             half = detail_size // 2
-            i1, i2 = center_i_90 - half, center_i_90 + half
-            j1, j2 = center_j_90 - half, center_j_90 + half
+            i1, i2 = center_i - half, center_i + half
+            j1, j2 = center_j - half, center_j + half
 
-            # Fetch elevation at 90 m resolution
-            region_dict = world.get_90(i1, j1, i2, j2)
+            # Fetch elevation at native resolution
+            region_dict = world.get(i1, j1, i2, j2)
             elev = region_dict['elev']
             biome = None
             climate = region_dict['climate']
@@ -188,12 +190,13 @@ def start_explorer(hdf5_file: str, seed: int | None = None, coarse_window: int =
             #elev[elev == 0.0] = np.nan
 
             # Print coordinates at different resolutions
+            res = world.native_resolution
             print(f"Generated coarse tile: ci={ci}, cj={cj}")
             print(f"  Note x/z coordinates are flipped.")
-            print(f"  90m (i/z, j/x): ({ci * 256}, {cj * 256})")
-            print(f"  45m (i/z, j/x): ({ci * 512}, {cj * 512})")
-            print(f"  22m (i/z, j/x): ({ci * 1024}, {cj * 1024})")
-            print(f"  11m (i/z, j/x): ({ci * 2048}, {cj * 2048})")
+            print(f"  1x/{res:.0f}m (i/z, j/x): ({ci * 256}, {cj * 256})")
+            print(f"  2x/{res/2:.0f}m (i/z, j/x): ({ci * 512}, {cj * 512})")
+            print(f"  4x/{res/4:.1f}m (i/z, j/x): ({ci * 1024}, {cj * 1024})")
+            print(f"  8x/{res/8:.2f}m (i/z, j/x): ({ci * 2048}, {cj * 2048})")
 
             # Store latest data and update right panel based on mode
             nonlocal last_elev, last_biome, last_climate, last_climate0, last_ci, last_cj
@@ -265,24 +268,22 @@ def start_explorer(hdf5_file: str, seed: int | None = None, coarse_window: int =
 
 
 @click.command()
+@click.argument("model_path", default="xandergos/terrain-diffusion-90m")
 @click.option("--hdf5-file", default="TEMP", help="HDF5 file path (use 'TEMP' for temporary file)")
 @click.option("--seed", type=int, default=None, help="Random seed (default: random)")
+@click.option("--device", default=None, help="Device (cuda/cpu, default: auto)")
+@click.option("--batch-size", type=int, default=4, help="Batch size for latent generation")
+@click.option("--log-mode", type=click.Choice(["info", "verbose"]), default="verbose", help="Logging mode")
 @click.option("--coarse-window", type=int, default=50, help="Coarse window size")
 @click.option("--coarse-offset-i", type=int, default=0, help="Coarse window offset in i direction")
 @click.option("--coarse-offset-j", type=int, default=0, help="Coarse window offset in j direction")
 @click.option("--detail-size", type=int, default=1024, help="Full resolution detail window size")
-@click.option("--device", default=None, help="Device (cuda/cpu, default: auto)")
-@click.option("--drop-water-pct", type=float, default=0.5, help="Drop water percentage")
-@click.option("--frequency-mult", default="[1.0, 1.0, 1.0, 1.0, 1.0]", help="Frequency multipliers (JSON)")
-@click.option("--cond-snr", default="[0.5, 0.5, 0.5, 0.5, 0.5]", help="Conditioning SNR (JSON)")
-@click.option("--histogram-raw", default="[0.0, 0.0, 0.0, 1.0, 1.5]", help="Histogram raw values (JSON)")
-@click.option("--latents-batch-size", type=int, default=4, help="Batch size for latent generation")
-@click.option("--log-mode", type=click.Choice(["info", "verbose"]), default="verbose", help="Logging mode")
-@click.option("--kwarg", "extra_kwargs", multiple=True, help="Additional key=value kwargs (e.g. --kwarg coarse_pooling=2)")
-def main(hdf5_file, seed, coarse_window, coarse_offset_i, coarse_offset_j, detail_size, device, drop_water_pct, frequency_mult, cond_snr, histogram_raw, latents_batch_size, log_mode, extra_kwargs):
+@click.option("--kwarg", "extra_kwargs", multiple=True, help="Additional key=value kwargs (e.g. --kwarg native_resolution=30)")
+def main(model_path, hdf5_file, seed, device, batch_size, log_mode, coarse_window, coarse_offset_i, coarse_offset_j, detail_size, extra_kwargs):
     """Explore a generated world interactively"""
     hdf5_file = resolve_hdf5_path(hdf5_file)
     start_explorer(
+        model_path,
         hdf5_file,
         seed=seed,
         coarse_window=coarse_window,
@@ -290,11 +291,7 @@ def main(hdf5_file, seed, coarse_window, coarse_offset_i, coarse_offset_j, detai
         coarse_offset_j=coarse_offset_j,
         detail_size=detail_size,
         device=device,
-        drop_water_pct=drop_water_pct,
-        frequency_mult=json.loads(frequency_mult),
-        cond_snr=json.loads(cond_snr),
-        histogram_raw=json.loads(histogram_raw),
-        latents_batch_size=latents_batch_size,
+        latents_batch_size=batch_size,
         log_mode=log_mode,
         **parse_kwargs(extra_kwargs),
     )

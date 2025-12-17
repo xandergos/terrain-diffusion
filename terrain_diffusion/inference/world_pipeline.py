@@ -1,5 +1,5 @@
 import random
-from tempfile import NamedTemporaryFile
+from tempfile import NamedTemporaryFile, TemporaryDirectory
 import time
 import json
 import os
@@ -7,6 +7,7 @@ import atexit
 
 import h5py
 import torch
+from diffusers.configuration_utils import ConfigMixin, register_to_config
 from infinite_tensor import HDF5TileStore, TensorWindow, MemoryTileStore
 from terrain_diffusion.inference.synthetic_map import make_synthetic_map_factory
 from terrain_diffusion.data.laplacian_encoder import laplacian_decode, laplacian_denoise
@@ -293,46 +294,254 @@ def normalize_tensor(tensor, dim=0):
     return tensor[tuple(idx_num)] / tensor[tuple(idx_den)]
 
 
-class WorldPipeline:
+class WorldPipeline(ConfigMixin):
     """Multi-scale terrain generation pipeline."""
     
-    def __init__(self, 
-                 hdf5_file, 
-                 mode='a', 
-                 compression: str | None = "gzip", 
-                 compression_opts: int | None = 4,
-                 seed=None,
-                 device='cpu',
-                 coarse_model: str | None = None,
-                 base_model: str | None = None,
-                 decoder_model: str | None = None,
-                 latents_batch_size=1,
-                 **kwargs):
-        self.device = device
+    config_name = "config.json"
+    
+    # Subfolders for each model when saving/loading
+    COARSE_MODEL_FOLDER = "coarse_model"
+    BASE_MODEL_FOLDER = "base_model"
+    DECODER_MODEL_FOLDER = "decoder_model"
+    
+    ignore_for_config = ["seed", "latents_batch_size", "log_mode"]
+    
+    @register_to_config
+    def __init__(
+        self,
+        seed: int | None = None,
+        latents_batch_size: int = 1,
+        native_resolution: float = 90.0,
+        *,
+        log_mode: str = 'info',
+        latent_compression: int = 8,
+        frequency_mult: list = None,
+        drop_water_pct: float = 0.5,
+        cond_snr: list = None,
+        coarse_pooling: int = 1,
+        elev_coarse_pool_mode: str = 'avg',
+        p5_coarse_pool_mode: str = 'avg',
+        histogram_raw: list = None,
+        residual_mean: float = 0.0,
+        residual_std: float = 1.1678,
+    ):
+        super().__init__()
+        
+        # Resolve seed
+        self.seed = seed if seed is not None else random.randint(0, 2**31-1)
         self.latents_batch_size = latents_batch_size
-        self.log_mode = kwargs.get('log_mode', 'info')
-                
-        # Resolve 'TEMP' to temporary file path if needed
+        self.native_resolution = native_resolution
+        self.latent_compression = latent_compression
+        self.log_mode = log_mode
+        self.kwargs = {
+            'latent_compression': latent_compression,
+            'log_mode': log_mode,
+            'frequency_mult': frequency_mult if frequency_mult is not None else [1.5, 3, 3, 3, 3],
+            'drop_water_pct': drop_water_pct,
+            'cond_snr': cond_snr if cond_snr is not None else [0.3, 0.1, 1.0, 0.1, 1.0],
+            'coarse_pooling': coarse_pooling,
+            'elev_coarse_pool_mode': elev_coarse_pool_mode,
+            'p5_coarse_pool_mode': p5_coarse_pool_mode,
+            'histogram_raw': histogram_raw if histogram_raw is not None else [0.0, 0.0, 0.0, 0.0, 0.0],
+            'residual_mean': residual_mean,
+            'residual_std': residual_std,
+        }
+        
+        # Models as submodules - set via from_local_models() or from_pretrained()
+        self.coarse_model: EDMUnet2D | None = None
+        self.base_model: EDMUnet2D | None = None
+        self.decoder_model: EDMUnet2D | None = None
+        
+        # Runtime state - initialized via bind()
+        self.tile_store = None
+        self._hdf5_file_path = None
+        self._is_temp_file = False
+        self.synthetic_map_factory = None
+        self.coarse = None
+        self.latents = None
+        self.residual = None
+    
+    @classmethod
+    def from_local_models(
+        cls,
+        coarse_model_path: str | None = None,
+        base_model_path: str | None = None,
+        decoder_model_path: str | None = None,
+        **kwargs,
+    ) -> "WorldPipeline":
+        """Create pipeline loading models from local paths.
+        
+        Args:
+            coarse_model_path: Path to coarse model, or None for default.
+            base_model_path: Path to base model, or None for default.
+            decoder_model_path: Path to decoder model, or None for default.
+            **kwargs: Additional arguments passed to __init__.
+        """
+        pipeline = cls(**kwargs)
+        pipeline.coarse_model = EDMUnet2D.from_pretrained(
+            resolve_model_path(coarse_model_path, *MODEL_PATHS["coarse"])
+        )
+        pipeline.base_model = EDMUnet2D.from_pretrained(
+            resolve_model_path(base_model_path, *MODEL_PATHS["base"])
+        )
+        pipeline.decoder_model = EDMUnet2D.from_pretrained(
+            resolve_model_path(decoder_model_path, *MODEL_PATHS["decoder"])
+        )
+        return pipeline
+    
+    def save_pretrained(self, save_directory: str, **kwargs):
+        """Save pipeline config and all submodels to a directory.
+        
+        Args:
+            save_directory: Directory to save to.
+            **kwargs: Additional arguments passed to submodel save_pretrained.
+        """
+        os.makedirs(save_directory, exist_ok=True)
+        
+        # Save pipeline config only (no weights for the pipeline itself)
+        self.save_config(save_directory)
+        
+        # Save each submodel in its own subfolder
+        if self.coarse_model is not None:
+            self.coarse_model.save_pretrained(os.path.join(save_directory, self.COARSE_MODEL_FOLDER), **kwargs)
+        if self.base_model is not None:
+            self.base_model.save_pretrained(os.path.join(save_directory, self.BASE_MODEL_FOLDER), **kwargs)
+        if self.decoder_model is not None:
+            self.decoder_model.save_pretrained(os.path.join(save_directory, self.DECODER_MODEL_FOLDER), **kwargs)
+    
+    def push_to_hub(self, repo_id: str, commit_message: str = "Initial commit", private: bool = False, token: str = None, **kwargs):
+        """Push pipeline and all submodels to HuggingFace Hub.
+        
+        Args:
+            repo_id: HF Hub repo ID (e.g. "username/model-name").
+            commit_message: Commit message for the upload.
+            private: Whether to create a private repo.
+            token: HF token for authentication (uses cached token if None).
+            **kwargs: Additional arguments passed to HfApi.upload_folder.
+            
+        Returns:
+            URL of the uploaded model on HuggingFace Hub.
+        """
+        from huggingface_hub import HfApi
+        api = HfApi(token=token)
+        api.create_repo(repo_id, exist_ok=True, private=private)
+        with TemporaryDirectory() as tmpdir:
+            self.save_pretrained(tmpdir)
+            api.upload_folder(repo_id=repo_id, folder_path=tmpdir, commit_message=commit_message, **kwargs)
+        return f"https://huggingface.co/{repo_id}"
+    
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path: str, token: str = None, **kwargs) -> "WorldPipeline":
+        """Load pipeline and all submodels from a directory or HuggingFace Hub.
+        
+        Args:
+            pretrained_model_name_or_path: Directory or HF Hub model ID.
+            token: HF token for private repos (uses cached token if None).
+            **kwargs: Additional arguments passed to __init__.
+        """
+        # Load pipeline config only (no weights for the pipeline itself)
+        config = {**cls.load_config(pretrained_model_name_or_path, token=token), **kwargs}
+        pipeline = cls(**config)
+        
+        pipeline.coarse_model = EDMUnet2D.from_pretrained(
+            pretrained_model_name_or_path, subfolder=cls.COARSE_MODEL_FOLDER, token=token
+        )
+        pipeline.base_model = EDMUnet2D.from_pretrained(
+            pretrained_model_name_or_path, subfolder=cls.BASE_MODEL_FOLDER, token=token
+        )
+        pipeline.decoder_model = EDMUnet2D.from_pretrained(
+            pretrained_model_name_or_path, subfolder=cls.DECODER_MODEL_FOLDER, token=token
+        )
+        
+        return pipeline
+    
+    @property
+    def device(self):
+        """Infer device from submodel parameters."""
+        for model in (self.coarse_model, self.base_model, self.decoder_model):
+            if model is not None:
+                return next(model.parameters()).device
+        return torch.device('cpu')
+    
+    def to(self, device):
+        """Move all submodels to the specified device."""
+        if self.coarse_model is not None:
+            self.coarse_model = self.coarse_model.to(device)
+        if self.base_model is not None:
+            self.base_model = self.base_model.to(device)
+        if self.decoder_model is not None:
+            self.decoder_model = self.decoder_model.to(device)
+        return self
+    
+    def bind(
+        self,
+        hdf5_file: str,
+        mode: str = 'a',
+        compression: str | None = "gzip",
+        compression_opts: int | None = 4,
+    ):
+        """Bind the pipeline to an HDF5 file for generation.
+        
+        Args:
+            hdf5_file: Path to HDF5 file, or 'TEMP' for a temporary file.
+            mode: File mode for HDF5.
+            compression: Compression algorithm.
+            compression_opts: Compression level.
+            
+        Returns:
+            self for chaining.
+        """
         original_hdf5_file = hdf5_file
         hdf5_file = resolve_hdf5_path(hdf5_file)
         self._is_temp_file = original_hdf5_file.upper() == 'TEMP'
         self._hdf5_file_path = hdf5_file
         
-        self._init_config(hdf5_file, seed, kwargs, coarse_model, base_model, decoder_model)
+        self._reconcile_params_with_file(hdf5_file)
         self._init_tile_store(hdf5_file, mode, compression, compression_opts)
         self._init_conditioning()
-        self._load_models()
         self._build_hierarchy()
+        return self
+    
+    def _reconcile_params_with_file(self, hdf5_file: str):
+        """Check stored params vs current, use stored if they exist (with overwrite prompt on mismatch)."""
+        ATTR_KEY = 'WORLD_PIPELINE_PARAMS'
         
-    def _init_config(self, hdf5_file, seed, kwargs, coarse_model, base_model, decoder_model):
-        """Initialize and reconcile configuration."""
-        coarse_path = resolve_model_path(coarse_model, *MODEL_PATHS["coarse"])
-        base_path = resolve_model_path(base_model, *MODEL_PATHS["base"])
-        decoder_path = resolve_model_path(decoder_model, *MODEL_PATHS["decoder"])
+        def make_current():
+            return {
+                'seed': self.seed,
+                'kwargs': self.kwargs,
+            }
         
-        self.seed, self.kwargs, self._coarse_path, self._base_path, self._decoder_path = self._reconcile_params(
-            hdf5_file, seed, kwargs, coarse_path, base_path, decoder_path
-        )
+        if not os.path.exists(hdf5_file):
+            with h5py.File(hdf5_file, 'w') as f:
+                f.attrs[ATTR_KEY] = json.dumps(make_current(), sort_keys=True)
+            return
+        
+        with h5py.File(hdf5_file, 'a') as f:
+            if ATTR_KEY not in f.attrs:
+                f.attrs[ATTR_KEY] = json.dumps(make_current(), sort_keys=True)
+                return
+            
+            stored = json.loads(f.attrs[ATTR_KEY])
+            current = make_current()
+            mismatches = [(k, stored[k], current[k]) for k in current if k in stored and stored[k] != current[k]]
+            
+            if not mismatches:
+                return
+            
+            print("\n=== Parameter mismatch with stored world file ===")
+            for key, stored_val, current_val in mismatches:
+                print(f"  {key}:")
+                print(f"    stored:  {stored_val}")
+                print(f"    current: {current_val}")
+            
+            choice = input("\nOverwrite stored params with current? (This WILL cause artifacts unless a model was simply moved) [y/N]: ").strip().lower()
+            
+            if choice == 'y':
+                f.attrs[ATTR_KEY] = json.dumps(current, sort_keys=True)
+            else:
+                self.seed = stored['seed']
+                self.kwargs = stored['kwargs']
     
     def _init_tile_store(self, hdf5_file, mode, compression, compression_opts):
         """Initialize the tile store."""
@@ -345,33 +554,15 @@ class WorldPipeline:
         """Initialize conditioning (synthetic maps, etc)."""
         self.synthetic_map_factory = make_synthetic_map_factory(
             seed=self.seed, 
-            frequency_mult=self.kwargs.get('frequency_mult', [1.5, 3, 3, 3, 3]), 
-            drop_water_pct=self.kwargs.get('drop_water_pct', 0.5)
+            frequency_mult=self.kwargs['frequency_mult'], 
+            drop_water_pct=self.kwargs['drop_water_pct']
         )
-    
-    def _load_models(self):
-        """Load all models."""
-        self.coarse_model = self._load_coarse_model()
-        self.base_model = self._load_base_model()
-        self.decoder_model = self._load_decoder_model()
-    
-    def _load_coarse_model(self) -> torch.nn.Module:
-        """Load the coarse model."""
-        return EDMUnet2D.from_pretrained(self._coarse_path).to(self.device)
-    
-    def _load_base_model(self) -> torch.nn.Module:
-        """Load the base/latent model."""
-        return EDMUnet2D.from_pretrained(self._base_path).to(self.device)
-    
-    def _load_decoder_model(self) -> torch.nn.Module:
-        """Load the decoder model."""
-        return EDMUnet2D.from_pretrained(self._decoder_path).to(self.device)
     
     def _build_hierarchy(self):
         """Build the generation hierarchy."""
         self.coarse = self._build_coarse_stage()
         self.latents = self._build_latent_stage()
-        self.residual_90 = self._build_decoder_stage()
+        self.residual = self._build_decoder_stage()
         
     def __enter__(self):
         return self
@@ -382,66 +573,11 @@ class WorldPipeline:
 
     def close(self):
         """Release resources associated with this pipeline."""
-        self.tile_store.close()
+        if self.tile_store is not None:
+            self.tile_store.close()
         # Clean up temporary file if this pipeline created one
         if self._is_temp_file:
             cleanup_temp_file(self._hdf5_file_path)
-
-    def _reconcile_params(self, hdf5_file, seed, kwargs, coarse_path, base_path, decoder_path):
-        """Check stored params vs current, use stored if they exist (with overwrite prompt on mismatch)."""
-        ATTR_KEY = 'WORLD_PIPELINE_PARAMS'
-        
-        def make_current(s):
-            return {
-                'seed': s,
-                'kwargs': kwargs,
-                'coarse_model': coarse_path,
-                'base_model': base_path,
-                'decoder_model': decoder_path,
-            }
-        
-        if not os.path.exists(hdf5_file):
-            seed = seed if seed is not None else random.randint(0, 2**31-1)
-            with h5py.File(hdf5_file, 'w') as f:
-                f.attrs[ATTR_KEY] = json.dumps(make_current(seed), sort_keys=True)
-            return seed, kwargs, coarse_path, base_path, decoder_path
-        
-        with h5py.File(hdf5_file, 'a') as f:
-            if ATTR_KEY not in f.attrs:
-                seed = seed if seed is not None else random.randint(0, 2**31-1)
-                f.attrs[ATTR_KEY] = json.dumps(make_current(seed), sort_keys=True)
-                return seed, kwargs, coarse_path, base_path, decoder_path
-            
-            stored = json.loads(f.attrs[ATTR_KEY])
-            
-            if seed is None:
-                seed = stored['seed']
-            
-            current = make_current(seed)
-            mismatches = [(k, stored[k], current[k]) for k in current if k in stored and stored[k] != current[k]]
-            
-            if not mismatches:
-                return seed, kwargs, coarse_path, base_path, decoder_path
-            
-            print("\n=== Parameter mismatch with stored world file ===")
-            for key, stored_val, current_val in mismatches:
-                print(f"  {key}:")
-                print(f"    stored:  {stored_val}")
-                print(f"    current: {current_val}")
-            
-            choice = input("\nOverwrite stored params with current? (This WILL cause artifacts unless a model was simply moved) [y/N]: ").strip().lower()
-            
-            if choice == 'y':
-                f.attrs[ATTR_KEY] = json.dumps(current, sort_keys=True)
-                return seed, kwargs, coarse_path, base_path, decoder_path
-            else:
-                return (
-                    stored['seed'],
-                    stored['kwargs'],
-                    stored['coarse_model'],
-                    stored['base_model'],
-                    stored['decoder_model'],
-                )
 
     # =========================================================================
     # Coarse Stage
@@ -501,9 +637,9 @@ class WorldPipeline:
         """Build and register the coarse stage."""
         TILE_SIZE = 64
         TILE_STRIDE = TILE_SIZE - 16
-        COND_SNR = torch.tensor(self.kwargs.get('cond_snr', [0.3, 0.1, 1.0, 0.1, 1.0]))
+        COND_SNR = torch.tensor(self.kwargs['cond_snr'])
         
-        coarse_pool = self.kwargs.get('coarse_pooling', 1)
+        coarse_pool = self.kwargs['coarse_pooling']
         assert TILE_SIZE % coarse_pool == 0, f"coarse_pooling {coarse_pool} must divide TILE_SIZE {TILE_SIZE}"
         assert TILE_STRIDE % coarse_pool == 0, f"coarse_pooling {coarse_pool} must divide TILE_STRIDE {TILE_STRIDE}"
         
@@ -547,8 +683,8 @@ class WorldPipeline:
         if pool_size == 1:
             return cond_img
         n = pool_size
-        ch0_pooled = self._pool_channel(cond_img[0:1], n, self.kwargs.get('elev_coarse_pool_mode', 'avg'))
-        ch1_pooled = self._pool_channel(cond_img[1:2], n, self.kwargs.get('p5_coarse_pool_mode', 'avg'))
+        ch0_pooled = self._pool_channel(cond_img[0:1], n, self.kwargs['elev_coarse_pool_mode'])
+        ch1_pooled = self._pool_channel(cond_img[1:2], n, self.kwargs['p5_coarse_pool_mode'])
         ch_rest_pooled = torch.nn.functional.avg_pool2d(cond_img[2:].unsqueeze(0), kernel_size=n, stride=n).squeeze(0)
         return torch.cat([ch0_pooled, ch1_pooled, ch_rest_pooled], dim=0)
 
@@ -651,7 +787,7 @@ class WorldPipeline:
         TILE_STRIDE = TILE_SIZE // 2
         COND_INPUT_MEAN = torch.tensor([14.99, 11.65, 15.87, 619.26, 833.12, 69.40, 0.66])
         COND_INPUT_STD = torch.tensor([21.72, 21.78, 10.40, 452.29, 738.09, 34.59, 0.47])
-        HISTOGRAM_RAW = torch.tensor([self.kwargs.get('histogram_raw', [0.0, 0.0, 0.0, 0.0, 0.0])])
+        HISTOGRAM_RAW = torch.tensor([self.kwargs['histogram_raw']])
         
         scheduler = EDMDPMSolverMultistepScheduler(sigma_min=0.002, sigma_max=80, sigma_data=0.5)
         weight_window = linear_weight_window(TILE_SIZE, 'cpu', torch.float32)
@@ -703,7 +839,8 @@ class WorldPipeline:
             return torch.ones((2, TILE_SIZE, TILE_SIZE))
         
         sample = torch.zeros((1, 1, TILE_SIZE, TILE_SIZE), device=self.device)
-        latents = (latents[:-1] / latents[-1:])[:4].view(1, 4, TILE_SIZE//8, TILE_SIZE//8)
+        lc = self.latent_compression
+        latents = (latents[:-1] / latents[-1:])[:4].view(1, 4, TILE_SIZE//lc, TILE_SIZE//lc)
         upsampled_latents = torch.nn.functional.interpolate(
             latents, size=(TILE_SIZE, TILE_SIZE), mode='nearest'
         ).to(self.device)
@@ -738,11 +875,12 @@ class WorldPipeline:
         def f(ctx, latents):
             return self._decoder_inference(ctx, latents, scheduler, weight_window, t_list)
         
+        lc = self.latent_compression
         output_window = TensorWindow(size=(2, TILE_SIZE, TILE_SIZE), stride=(2, TILE_STRIDE, TILE_STRIDE))
-        input_window = TensorWindow(size=(6, TILE_SIZE//8, TILE_SIZE//8), stride=(6, TILE_STRIDE//8, TILE_STRIDE//8))
+        input_window = TensorWindow(size=(6, TILE_SIZE//lc, TILE_SIZE//lc), stride=(6, TILE_STRIDE//lc, TILE_STRIDE//lc))
         
         return self.tile_store.get_or_create(
-            "init_residual_90_map",
+            "init_residual_map",
             shape=(2, None, None),
             f=f,
             output_window=output_window,
@@ -759,8 +897,8 @@ class WorldPipeline:
         """Compute elevation from residual map."""
         LOWFREQ_MEAN = -31.4
         LOWFREQ_STD = 38.6
-        RESIDUAL_MEAN = 0.0
-        RESIDUAL_STD = 1.1678
+        RESIDUAL_MEAN = self.kwargs['residual_mean']
+        RESIDUAL_STD = self.kwargs['residual_std']
         
         sigma = 5
         kernel_size = (int(sigma * 2) // 2) * 2 + 1
@@ -845,9 +983,9 @@ class WorldPipeline:
         climate = torch.stack([temp_realistic, coarse_up[3], coarse_up[4], coarse_up[5], beta_up[0]])
         return climate
     
-    def get_90(self, i1, j1, i2, j2, with_climate=True):
+    def get(self, i1, j1, i2, j2, with_climate=True):
         """
-        Get terrain at 90m resolution.
+        Get terrain data for the given bounding box.
         
         Args:
             i1, j1, i2, j2: Bounding box coordinates
@@ -856,8 +994,8 @@ class WorldPipeline:
         Returns:
             dict with 'elev' (H, W) in meters and optionally 'climate' (5, H, W)
         """
-        elev = self._compute_elev(i1, j1, i2, j2, self.residual_90, scale=8)
-        climate = self._compute_climate(i1, j1, i2, j2, elev, scale=8) if with_climate else None
+        elev = self._compute_elev(i1, j1, i2, j2, self.residual, scale=self.latent_compression)
+        climate = self._compute_climate(i1, j1, i2, j2, elev, scale=self.latent_compression) if with_climate else None
         
         return {
             'elev': elev,
