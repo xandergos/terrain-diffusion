@@ -254,7 +254,7 @@ def _compute_climate_vars(temp: torch.Tensor, t_season: torch.Tensor,
         'coldest_month': coldest_month,
     }
 
-def _get_upsampled(world: WorldPipeline, i1: int, j1: int, i2: int, j2: int, scale: int, add_noise: bool = True, pixel_size_m: float = 90.0) -> dict:
+def _get_upsampled(world: WorldPipeline, i1: int, j1: int, i2: int, j2: int, scale: int, noise_scale: float = 1.0, pixel_size_m: float = 90.0) -> dict:
     """
     Get native resolution data and upsample by `scale` factor using bilinear interpolation.
     Coordinates are in the target (upsampled) resolution.
@@ -309,7 +309,7 @@ def _get_upsampled(world: WorldPipeline, i1: int, j1: int, i2: int, j2: int, sca
         climate = climate_up[:, crop_i1:crop_i2, crop_j1:crop_j2]
 
     # Add Perlin noise to restore detail lost in upsampling
-    if add_noise:
+    if noise_scale > 0:
         elev = elev_smooth.clone()
         h, w = elev.shape
         if h > 0 and w > 0:
@@ -333,9 +333,10 @@ def _get_upsampled(world: WorldPipeline, i1: int, j1: int, i2: int, j2: int, sca
             
             # Scale noise amplitude by local gradient (steeper = more noise)
             # Gamma > 1 concentrates noise on very steep slopes
-            slope_factor = (gradient / 40.0).clamp(0.0, 1.0).pow(1.5)
-            amp_coarse = 0.0 + 100.0 * slope_factor * pixel_size_m / world.native_resolution
-            amp_fine = 0.0 + 70.0 * slope_factor * pixel_size_m / world.native_resolution
+            # Normalize gradient threshold by pixel size (40m/pixel at 90m resolution)
+            slope_factor = (gradient / (40.0 * pixel_size_m / 90.0)).clamp(0.0, 1.0).pow(1.5)
+            amp_coarse = noise_scale * 100.0 * slope_factor * pixel_size_m / world.native_resolution
+            amp_fine = noise_scale * 70.0 * slope_factor * pixel_size_m / world.native_resolution
             
             # Apply noise only to land (elev >= 0)
             is_land = elev_smooth >= 0.0
@@ -684,16 +685,13 @@ def health():
     return jsonify({"status": "ok"})
 
 
-def _parse_noise() -> bool:
-    """Parse noise query param. Defaults to True. Accepts 0/1/true/false."""
-    val = request.args.get("noise", "1").lower()
-    return val not in ("0", "false")
-
-
-def _parse_seed() -> Optional[int]:
-    """Parse seed query param. Returns None if not provided."""
-    return request.args.get("seed", type=int)
-
+def _parse_noise() -> float:
+    """Parse noise query param. Defaults to 1.0. Accepts float values."""
+    val = request.args.get("noise", "1.0")
+    try:
+        return float(val)
+    except ValueError:
+        return 1.0
 
 def _get_base_pixel_size() -> float:
     return _get_pipeline().native_resolution
@@ -717,10 +715,10 @@ def _handle_1x():
 def _handle_upsampled(scale: int):
     """Handler for upsampled resolutions (2x, 4x, 8x)."""
     i1, j1, i2, j2 = _parse_quad()
-    add_noise = _parse_noise()
+    noise_scale = _parse_noise()
     world = _get_pipeline()
     pixel_size_m = _get_base_pixel_size() / scale
-    out = _get_upsampled(world, i1, j1, i2, j2, scale=scale, add_noise=add_noise, pixel_size_m=pixel_size_m)
+    out = _get_upsampled(world, i1, j1, i2, j2, scale=scale, noise_scale=noise_scale, pixel_size_m=pixel_size_m)
     elev = out["elev"]
     elev_smooth = out["elev_smooth"]
     climate = out.get("climate")
@@ -739,7 +737,7 @@ def terrain():
     Query params:
         i1, j1, i2, j2: Bounding box in target resolution coordinates
         scale: Integer scale factor relative to native resolution (default: 1)
-        noise: Whether to add detail noise for upsampled (default: 1)
+        noise: Noise scale factor (default: 1.0)
         format: 'json' for JSON output, otherwise binary
     """
     try:
