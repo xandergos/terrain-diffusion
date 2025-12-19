@@ -567,7 +567,7 @@ class WorldPipeline(ConfigMixin):
         """Bind the pipeline for generation.
         
         Args:
-            hdf5_file: Path to HDF5 file, or 'TEMP' for a temporary file. Required when caching_strategy='indirect', optional when 'direct'.
+            hdf5_file: Path to HDF5 file, or 'TEMP' for a temporary file. Required when caching_strategy='indirect', ignored when 'direct'.
             mode: File mode for HDF5 (only used with indirect caching).
             compression: Compression algorithm (only used with indirect caching).
             compression_opts: Compression level (only used with indirect caching).
@@ -576,13 +576,7 @@ class WorldPipeline(ConfigMixin):
             self for chaining.
         """
         if self.caching_strategy == 'direct':
-            if hdf5_file is not None:
-                original_hdf5_file = hdf5_file
-                hdf5_file = resolve_hdf5_path(hdf5_file)
-                self._is_temp_file = original_hdf5_file.upper() == 'TEMP'
-                self._hdf5_file_path = hdf5_file
-                self._reconcile_params_with_file(hdf5_file)
-            self._init_tile_store(hdf5_file, mode, compression, compression_opts)
+            self._init_tile_store(None, None, None, None)
         else:
             if hdf5_file is None:
                 raise ValueError("hdf5_file is required when caching_strategy='indirect'")

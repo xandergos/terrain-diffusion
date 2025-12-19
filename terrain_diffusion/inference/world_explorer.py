@@ -280,7 +280,7 @@ def start_explorer(model_path: str, hdf5_file: str | None = None, seed: int | No
 @click.option("--batch-size", type=str, default="1,4", help="Batch size(s) for latent generation (e.g. '4' or '1,2,4,8')")
 @click.option("--log-mode", type=click.Choice(["info", "verbose"]), default="verbose", help="Logging mode")
 @click.option("--compile/--no-compile", "torch_compile", default=True, help="Use torch.compile for faster inference")
-@click.option("--dtype", type=click.Choice(["fp32", "bf16", "fp16"]), default=None, help="Model dtype (default: fp32)")
+@click.option("--dtype", type=click.Choice(["fp32", "bf16", "fp16"]), default="fp32", help="Model dtype")
 @click.option("--coarse-window", type=int, default=50, help="Coarse window size")
 @click.option("--coarse-offset-i", type=int, default=0, help="Coarse window offset in i direction")
 @click.option("--coarse-offset-j", type=int, default=0, help="Coarse window offset in j direction")

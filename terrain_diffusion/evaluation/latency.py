@@ -11,7 +11,6 @@ import torch
 
 from terrain_diffusion.inference.world_pipeline import WorldPipeline
 
-
 TILE_SIZE = 512
 NUM_RUNS = 100
 SEPARATION = 200 * 256  # Separation between tiles to avoid cache overlap
@@ -23,7 +22,7 @@ def measure_latency(device: str = 'cuda', seed: int = 42) -> dict:
         seed=seed,
         latents_batch_size=[1, 2, 4, 8, 16, 32],
         torch_compile=True,
-        dtype='fp16',
+        dtype='fp32',
         caching_strategy='direct',
         cache_limit=None,
     )

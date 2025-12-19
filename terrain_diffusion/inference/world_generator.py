@@ -41,7 +41,7 @@ def generate_world(model_path: str, hdf5_file: str | None = None, seed: int | No
 @click.option("--log-mode", type=click.Choice(["info", "verbose"]), default="verbose", help="Logging mode")
 @click.option("--coarse-window", type=int, default=50, help="Coarse window size")
 @click.option("--compile/--no-compile", "torch_compile", default=True, help="Use torch.compile for faster inference")
-@click.option("--dtype", type=click.Choice(["fp32", "bf16", "fp16"]), default=None, help="Model dtype (default: fp32)")
+@click.option("--dtype", type=click.Choice(["fp32", "bf16", "fp16"]), default="fp32", help="Model dtype")
 @click.option("--kwarg", "extra_kwargs", multiple=True, help="Additional key=value kwargs (e.g. --kwarg coarse_pooling=2)")
 def main(model_path, hdf5_file, caching_strategy, max_cache_size, seed, device, batch_size, log_mode, coarse_window, torch_compile, dtype, extra_kwargs):
     """Generate a world using the terrain diffusion pipeline"""
