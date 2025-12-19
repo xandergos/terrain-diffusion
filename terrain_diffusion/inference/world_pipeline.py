@@ -137,12 +137,18 @@ def normalize_infinite_tensor(tile_store, tensor_id, tensor, tile_size, dim=0):
         idx_den[dim] = slice(-1, None)
         return t[tuple(idx_num)] / t[tuple(idx_den)]
 
+    kwargs = {}
+    if isinstance(tile_store, MemoryTileStore):
+        kwargs['cache_method'] = 'direct'
+        # Note: cache_limit would need to be passed from the pipeline instance
+        # For now, this function doesn't have access to it, so we'll handle it in methods
     return tile_store.get_or_create(tensor_id,
                                     shape=tensor_shape,
                                     f=_normalize_fn,
                                     output_window=tensor_out_window,
                                     args=(tensor,),
-                                    args_windows=(tensor_in_window,))
+                                    args_windows=(tensor_in_window,),
+                                    **kwargs)
     
 def plot_channels_slider(data, cmap=None, channel_names=None):
     """
@@ -304,7 +310,7 @@ class WorldPipeline(ConfigMixin):
     BASE_MODEL_FOLDER = "base_model"
     DECODER_MODEL_FOLDER = "decoder_model"
     
-    ignore_for_config = ["seed", "latents_batch_size", "log_mode", "torch_compile", "dtype"]
+    ignore_for_config = ["seed", "latents_batch_size", "log_mode", "cache_limit", "caching_strategy", "torch_compile", "dtype"]
     
     @register_to_config
     def __init__(
@@ -326,6 +332,10 @@ class WorldPipeline(ConfigMixin):
         histogram_raw: list = None,
         residual_mean: float = 0.0,
         residual_std: float = 1.1678,
+        coarse_means: list = None,
+        coarse_stds: list = None,
+        caching_strategy: str = 'indirect',
+        cache_limit: int | None = None,
     ):
         super().__init__()
         
@@ -341,7 +351,8 @@ class WorldPipeline(ConfigMixin):
         self.latent_compression = latent_compression
         self.log_mode = log_mode
         self.torch_compile = torch_compile
-        self._dtype = {'bf16': torch.bfloat16, 'fp16': torch.float16}.get(dtype)
+        self.caching_strategy = caching_strategy
+        self.cache_limit = cache_limit
         self.kwargs = {
             'latent_compression': latent_compression,
             'log_mode': log_mode,
@@ -354,7 +365,17 @@ class WorldPipeline(ConfigMixin):
             'histogram_raw': histogram_raw if histogram_raw is not None else [0.0, 0.0, 0.0, 0.0, 0.0],
             'residual_mean': residual_mean,
             'residual_std': residual_std,
+            'coarse_means': coarse_means if coarse_means is not None else [-37.67916460232751, 2.22578822145657, 18.030293275011356, 333.8442390481231, 1350.1259248456176, 52.444339366764396],
+            'coarse_stds': coarse_stds if coarse_stds is not None else [39.68515115440358, 3.0981253981231522, 8.940333096712806, 322.25238547630295, 856.3430083394657, 30.982620765341043],
         }
+        
+        # Convert dtype string to torch dtype
+        if dtype == 'bf16':
+            self._dtype = torch.bfloat16
+        elif dtype == 'fp16':
+            self._dtype = torch.float16
+        else:
+            self._dtype = None
         
         # Models as submodules - set via from_local_models() or from_pretrained()
         self.coarse_model: EDMUnet2D | None = None
@@ -395,7 +416,7 @@ class WorldPipeline(ConfigMixin):
         
         # Apply torch.compile
         if self.torch_compile:
-            print("Compiling models with torch.compile (this may take a few minutes)...")
+            print(f"Compiling models with torch.compile...")
             if self.coarse_model is not None:
                 self.coarse_model = torch.compile(self.coarse_model)
             if self.base_model is not None:
@@ -409,7 +430,8 @@ class WorldPipeline(ConfigMixin):
         if not self.torch_compile:
             return
         
-        print(f"Warming up compiled models with batch sizes: {self._batch_sizes}...")
+        warmup_batch_sizes = self._batch_sizes
+        print(f"Warming up compiled models with batch sizes: {warmup_batch_sizes}...")
         device = self.device
         dtype = self._dtype or torch.float32
         
@@ -422,11 +444,12 @@ class WorldPipeline(ConfigMixin):
                 self.coarse_model(dummy_in, noise_labels=dummy_noise, conditional_inputs=[torch.zeros(1, device=device, dtype=dtype) for _ in range(5)])
         
         # Warmup base model (latent stage) with each batch size
+        # Conditioning size: 16 (means) + 16 (p5) + 4 (climate) + 16 (mask) + 5 (histogram) + 1 (noise_level) = 58
         if self.base_model is not None:
-            for bs in self._batch_sizes:
+            for bs in warmup_batch_sizes:
                 print(f"  Warming up base_model with batch size {bs}...")
                 dummy_in = torch.randn(bs, 5, 64, 64, device=device, dtype=dtype)
-                dummy_cond = torch.randn(bs, 30, device=device, dtype=dtype)
+                dummy_cond = torch.randn(bs, 58, device=device, dtype=dtype)
                 dummy_noise = torch.randn(bs, device=device, dtype=dtype)
                 with torch.no_grad():
                     self.base_model(dummy_in, noise_labels=dummy_noise, conditional_inputs=[dummy_cond])
@@ -558,29 +581,41 @@ class WorldPipeline(ConfigMixin):
     
     def bind(
         self,
-        hdf5_file: str,
+        hdf5_file: str | None = None,
         mode: str = 'a',
         compression: str | None = "gzip",
         compression_opts: int | None = 4,
     ):
-        """Bind the pipeline to an HDF5 file for generation.
+        """Bind the pipeline for generation.
         
         Args:
-            hdf5_file: Path to HDF5 file, or 'TEMP' for a temporary file.
-            mode: File mode for HDF5.
-            compression: Compression algorithm.
-            compression_opts: Compression level.
+            hdf5_file: Path to HDF5 file, or 'TEMP' for a temporary file. Required when caching_strategy='indirect', optional when 'direct'.
+            mode: File mode for HDF5 (only used with indirect caching).
+            compression: Compression algorithm (only used with indirect caching).
+            compression_opts: Compression level (only used with indirect caching).
             
         Returns:
             self for chaining.
         """
-        original_hdf5_file = hdf5_file
-        hdf5_file = resolve_hdf5_path(hdf5_file)
-        self._is_temp_file = original_hdf5_file.upper() == 'TEMP'
-        self._hdf5_file_path = hdf5_file
+        if self.caching_strategy == 'direct':
+            if hdf5_file is not None:
+                original_hdf5_file = hdf5_file
+                hdf5_file = resolve_hdf5_path(hdf5_file)
+                self._is_temp_file = original_hdf5_file.upper() == 'TEMP'
+                self._hdf5_file_path = hdf5_file
+                self._reconcile_params_with_file(hdf5_file)
+            self._init_tile_store(hdf5_file, mode, compression, compression_opts)
+        else:
+            if hdf5_file is None:
+                raise ValueError("hdf5_file is required when caching_strategy='indirect'")
+            original_hdf5_file = hdf5_file
+            hdf5_file = resolve_hdf5_path(hdf5_file)
+            self._is_temp_file = original_hdf5_file.upper() == 'TEMP'
+            self._hdf5_file_path = hdf5_file
+            
+            self._reconcile_params_with_file(hdf5_file)
+            self._init_tile_store(hdf5_file, mode, compression, compression_opts)
         
-        self._reconcile_params_with_file(hdf5_file)
-        self._init_tile_store(hdf5_file, mode, compression, compression_opts)
         self._init_conditioning()
         self._build_hierarchy()
         return self
@@ -628,10 +663,13 @@ class WorldPipeline(ConfigMixin):
     
     def _init_tile_store(self, hdf5_file, mode, compression, compression_opts):
         """Initialize the tile store."""
-        self.tile_store = HDF5TileStore(
-            hdf5_file, mode=mode, compression=compression, 
-            compression_opts=compression_opts, tile_cache_size=100
-        )
+        if self.caching_strategy == 'direct':
+            self.tile_store = MemoryTileStore()
+        else:
+            self.tile_store = HDF5TileStore(
+                hdf5_file, mode=mode, compression=compression, 
+                compression_opts=compression_opts, tile_cache_size=100
+            )
     
     def _init_conditioning(self):
         """Initialize conditioning (synthetic maps, etc)."""
@@ -654,9 +692,23 @@ class WorldPipeline(ConfigMixin):
         self.close()
         return False
 
+    def empty_cache(self):
+        """Clear the cache for all tensors in the pipeline."""
+        if self.tile_store is None:
+            return
+        
+        tensor_ids = ["base_coarse_map", "init_latent_map", "init_residual_map"]
+        # Add step_latent_map tensors (there's typically one: step_latent_map_0)
+        inter_t = [torch.arctan(torch.tensor(0.35) / 0.5)]
+        for i in range(len(inter_t)):
+            tensor_ids.append(f"step_latent_map_{i}")
+        
+        for tensor_id in tensor_ids:
+            self.tile_store.evict_cache_for(tensor_id, 0)
+    
     def close(self):
         """Release resources associated with this pipeline."""
-        if self.tile_store is not None:
+        if self.tile_store is not None and hasattr(self.tile_store, 'close'):
             self.tile_store.close()
         # Clean up temporary file if this pipeline created one
         if self._is_temp_file:
@@ -670,11 +722,10 @@ class WorldPipeline(ConfigMixin):
         """Run inference for one coarse tile."""
         TILE_SIZE = 64
         TILE_STRIDE = TILE_SIZE - 16
-        MODEL_MEANS = torch.tensor([-37.67916460232751, 2.22578822145657, 18.030293275011356, 333.8442390481231, 1350.1259248456176, 52.444339366764396])
-        MODEL_STDS = torch.tensor([39.68515115440358, 3.0981253981231522, 8.940333096712806, 322.25238547630295, 856.3430083394657, 30.982620765341043])
+        MODEL_MEANS = torch.tensor(self.kwargs['coarse_means'])
+        MODEL_STDS = torch.tensor(self.kwargs['coarse_stds'])
         
         model_dtype = self._dtype or torch.float32
-        
         _, i, j = ctx
         i1, j1 = i * (TILE_STRIDE // pool_size), j * (TILE_STRIDE // pool_size)
         i1, j1 = i1 * pool_size, j1 * pool_size
@@ -705,7 +756,7 @@ class WorldPipeline(ConfigMixin):
             cnoise = scheduler.trigflow_precondition_noise(sigma.view(-1))
 
             x_in = torch.cat([scaled_in, cond_img], dim=1)
-            model_out = self.coarse_model(x_in, noise_labels=cnoise, conditional_inputs=cond_inputs)
+            model_out = self.coarse_model(x_in, noise_labels=torch.tensor([cnoise.item()], device=self.device, dtype=model_dtype), conditional_inputs=cond_inputs)
             sample = scheduler.step(model_out, t, sample).prev_sample
         
         sample = sample.cpu().float() / scheduler.config.sigma_data
@@ -742,11 +793,17 @@ class WorldPipeline(ConfigMixin):
             size=(7, TILE_SIZE // coarse_pool, TILE_SIZE // coarse_pool), 
             stride=(7, TILE_STRIDE // coarse_pool, TILE_STRIDE // coarse_pool)
         )
+        kwargs = {}
+        if self.caching_strategy == 'direct':
+            kwargs['cache_method'] = 'direct'
+            if self.cache_limit is not None:
+                kwargs['cache_limit'] = self.cache_limit
         return self.tile_store.get_or_create(
             "base_coarse_map",
             shape=(7, None, None),
             f=f,
-            output_window=output_window
+            output_window=output_window,
+            **kwargs
         )
 
     # =========================================================================
@@ -856,14 +913,13 @@ class WorldPipeline(ConfigMixin):
         
         model_in_batch = torch.cat(model_in_list, dim=0)
         cond_inputs_batch = torch.cat(cond_inputs_list, dim=0)
-        noise_labels_batch = t_tensor.expand(actual_batch_size).to(self.device, dtype=model_dtype)
+        noise_labels_batch = torch.full((padded_batch_size,), t_tensor.item(), device=self.device, dtype=model_dtype)
         
         # Pad to next legal batch size for torch.compile efficiency
         if padded_batch_size > actual_batch_size:
             pad_count = padded_batch_size - actual_batch_size
-            model_in_batch = torch.cat([model_in_batch, model_in_batch[:1].expand(pad_count, -1, -1, -1)], dim=0)
-            cond_inputs_batch = torch.cat([cond_inputs_batch, cond_inputs_batch[:1].expand(pad_count, -1)], dim=0)
-            noise_labels_batch = torch.cat([noise_labels_batch, noise_labels_batch[:1].expand(pad_count)], dim=0)
+            model_in_batch = torch.cat([model_in_batch, model_in_batch[:1].repeat(pad_count, 1, 1, 1)], dim=0)
+            cond_inputs_batch = torch.cat([cond_inputs_batch, cond_inputs_batch[:1].repeat(pad_count, 1)], dim=0)
         
         pred_batch = -self.base_model(model_in_batch, noise_labels=noise_labels_batch, conditional_inputs=[cond_inputs_batch])
         
@@ -893,6 +949,11 @@ class WorldPipeline(ConfigMixin):
         output_window = TensorWindow(size=(6, TILE_SIZE, TILE_SIZE), stride=(6, TILE_STRIDE, TILE_STRIDE))
         coarse_window = TensorWindow(size=(7, 4, 4), stride=(7, 1, 1), offset=(0, -1, -1))
         
+        kwargs = {}
+        if self.caching_strategy == 'direct':
+            kwargs['cache_method'] = 'direct'
+            if self.cache_limit is not None:
+                kwargs['cache_limit'] = self.cache_limit
         tensor = self.tile_store.get_or_create(
             "init_latent_map",
             shape=(6, None, None),
@@ -902,11 +963,17 @@ class WorldPipeline(ConfigMixin):
             output_window=output_window,
             args=(self.coarse,),
             args_windows=(coarse_window,),
-            batch_size=self.latents_batch_size
+            batch_size=self.latents_batch_size,
+            **kwargs
         )
         
         inter_t = [torch.arctan(torch.tensor(0.35) / 0.5)]
         for i, t in enumerate(inter_t):
+            kwargs = {}
+            if self.caching_strategy == 'direct':
+                kwargs['cache_method'] = 'direct'
+                if self.cache_limit is not None:
+                    kwargs['cache_limit'] = self.cache_limit
             tensor = self.tile_store.get_or_create(
                 f"step_latent_map_{i}",
                 shape=(6, None, None),
@@ -916,7 +983,8 @@ class WorldPipeline(ConfigMixin):
                 output_window=output_window,
                 args=(tensor, self.coarse,),
                 args_windows=(output_window, coarse_window,),
-                batch_size=self.latents_batch_size
+                batch_size=self.latents_batch_size,
+                **kwargs
             )
         
         return tensor
@@ -954,7 +1022,7 @@ class WorldPipeline(ConfigMixin):
             x_t = torch.cos(t) * sample + torch.sin(t) * z
             model_in = (x_t / scheduler.config.sigma_data).to(self.device)
             model_in = torch.cat([model_in, upsampled_latents], dim=1)
-            pred = -self.decoder_model(model_in, noise_labels=t.flatten().to(model_dtype), conditional_inputs=[])
+            pred = -self.decoder_model(model_in, noise_labels=torch.tensor([t.item()], device=self.device, dtype=model_dtype), conditional_inputs=[])
             sample = torch.cos(t) * x_t - torch.sin(t) * scheduler.config.sigma_data * pred
             
         sample = sample.cpu().float() / scheduler.config.sigma_data
@@ -978,13 +1046,19 @@ class WorldPipeline(ConfigMixin):
         output_window = TensorWindow(size=(2, TILE_SIZE, TILE_SIZE), stride=(2, TILE_STRIDE, TILE_STRIDE))
         input_window = TensorWindow(size=(6, TILE_SIZE//lc, TILE_SIZE//lc), stride=(6, TILE_STRIDE//lc, TILE_STRIDE//lc))
         
+        kwargs = {}
+        if self.caching_strategy == 'direct':
+            kwargs['cache_method'] = 'direct'
+            if self.cache_limit is not None:
+                kwargs['cache_limit'] = self.cache_limit
         return self.tile_store.get_or_create(
             "init_residual_map",
             shape=(2, None, None),
             f=f,
             output_window=output_window,
             args=(self.latents,),
-            args_windows=(input_window,)
+            args_windows=(input_window,),
+            **kwargs
         )
 
     # =========================================================================

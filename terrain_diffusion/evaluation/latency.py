@@ -6,7 +6,6 @@ TTST: Time to Second Tile - time to generate adjacent 512x512 tile thereafter
 """
 import time
 import random
-from tempfile import NamedTemporaryFile
 from tqdm import tqdm
 import torch
 
@@ -25,6 +24,8 @@ def measure_latency(device: str = 'cuda', seed: int = 42) -> dict:
         latents_batch_size=[1, 2, 4, 8, 16, 32],
         torch_compile=True,
         dtype='fp16',
+        caching_strategy='direct',
+        cache_limit=None,
     )
     world.to(device)
     world.bind("TEMP")
@@ -58,6 +59,9 @@ def measure_latency(device: str = 'cuda', seed: int = 42) -> dict:
         torch.cuda.synchronize()
         t3 = time.perf_counter()
         ttst_times.append(t3 - t2)
+        
+        # Clear cache after each run
+        world.empty_cache()
 
         pbar.update(1)
         pbar.set_postfix({
