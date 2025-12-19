@@ -9,7 +9,7 @@ from flask import Flask, Response, jsonify, request
 from pyfastnoiselite.pyfastnoiselite import FastNoiseLite, NoiseType, FractalType
 
 from terrain_diffusion.inference.world_pipeline import WorldPipeline, resolve_hdf5_path
-from terrain_diffusion.common.cli_helpers import parse_kwargs
+from terrain_diffusion.common.cli_helpers import parse_kwargs, parse_cache_size
 
 app = Flask(__name__)
 
@@ -798,7 +798,7 @@ def elev_8x():
 @click.argument("model_path", default="xandergos/terrain-diffusion-90m")
 @click.option("--caching-strategy", type=click.Choice(["indirect", "direct"]), default="direct", help="Caching strategy: 'indirect' uses HDF5, 'direct' uses in-memory LRU cache")
 @click.option("--hdf5-file", default=None, help="HDF5 file path (required for indirect caching, optional for direct)")
-@click.option("--max-cache-size", type=int, default=None, help="Max cache size in bytes (for direct caching)")
+@click.option("--cache-size", default="100M", help="Cache size (e.g., 100M, 1G) for direct caching")
 @click.option("--seed", type=int, default=None, help="Random seed (default: from file or random)")
 @click.option("--device", default=None, help="Device (cuda/cpu, default: auto)")
 @click.option("--batch-size", type=str, default="1,4", help="Batch size(s) for latent generation (e.g. '4' or '1,2,4,8')")
@@ -808,7 +808,7 @@ def elev_8x():
 @click.option("--host", default="0.0.0.0", help="Server host")
 @click.option("--port", type=int, default=int(os.getenv("PORT", "8000")), help="Server port")
 @click.option("--kwarg", "extra_kwargs", multiple=True, help="Additional key=value kwargs (e.g. --kwarg native_resolution=30)")
-def main(model_path, hdf5_file, caching_strategy, max_cache_size, seed, device, batch_size, log_mode, torch_compile, dtype, host, port, extra_kwargs):
+def main(model_path, hdf5_file, caching_strategy, cache_size, seed, device, batch_size, log_mode, torch_compile, dtype, host, port, extra_kwargs):
     """Minecraft terrain API server"""
     global _PIPELINE_CONFIG
     if caching_strategy == 'indirect' and hdf5_file is None:
@@ -827,7 +827,7 @@ def main(model_path, hdf5_file, caching_strategy, max_cache_size, seed, device, 
         'model_path': model_path,
         'hdf5_file': hdf5_file,
         'caching_strategy': caching_strategy,
-        'cache_limit': max_cache_size,
+        'cache_limit': parse_cache_size(cache_size),
         'seed': seed,
         'device': device,
         'latents_batch_size': batch_sizes,

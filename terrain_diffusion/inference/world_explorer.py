@@ -7,7 +7,7 @@ from matplotlib.widgets import Button
 
 from terrain_diffusion.inference.world_pipeline import WorldPipeline, normalize_tensor, resolve_hdf5_path
 from terrain_diffusion.inference.relief_map import get_relief_map
-from terrain_diffusion.common.cli_helpers import parse_kwargs
+from terrain_diffusion.common.cli_helpers import parse_kwargs, parse_cache_size
 
 BIOME_LEGEND = {
     0: "Unknown",
@@ -274,7 +274,7 @@ def start_explorer(model_path: str, hdf5_file: str | None = None, seed: int | No
 @click.argument("model_path", default="xandergos/terrain-diffusion-90m")
 @click.option("--caching-strategy", type=click.Choice(["indirect", "direct"]), default="direct", help="Caching strategy: 'indirect' uses HDF5, 'direct' uses in-memory LRU cache")
 @click.option("--hdf5-file", default=None, help="HDF5 file path (required for indirect caching, optional for direct)")
-@click.option("--max-cache-size", type=int, default=None, help="Max cache size in bytes (for direct caching)")
+@click.option("--cache-size", default="100M", help="Cache size (e.g., 100M, 1G) for direct caching")
 @click.option("--seed", type=int, default=None, help="Random seed (default: random)")
 @click.option("--device", default=None, help="Device (cuda/cpu, default: auto)")
 @click.option("--batch-size", type=str, default="1,4", help="Batch size(s) for latent generation (e.g. '4' or '1,2,4,8')")
@@ -286,7 +286,7 @@ def start_explorer(model_path: str, hdf5_file: str | None = None, seed: int | No
 @click.option("--coarse-offset-j", type=int, default=0, help="Coarse window offset in j direction")
 @click.option("--detail-size", type=int, default=1024, help="Full resolution detail window size")
 @click.option("--kwarg", "extra_kwargs", multiple=True, help="Additional key=value kwargs (e.g. --kwarg native_resolution=30)")
-def main(model_path, hdf5_file, caching_strategy, max_cache_size, seed, device, batch_size, log_mode, torch_compile, dtype, coarse_window, coarse_offset_i, coarse_offset_j, detail_size, extra_kwargs):
+def main(model_path, hdf5_file, caching_strategy, cache_size, seed, device, batch_size, log_mode, torch_compile, dtype, coarse_window, coarse_offset_i, coarse_offset_j, detail_size, extra_kwargs):
     """Explore a generated world interactively"""
     if caching_strategy == 'indirect' and hdf5_file is None:
         hdf5_file = 'TEMP'
@@ -314,7 +314,7 @@ def main(model_path, hdf5_file, caching_strategy, max_cache_size, seed, device, 
         torch_compile=torch_compile,
         dtype=dtype,
         caching_strategy=caching_strategy,
-        cache_limit=max_cache_size,
+        cache_limit=parse_cache_size(cache_size),
         **parse_kwargs(extra_kwargs),
     )
 

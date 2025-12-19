@@ -304,7 +304,7 @@ class WorldPipeline(ConfigMixin):
         coarse_means: list = None,
         coarse_stds: list = None,
         caching_strategy: str = 'indirect',
-        cache_limit: int | None = None,
+        cache_limit: int | None = 100 * 1024 * 1024,
     ):
         super().__init__()
         
@@ -994,7 +994,7 @@ class WorldPipeline(ConfigMixin):
         weight_window = linear_weight_window(TILE_SIZE, 'cpu', torch.float32)
         
         t_list = [torch.atan(scheduler.sigmas[0] / scheduler.config.sigma_data)]
-        t_list += [torch.arctan(torch.tensor(0.065) / 0.5)]
+        #t_list += [torch.arctan(torch.tensor(0.065) / 0.5)]
         
         def f(ctx, latents):
             return self._decoder_inference(ctx, latents, scheduler, weight_window, t_list)
