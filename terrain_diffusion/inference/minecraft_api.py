@@ -34,15 +34,23 @@ def _get_pipeline() -> WorldPipeline:
 
     cfg = _PIPELINE_CONFIG
     device = cfg.get('device') or _select_device()
+    caching_strategy = cfg.get('caching_strategy', 'indirect')
     _PIPELINE = WorldPipeline.from_pretrained(
         cfg.get('model_path', 'xandergos/terrain-diffusion-90m'),
         seed=cfg.get('seed'),
         latents_batch_size=cfg.get('latents_batch_size', 4),
         log_mode=cfg.get('log_mode', 'verbose'),
+        torch_compile=cfg.get('torch_compile', False),
+        dtype=cfg.get('dtype'),
+        caching_strategy=caching_strategy,
         **cfg.get('kwargs', {}),
     )
     _PIPELINE.to(device)
-    _PIPELINE.bind(cfg.get('hdf5_file', 'world.h5'))
+    hdf5_file = cfg.get('hdf5_file')
+    if caching_strategy == 'direct':
+        _PIPELINE.bind(hdf5_file=hdf5_file)
+    else:
+        _PIPELINE.bind(hdf5_file or 'TEMP')
     print(f"World seed: {_PIPELINE.seed}")
     return _PIPELINE
 
@@ -445,7 +453,7 @@ def _classify_biome(elev: torch.Tensor, climate: Optional[torch.Tensor], i0: int
     #   Examples: Mediterranean gorges - shrubs provide some cohesion
     # - Humid zones (tree_moisture > 0.8): bare rock at ~50° (tan ≈ 1.19)
     #   Examples: Columbia River Gorge, Three Gorges - dense root networks
-    bare_threshold_min = 0.67   # tan(35°) for arid regions
+    bare_threshold_min = 0.7   # tan(35°) for arid regions
     bare_threshold_max = 1.19   # tan(50°) for humid regions
     moisture_factor = ((tree_moisture - 0.35) / 0.45).clamp(0.0, 1.0)
     bare_threshold = bare_threshold_min + (bare_threshold_max - bare_threshold_min) * moisture_factor
@@ -786,27 +794,47 @@ def elev_8x():
 
 @click.command()
 @click.argument("model_path", default="xandergos/terrain-diffusion-90m")
-@click.option("--hdf5-file", default="TEMP", help="HDF5 file path (use 'TEMP' for temporary file)")
+@click.option("--caching-strategy", type=click.Choice(["indirect", "direct"]), default="direct", help="Caching strategy: 'indirect' uses HDF5, 'direct' uses in-memory LRU cache")
+@click.option("--hdf5-file", default=None, help="HDF5 file path (required for indirect caching, optional for direct)")
+@click.option("--max-cache-size", type=int, default=None, help="Max cache size in bytes (for direct caching)")
 @click.option("--seed", type=int, default=None, help="Random seed (default: from file or random)")
 @click.option("--device", default=None, help="Device (cuda/cpu, default: auto)")
-@click.option("--batch-size", type=int, default=4, help="Batch size for latent generation")
+@click.option("--batch-size", type=str, default="1,4", help="Batch size(s) for latent generation (e.g. '4' or '1,2,4,8')")
 @click.option("--log-mode", type=click.Choice(["info", "verbose"]), default="verbose", help="Logging mode")
+@click.option("--compile/--no-compile", "torch_compile", default=True, help="Use torch.compile for faster inference")
+@click.option("--dtype", type=click.Choice(["fp32", "bf16", "fp16"]), default="fp32", help="Model dtype")
 @click.option("--host", default="0.0.0.0", help="Server host")
 @click.option("--port", type=int, default=int(os.getenv("PORT", "8000")), help="Server port")
 @click.option("--kwarg", "extra_kwargs", multiple=True, help="Additional key=value kwargs (e.g. --kwarg native_resolution=30)")
-def main(model_path, hdf5_file, seed, device, batch_size, log_mode, host, port, extra_kwargs):
+def main(model_path, hdf5_file, caching_strategy, max_cache_size, seed, device, batch_size, log_mode, torch_compile, dtype, host, port, extra_kwargs):
     """Minecraft terrain API server"""
     global _PIPELINE_CONFIG
-    hdf5_file = resolve_hdf5_path(hdf5_file)
+    if caching_strategy == 'indirect' and hdf5_file is None:
+        hdf5_file = 'TEMP'
+    if hdf5_file is not None:
+        hdf5_file = resolve_hdf5_path(hdf5_file)
+    # Parse batch size(s)
+    if ',' in batch_size:
+        batch_sizes = [int(x.strip()) for x in batch_size.split(',')]
+    else:
+        batch_sizes = int(batch_size)
+    # Normalize dtype
+    if dtype == 'fp32':
+        dtype = None
     _PIPELINE_CONFIG = {
         'model_path': model_path,
         'hdf5_file': hdf5_file,
+        'caching_strategy': caching_strategy,
+        'cache_limit': max_cache_size,
         'seed': seed,
         'device': device,
-        'latents_batch_size': batch_size,
+        'latents_batch_size': batch_sizes,
         'log_mode': log_mode,
+        'torch_compile': torch_compile,
+        'dtype': dtype,
         'kwargs': parse_kwargs(extra_kwargs),
     }
+    _get_pipeline()  # Initialize pipeline upfront (triggers compilation)
     app.run(host=host, port=port, debug=False, threaded=False)
 
 
