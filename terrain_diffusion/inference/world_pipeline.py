@@ -118,37 +118,6 @@ def linear_weight_window(size: int, device: torch.device, dtype: torch.dtype) ->
     wx = 1 - (1 - eps) * torch.clamp(torch.abs(x - mid).to(dtype) / mid, 0, 1)
     return (wy * wx)
 
-def normalize_infinite_tensor(tile_store, tensor_id, tensor, tile_size, dim=0):
-    tensor_shape_list = list(tensor.shape)
-    tensor_shape_list[dim] -= 1
-    tensor_shape = tuple(tensor_shape_list)
-    
-    
-    out_window_size = tuple(x if x is not None else tile_size for x in tensor_shape)
-    tensor_out_window = TensorWindow(size=out_window_size, stride=out_window_size)
-    
-    in_window_size = tuple(x if x is not None else tile_size for x in tensor.shape)
-    tensor_in_window = TensorWindow(size=in_window_size, stride=in_window_size)
-
-    def _normalize_fn(ctx, t):
-        idx_num = [slice(None)] * t.ndim
-        idx_den = [slice(None)] * t.ndim
-        idx_num[dim] = slice(None, -1)
-        idx_den[dim] = slice(-1, None)
-        return t[tuple(idx_num)] / t[tuple(idx_den)]
-
-    kwargs = {}
-    if isinstance(tile_store, MemoryTileStore):
-        kwargs['cache_method'] = 'direct'
-        # Note: cache_limit would need to be passed from the pipeline instance
-        # For now, this function doesn't have access to it, so we'll handle it in methods
-    return tile_store.get_or_create(tensor_id,
-                                    shape=tensor_shape,
-                                    f=_normalize_fn,
-                                    output_window=tensor_out_window,
-                                    args=(tensor,),
-                                    args_windows=(tensor_in_window,),
-                                    **kwargs)
     
 def plot_channels_slider(data, cmap=None, channel_names=None):
     """
@@ -397,6 +366,15 @@ class WorldPipeline(ConfigMixin):
             if bs >= actual_size:
                 return bs
         return self._batch_sizes[-1]  # fallback to max
+    
+    def _common_tile_kwargs(self) -> dict:
+        """Get common kwargs for tile_store.get_or_create()."""
+        if self.caching_strategy != 'direct':
+            return {}
+        kwargs = {'cache_method': 'direct'}
+        if self.cache_limit is not None:
+            kwargs['cache_limit'] = self.cache_limit
+        return kwargs
     
     def _apply_dtype_and_compile(self):
         """Apply dtype conversion and torch.compile to models."""
@@ -793,17 +771,12 @@ class WorldPipeline(ConfigMixin):
             size=(7, TILE_SIZE // coarse_pool, TILE_SIZE // coarse_pool), 
             stride=(7, TILE_STRIDE // coarse_pool, TILE_STRIDE // coarse_pool)
         )
-        kwargs = {}
-        if self.caching_strategy == 'direct':
-            kwargs['cache_method'] = 'direct'
-            if self.cache_limit is not None:
-                kwargs['cache_limit'] = self.cache_limit
         return self.tile_store.get_or_create(
             "base_coarse_map",
             shape=(7, None, None),
             f=f,
             output_window=output_window,
-            **kwargs
+            **self._common_tile_kwargs()
         )
 
     # =========================================================================
@@ -949,11 +922,6 @@ class WorldPipeline(ConfigMixin):
         output_window = TensorWindow(size=(6, TILE_SIZE, TILE_SIZE), stride=(6, TILE_STRIDE, TILE_STRIDE))
         coarse_window = TensorWindow(size=(7, 4, 4), stride=(7, 1, 1), offset=(0, -1, -1))
         
-        kwargs = {}
-        if self.caching_strategy == 'direct':
-            kwargs['cache_method'] = 'direct'
-            if self.cache_limit is not None:
-                kwargs['cache_limit'] = self.cache_limit
         tensor = self.tile_store.get_or_create(
             "init_latent_map",
             shape=(6, None, None),
@@ -964,16 +932,11 @@ class WorldPipeline(ConfigMixin):
             args=(self.coarse,),
             args_windows=(coarse_window,),
             batch_size=self.latents_batch_size,
-            **kwargs
+            **self._common_tile_kwargs()
         )
         
         inter_t = [torch.arctan(torch.tensor(0.35) / 0.5)]
         for i, t in enumerate(inter_t):
-            kwargs = {}
-            if self.caching_strategy == 'direct':
-                kwargs['cache_method'] = 'direct'
-                if self.cache_limit is not None:
-                    kwargs['cache_limit'] = self.cache_limit
             tensor = self.tile_store.get_or_create(
                 f"step_latent_map_{i}",
                 shape=(6, None, None),
@@ -984,7 +947,7 @@ class WorldPipeline(ConfigMixin):
                 args=(tensor, self.coarse,),
                 args_windows=(output_window, coarse_window,),
                 batch_size=self.latents_batch_size,
-                **kwargs
+                **self._common_tile_kwargs()
             )
         
         return tensor
@@ -1046,11 +1009,6 @@ class WorldPipeline(ConfigMixin):
         output_window = TensorWindow(size=(2, TILE_SIZE, TILE_SIZE), stride=(2, TILE_STRIDE, TILE_STRIDE))
         input_window = TensorWindow(size=(6, TILE_SIZE//lc, TILE_SIZE//lc), stride=(6, TILE_STRIDE//lc, TILE_STRIDE//lc))
         
-        kwargs = {}
-        if self.caching_strategy == 'direct':
-            kwargs['cache_method'] = 'direct'
-            if self.cache_limit is not None:
-                kwargs['cache_limit'] = self.cache_limit
         return self.tile_store.get_or_create(
             "init_residual_map",
             shape=(2, None, None),
@@ -1058,7 +1016,7 @@ class WorldPipeline(ConfigMixin):
             output_window=output_window,
             args=(self.latents,),
             args_windows=(input_window,),
-            **kwargs
+            **self._common_tile_kwargs()
         )
 
     # =========================================================================
