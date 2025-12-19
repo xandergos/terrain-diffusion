@@ -876,7 +876,7 @@ class WorldPipeline(ConfigMixin):
             return []
 
         actual_batch_size = len(model_in_list)
-        padded_batch_size = self._get_padded_batch_size(actual_batch_size)
+        padded_batch_size = self._get_padded_batch_size(actual_batch_size) if self.torch_compile else actual_batch_size
         
         model_in_batch = torch.cat(model_in_list, dim=0)
         cond_inputs_batch = torch.cat(cond_inputs_list, dim=0)

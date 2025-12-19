@@ -454,7 +454,7 @@ def _classify_biome(elev: torch.Tensor, climate: Optional[torch.Tensor], i0: int
     #   Examples: Columbia River Gorge, Three Gorges - dense root networks
     bare_threshold_min = 0.7   # tan(35°) for arid regions
     bare_threshold_max = 1.19   # tan(50°) for humid regions
-    moisture_factor = (tree_moisture / 0.8).clamp(0.0, 1.0).sqrt()
+    moisture_factor = ((tree_moisture - 0.35) / 0.45).clamp(0.0, 1.0)
     bare_threshold = bare_threshold_min + (bare_threshold_max - bare_threshold_min) * moisture_factor
 
     # === TREE COVERAGE CLASSIFICATION ===
