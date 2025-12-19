@@ -29,24 +29,36 @@ def generate_world(model_path: str, hdf5_file: str, seed: int | None = None, coa
 
 @click.command()
 @click.argument("model_path", default="xandergos/terrain-diffusion-90m")
-@click.option("--hdf5-file", default="world.h5", help="Output HDF5 file path (use 'TEMP' for temporary file)")
+@click.option("--hdf5-file", default="TEMP", help="Output HDF5 file path (use 'TEMP' for temporary file)")
 @click.option("--seed", type=int, default=None, help="Random seed (default: random or from file)")
 @click.option("--device", default=None, help="Device (cuda/cpu, default: auto)")
-@click.option("--batch-size", type=int, default=4, help="Batch size for latent generation")
+@click.option("--batch-size", type=str, default="4", help="Batch size(s) for latent generation (e.g. '4' or '1,2,4,8')")
 @click.option("--log-mode", type=click.Choice(["info", "verbose"]), default="verbose", help="Logging mode")
 @click.option("--coarse-window", type=int, default=50, help="Coarse window size")
+@click.option("--compile", "torch_compile", is_flag=True, help="Use torch.compile for faster inference")
+@click.option("--dtype", type=click.Choice(["fp32", "bf16", "fp16"]), default=None, help="Model dtype (default: fp32)")
 @click.option("--kwarg", "extra_kwargs", multiple=True, help="Additional key=value kwargs (e.g. --kwarg coarse_pooling=2)")
-def main(model_path, hdf5_file, seed, device, batch_size, log_mode, coarse_window, extra_kwargs):
+def main(model_path, hdf5_file, seed, device, batch_size, log_mode, coarse_window, torch_compile, dtype, extra_kwargs):
     """Generate a world using the terrain diffusion pipeline"""
     hdf5_file = resolve_hdf5_path(hdf5_file)
+    # Parse batch size(s)
+    if ',' in batch_size:
+        batch_sizes = [int(x.strip()) for x in batch_size.split(',')]
+    else:
+        batch_sizes = int(batch_size)
+    # Normalize dtype
+    if dtype == 'fp32':
+        dtype = None
     generate_world(
         model_path,
         hdf5_file,
         seed=seed,
         coarse_window=coarse_window,
         device=device,
-        latents_batch_size=batch_size,
+        latents_batch_size=batch_sizes,
         log_mode=log_mode,
+        torch_compile=torch_compile,
+        dtype=dtype,
         **parse_kwargs(extra_kwargs),
     )
 

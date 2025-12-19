@@ -304,16 +304,18 @@ class WorldPipeline(ConfigMixin):
     BASE_MODEL_FOLDER = "base_model"
     DECODER_MODEL_FOLDER = "decoder_model"
     
-    ignore_for_config = ["seed", "latents_batch_size", "log_mode"]
+    ignore_for_config = ["seed", "latents_batch_size", "log_mode", "torch_compile", "dtype"]
     
     @register_to_config
     def __init__(
         self,
         seed: int | None = None,
-        latents_batch_size: int = 1,
+        latents_batch_size: int | list[int] = 1,
         native_resolution: float = 90.0,
         *,
         log_mode: str = 'info',
+        torch_compile: bool = False,
+        dtype: str | None = None,
         latent_compression: int = 8,
         frequency_mult: list = None,
         drop_water_pct: float = 0.5,
@@ -329,10 +331,17 @@ class WorldPipeline(ConfigMixin):
         
         # Resolve seed
         self.seed = seed if seed is not None else random.randint(0, 2**31-1)
-        self.latents_batch_size = latents_batch_size
+        # Normalize batch sizes to sorted list
+        if isinstance(latents_batch_size, int):
+            self._batch_sizes = [latents_batch_size]
+        else:
+            self._batch_sizes = sorted(latents_batch_size)
+        self.latents_batch_size = self._batch_sizes[-1]  # max batch size for tile_store
         self.native_resolution = native_resolution
         self.latent_compression = latent_compression
         self.log_mode = log_mode
+        self.torch_compile = torch_compile
+        self._dtype = {'bf16': torch.bfloat16, 'fp16': torch.float16}.get(dtype)
         self.kwargs = {
             'latent_compression': latent_compression,
             'log_mode': log_mode,
@@ -361,6 +370,77 @@ class WorldPipeline(ConfigMixin):
         self.latents = None
         self.residual = None
     
+    def _get_padded_batch_size(self, actual_size: int) -> int:
+        """Get the next highest legal batch size for padding."""
+        for bs in self._batch_sizes:
+            if bs >= actual_size:
+                return bs
+        return self._batch_sizes[-1]  # fallback to max
+    
+    def _apply_dtype_and_compile(self):
+        """Apply dtype conversion and torch.compile to models."""
+        models = [
+            ('coarse_model', self.coarse_model),
+            ('base_model', self.base_model),
+            ('decoder_model', self.decoder_model),
+        ]
+        
+        # Apply dtype conversion
+        if self._dtype is not None:
+            dtype_name = {torch.bfloat16: 'bf16', torch.float16: 'fp16'}[self._dtype]
+            print(f"Converting models to {dtype_name}...")
+            for name, model in models:
+                if model is not None:
+                    model.to(self._dtype)
+        
+        # Apply torch.compile
+        if self.torch_compile:
+            print("Compiling models with torch.compile (this may take a few minutes)...")
+            if self.coarse_model is not None:
+                self.coarse_model = torch.compile(self.coarse_model)
+            if self.base_model is not None:
+                self.base_model = torch.compile(self.base_model)
+            if self.decoder_model is not None:
+                self.decoder_model = torch.compile(self.decoder_model)
+            print("Model compilation complete.")
+    
+    def _warmup_compiled_models(self):
+        """Warmup compiled models with all batch sizes."""
+        if not self.torch_compile:
+            return
+        
+        print(f"Warming up compiled models with batch sizes: {self._batch_sizes}...")
+        device = self.device
+        dtype = self._dtype or torch.float32
+        
+        # Warmup coarse model (batch size 1)
+        if self.coarse_model is not None:
+            print("  Warming up coarse_model...")
+            dummy_in = torch.randn(1, 11, 64, 64, device=device, dtype=dtype)
+            dummy_noise = torch.randn(1, device=device, dtype=dtype)
+            with torch.no_grad():
+                self.coarse_model(dummy_in, noise_labels=dummy_noise, conditional_inputs=[torch.zeros(1, device=device, dtype=dtype) for _ in range(5)])
+        
+        # Warmup base model (latent stage) with each batch size
+        if self.base_model is not None:
+            for bs in self._batch_sizes:
+                print(f"  Warming up base_model with batch size {bs}...")
+                dummy_in = torch.randn(bs, 5, 64, 64, device=device, dtype=dtype)
+                dummy_cond = torch.randn(bs, 30, device=device, dtype=dtype)
+                dummy_noise = torch.randn(bs, device=device, dtype=dtype)
+                with torch.no_grad():
+                    self.base_model(dummy_in, noise_labels=dummy_noise, conditional_inputs=[dummy_cond])
+        
+        # Warmup decoder model (batch size 1)
+        if self.decoder_model is not None:
+            print("  Warming up decoder_model...")
+            dummy_in = torch.randn(1, 5, 512, 512, device=device, dtype=dtype)
+            dummy_noise = torch.randn(1, device=device, dtype=dtype)
+            with torch.no_grad():
+                self.decoder_model(dummy_in, noise_labels=dummy_noise, conditional_inputs=[])
+        
+        print("Warmup complete.")
+    
     @classmethod
     def from_local_models(
         cls,
@@ -387,6 +467,7 @@ class WorldPipeline(ConfigMixin):
         pipeline.decoder_model = EDMUnet2D.from_pretrained(
             resolve_model_path(decoder_model_path, *MODEL_PATHS["decoder"])
         )
+        pipeline._apply_dtype_and_compile()
         return pipeline
     
     def save_pretrained(self, save_directory: str, **kwargs):
@@ -452,6 +533,7 @@ class WorldPipeline(ConfigMixin):
         pipeline.decoder_model = EDMUnet2D.from_pretrained(
             pretrained_model_name_or_path, subfolder=cls.DECODER_MODEL_FOLDER, token=token
         )
+        pipeline._apply_dtype_and_compile()
         
         return pipeline
     
@@ -471,6 +553,7 @@ class WorldPipeline(ConfigMixin):
             self.base_model = self.base_model.to(device)
         if self.decoder_model is not None:
             self.decoder_model = self.decoder_model.to(device)
+        self._warmup_compiled_models()
         return self
     
     def bind(
@@ -590,6 +673,8 @@ class WorldPipeline(ConfigMixin):
         MODEL_MEANS = torch.tensor([-37.67916460232751, 2.22578822145657, 18.030293275011356, 333.8442390481231, 1350.1259248456176, 52.444339366764396])
         MODEL_STDS = torch.tensor([39.68515115440358, 3.0981253981231522, 8.940333096712806, 322.25238547630295, 856.3430083394657, 30.982620765341043])
         
+        model_dtype = self._dtype or torch.float32
+        
         _, i, j = ctx
         i1, j1 = i * (TILE_STRIDE // pool_size), j * (TILE_STRIDE // pool_size)
         i1, j1 = i1 * pool_size, j1 * pool_size
@@ -598,19 +683,19 @@ class WorldPipeline(ConfigMixin):
         synthetic_map = torch.as_tensor(self.synthetic_map_factory(j1, i1, j2, i2))
         synthetic_map[1] = torch.where(synthetic_map[1] > 20, synthetic_map[1], (synthetic_map[1] - 20) * 1.25 + 20)
         synthetic_map = (synthetic_map - MODEL_MEANS[[0, 2, 3, 4, 5], None, None]) / MODEL_STDS[[0, 2, 3, 4, 5], None, None]
-        synthetic_map = synthetic_map.to(self.device)[None]
+        synthetic_map = synthetic_map.to(self.device, dtype=model_dtype)[None]
         
         cond_noise = torch.as_tensor(gaussian_noise_patch(
             self.seed, i1, j1, TILE_SIZE, TILE_SIZE, 
             channels=5, tile_h=TILE_SIZE, tile_w=TILE_SIZE
-        ), device=self.device)[None]
+        ), device=self.device, dtype=model_dtype)[None]
         cond_img = torch.cos(t_cond.view(1, -1, 1, 1)) * synthetic_map + torch.sin(t_cond.view(1, -1, 1, 1)) * cond_noise
         
         scheduler.set_timesteps(20)
         sample_noise = torch.as_tensor(gaussian_noise_patch(
             self.seed + 1, i1, j1, TILE_SIZE, TILE_SIZE,
             channels=6, tile_h=TILE_SIZE, tile_w=TILE_SIZE
-        ), device=self.device)[None]
+        ), device=self.device, dtype=model_dtype)[None]
         sample = sample_noise * scheduler.sigmas[0]
         
         for t, sigma in zip(scheduler.timesteps, scheduler.sigmas):
@@ -623,7 +708,7 @@ class WorldPipeline(ConfigMixin):
             model_out = self.coarse_model(x_in, noise_labels=cnoise, conditional_inputs=cond_inputs)
             sample = scheduler.step(model_out, t, sample).prev_sample
         
-        sample = sample.cpu() / scheduler.config.sigma_data
+        sample = sample.cpu().float() / scheduler.config.sigma_data
         sample = (sample * MODEL_STDS.view(1, -1, 1, 1)) + MODEL_MEANS.view(1, -1, 1, 1)
         sample[0, 1] = sample[0, 0] - sample[0, 1]
         
@@ -731,12 +816,13 @@ class WorldPipeline(ConfigMixin):
         samples_processed = []
         
         t_tensor = torch.as_tensor(t, device=self.device)
+        model_dtype = self._dtype or torch.float32
         
         for ctx, sample, cond_img in zip(ctxs, samples, cond_imgs):
             if sample is None:
-                sample = torch.zeros((1, 5, TILE_SIZE, TILE_SIZE), device=self.device)
+                sample = torch.zeros((1, 5, TILE_SIZE, TILE_SIZE), device=self.device, dtype=model_dtype)
             else:
-                sample = torch.as_tensor(sample, device=self.device)
+                sample = torch.as_tensor(sample, device=self.device, dtype=model_dtype)
                 sample = sample[:-1] / sample[-1:] * scheduler.config.sigma_data
             
             cond_img = cond_img[:-1] / cond_img[-1:]
@@ -746,14 +832,14 @@ class WorldPipeline(ConfigMixin):
             
             cond_inputs = self._process_latent_conditioning(
                 cond_img, histogram_raw, cond_means, cond_stds, torch.tensor(NOISE_LEVEL)
-            ).to(self.device)
+            ).to(self.device, dtype=model_dtype)
             
             noise = torch.as_tensor(gaussian_noise_patch(
                 self.seed + seed_offset, ctx[1]*TILE_STRIDE, ctx[2]*TILE_STRIDE, 
                 TILE_SIZE, TILE_SIZE, channels=5, tile_h=TILE_SIZE, tile_w=TILE_SIZE
             ))[None]
             
-            z = noise.to(self.device) * scheduler.config.sigma_data
+            z = noise.to(self.device, dtype=model_dtype) * scheduler.config.sigma_data
             t_view = t_tensor.view(1, 1, 1, 1).to(self.device)
             x_t = torch.cos(t_view) * sample + torch.sin(t_view) * z
             model_in = (x_t / scheduler.config.sigma_data).to(self.device)
@@ -765,19 +851,30 @@ class WorldPipeline(ConfigMixin):
         if not model_in_list:
             return []
 
+        actual_batch_size = len(model_in_list)
+        padded_batch_size = self._get_padded_batch_size(actual_batch_size)
+        
         model_in_batch = torch.cat(model_in_list, dim=0)
         cond_inputs_batch = torch.cat(cond_inputs_list, dim=0)
-        noise_labels_batch = t_tensor.expand(len(ctxs)).to(self.device)
+        noise_labels_batch = t_tensor.expand(actual_batch_size).to(self.device, dtype=model_dtype)
+        
+        # Pad to next legal batch size for torch.compile efficiency
+        if padded_batch_size > actual_batch_size:
+            pad_count = padded_batch_size - actual_batch_size
+            model_in_batch = torch.cat([model_in_batch, model_in_batch[:1].expand(pad_count, -1, -1, -1)], dim=0)
+            cond_inputs_batch = torch.cat([cond_inputs_batch, cond_inputs_batch[:1].expand(pad_count, -1)], dim=0)
+            noise_labels_batch = torch.cat([noise_labels_batch, noise_labels_batch[:1].expand(pad_count)], dim=0)
         
         pred_batch = -self.base_model(model_in_batch, noise_labels=noise_labels_batch, conditional_inputs=[cond_inputs_batch])
         
         outputs = []
-        for i, pred in enumerate(pred_batch):
+        for i in range(actual_batch_size):
+            pred = pred_batch[i]
             sample, x_t = samples_processed[i]
             pred = pred.unsqueeze(0)
             t_view = t_tensor.view(1, 1, 1, 1).to(self.device)
             sample = torch.cos(t_view) * x_t - torch.sin(t_view) * scheduler.config.sigma_data * pred
-            sample = sample.cpu() / scheduler.config.sigma_data
+            sample = sample.cpu().float() / scheduler.config.sigma_data
             outputs.append(torch.cat([sample[0] * weight_window[None], weight_window[None]], dim=0))
         return outputs
     
@@ -838,12 +935,14 @@ class WorldPipeline(ConfigMixin):
         if MOCK:
             return torch.ones((2, TILE_SIZE, TILE_SIZE))
         
-        sample = torch.zeros((1, 1, TILE_SIZE, TILE_SIZE), device=self.device)
+        model_dtype = self._dtype or torch.float32
+        
+        sample = torch.zeros((1, 1, TILE_SIZE, TILE_SIZE), device=self.device, dtype=model_dtype)
         lc = self.latent_compression
         latents = (latents[:-1] / latents[-1:])[:4].view(1, 4, TILE_SIZE//lc, TILE_SIZE//lc)
         upsampled_latents = torch.nn.functional.interpolate(
             latents, size=(TILE_SIZE, TILE_SIZE), mode='nearest'
-        ).to(self.device)
+        ).to(self.device, dtype=model_dtype)
         
         for i, t in enumerate(t_list):
             noise = torch.as_tensor(gaussian_noise_patch(
@@ -851,14 +950,14 @@ class WorldPipeline(ConfigMixin):
                 TILE_SIZE, TILE_SIZE, channels=1, tile_h=TILE_SIZE, tile_w=TILE_SIZE
             ))[None]
             t = t.view(1, 1, 1, 1).to(self.device)
-            z = noise.to(self.device) * scheduler.config.sigma_data
+            z = noise.to(self.device, dtype=model_dtype) * scheduler.config.sigma_data
             x_t = torch.cos(t) * sample + torch.sin(t) * z
             model_in = (x_t / scheduler.config.sigma_data).to(self.device)
             model_in = torch.cat([model_in, upsampled_latents], dim=1)
-            pred = -self.decoder_model(model_in, noise_labels=t.flatten(), conditional_inputs=[])
+            pred = -self.decoder_model(model_in, noise_labels=t.flatten().to(model_dtype), conditional_inputs=[])
             sample = torch.cos(t) * x_t - torch.sin(t) * scheduler.config.sigma_data * pred
             
-        sample = sample.cpu() / scheduler.config.sigma_data
+        sample = sample.cpu().float() / scheduler.config.sigma_data
         return torch.cat([sample[0] * weight_window[None], weight_window[None]], dim=0)
     
     def _build_decoder_stage(self):
