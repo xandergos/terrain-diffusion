@@ -3,6 +3,8 @@ import torch
 import numpy as np
 import math
 import os
+from pathlib import Path
+from PIL import Image
 from accelerate import Accelerator
 from confection import Config, registry
 from torch.utils.data import DataLoader
@@ -18,6 +20,7 @@ from terrain_diffusion.training.utils import recursive_to
 from terrain_diffusion.data.laplacian_encoder import laplacian_denoise, laplacian_decode
 from terrain_diffusion.training.evaluation.sample_diffusion_decoder import sample_decoder_consistency_tiled
 from terrain_diffusion.training.evaluation.sample_diffusion_base import sample_base_diffusion
+from terrain_diffusion.inference.relief_map import get_relief_map
 
 def _normalize_uint8_three_channel(images: torch.Tensor) -> torch.Tensor:
     """Normalize single-channel images to uint8 [0, 255] repeated to 3 channels."""
@@ -80,7 +83,9 @@ def _decode_latents_to_terrain(samples: torch.Tensor, val_dataset, decoder_model
 @click.option('--guidance-scale', type=float, default=2.15, help='Guidance scale')
 @click.option('--inter-t', type=float, default=0.13, help='Intermediate t for 2-step decoder sampling. Use 0 or less for one-step model.')
 @click.option('--disable-laplacian-denoising', is_flag=True, default=False, help='Disable laplacian denoising step')
-def main(model_path, config_path, num_images, batch_size, decoder_batch_size, steps, metric, guide_model_path, guidance_scale, inter_t, disable_laplacian_denoising):
+@click.option('--save-images', type=int, default=0, help='Number of images to save to results directory')
+@click.option('--experiment-name', type=str, default='base_diffusion', help='Name of experiment folder in results/')
+def main(model_path, config_path, num_images, batch_size, decoder_batch_size, steps, metric, guide_model_path, guidance_scale, inter_t, disable_laplacian_denoising, save_images, experiment_name):
     """Evaluate base diffusion using FID/KID on decoded terrain."""
     build_registry()
     
@@ -143,6 +148,12 @@ def main(model_path, config_path, num_images, batch_size, decoder_batch_size, st
     inter_t_list = [inter_t] if inter_t > 0 else None
     
     print(f"Evaluating {metric_name.upper()} on {num_images} images with {scheduler_steps} steps...")
+    
+    # Setup results directory for image saving
+    results_dir = Path("results") / experiment_name
+    if save_images > 0:
+        results_dir.mkdir(parents=True, exist_ok=True)
+    saved_count = 0
     
     generator = torch.Generator(device=device).manual_seed(548)
     
@@ -207,6 +218,23 @@ def main(model_path, config_path, num_images, batch_size, decoder_batch_size, st
             with torch.autocast(device_type=device.type, enabled=False):
                 image_metric.update(_normalize_uint8_three_channel(terrain_fake.float()), real=False)
                 image_metric.update(_normalize_uint8_three_channel(terrain_real.float()), real=True)
+            
+            # Save images if requested
+            if saved_count < save_images:
+                for i in range(min(bs, save_images - saved_count)):
+                    # terrain_fake/real are in meters after signed-square transform
+                    fake_img = terrain_fake[i, 0].cpu().numpy()
+                    real_img = terrain_real[i, 0].cpu().numpy()
+                    fake_img_norm = ((fake_img - fake_img.min()) / (fake_img.max() - fake_img.min() + 1e-8) * 255).astype(np.uint8)
+                    real_img_norm = ((real_img - real_img.min()) / (real_img.max() - real_img.min() + 1e-8) * 255).astype(np.uint8)
+                    Image.fromarray(fake_img_norm).save(results_dir / f"fake_{saved_count:05d}.png")
+                    Image.fromarray(real_img_norm).save(results_dir / f"real_{saved_count:05d}.png")
+                    # Save shaded relief maps (get_relief_map expects elevation in meters)
+                    fake_relief = get_relief_map(fake_img, None, None, None)
+                    real_relief = get_relief_map(real_img, None, None, None)
+                    Image.fromarray((fake_relief * 255).astype(np.uint8)).save(results_dir / f"fake_relief_{saved_count:05d}.png")
+                    Image.fromarray((real_relief * 255).astype(np.uint8)).save(results_dir / f"real_relief_{saved_count:05d}.png")
+                    saved_count += 1
                 
             pbar.update(bs)
             

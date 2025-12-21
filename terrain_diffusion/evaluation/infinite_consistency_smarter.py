@@ -80,7 +80,7 @@ def _decode_latents_to_terrain(samples: torch.Tensor, val_dataset, decoder_model
 @click.option('--inter-t', type=float, default=0.61, help='Intermediate t for 2-step sampling. Use 0 or less for one-step model.')
 @click.option('--decoder-inter-t', type=float, default=0.13, help='Intermediate t for 2-step decoder sampling. Use 0 or less for one-step model.')
 @click.option('--save-images', type=int, default=0, help='Number of images to save to results directory')
-@click.option('--experiment-name', type=str, default='infinite_consistency_smarter', help='Name of experiment folder in results/')
+@click.option('--experiment-name', type=str, default='infinite_consistency_naive', help='Name of experiment folder in results/')
 def main(model_path, config_path, num_images, batch_size, decoder_batch_size, metric, inter_t, decoder_inter_t, save_images, experiment_name):
     """Evaluate base diffusion using FID/KID on decoded terrain."""
     build_registry()

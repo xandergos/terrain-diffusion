@@ -203,7 +203,6 @@ def main(model_path, config_path, num_images, batch_size, decoder_batch_size, me
                 num_tiles = 4
                 tile_shape = (B * num_tiles, C, tile_size, tile_size)
                 
-                # Prepare conditioning with stride 2 (overlapping regions from shared global input)
                 tile_conds_list = []
                 if cond_inputs.ndim == 4:
                     for ic in range(2):
