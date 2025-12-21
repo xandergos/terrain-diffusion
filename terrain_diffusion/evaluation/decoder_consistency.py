@@ -35,12 +35,12 @@ def _get_weights(size):
 
 @click.command()
 @click.option('-m', '--model', 'model_path', type=str, default=None, help='Path to pretrained decoder model (local or HuggingFace repo)')
-@click.option('-c', '--config', 'config_path', type=click.Path(exists=True), required=True, help='Path to the consistency decoder configuration file', default='configs/diffusion_decoder/consistency_decoder_64x3.cfg')
+@click.option('-c', '--config', 'config_path', type=click.Path(exists=True), required=True, help='Path to the consistency decoder configuration file', default='configs/diffusion_decoder/consistency_decoder_64-3.cfg')
 @click.option('--num-images', type=int, default=50000, help='Number of images to evaluate')
 @click.option('--batch-size', type=int, default=10, help='Batch size for evaluation')
 @click.option('--tile-size', type=int, default=512, help='Tile size for processing')
 @click.option('--tile-stride', type=int, default=None, help='Tile stride for processing. Defaults to tile_size // 2')
-@click.option('--intermediate-sigma', type=float, default=0.065, help='Intermediate sigma for 2-step sampling.')
+@click.option('--intermediate-sigma', type=float, default=0.065, help='Intermediate sigma for 2-step sampling. Use 0 or less for one-step model.')
 @click.option('--metric', type=click.Choice(['fid', 'kid'], case_sensitive=False), default='fid', help='Metric to evaluate')
 @click.option('--image-size', type=int, default=None, help='Image size for processing. Overrides config if specified.')
 def main(model_path, config_path, num_images, batch_size, tile_size, tile_stride, intermediate_sigma, metric, image_size):
@@ -102,7 +102,7 @@ def main(model_path, config_path, num_images, batch_size, tile_size, tile_stride
         
     sigma_data = config['results_dataset']['sigma_data']
     init_t = torch.tensor(np.arctan(scheduler.sigmas[0] / sigma_data), device=device)
-    if intermediate_sigma is not None and intermediate_sigma > 0:
+    if intermediate_sigma > 0:
         intermediate_t = torch.tensor(np.arctan(intermediate_sigma / sigma_data), device=device)
     else:
         intermediate_t = None

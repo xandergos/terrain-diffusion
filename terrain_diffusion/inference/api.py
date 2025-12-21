@@ -241,6 +241,7 @@ def main(model_path, hdf5_file, caching_strategy, cache_size, seed, device, batc
         'dtype': dtype,
         'kwargs': parse_kwargs(extra_kwargs),
     }
+    _get_pipeline()
     app.run(host=host, port=port, debug=False, threaded=False)
 
 

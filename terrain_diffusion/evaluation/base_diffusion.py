@@ -28,7 +28,7 @@ def _normalize_uint8_three_channel(images: torch.Tensor) -> torch.Tensor:
     normalized = torch.clamp(((images - image_mid) / image_range + 0.5) * 255, 0, 255)
     return normalized.repeat(1, 3, 1, 1).to(torch.uint8)
 
-def _decode_latents_to_terrain(samples: torch.Tensor, val_dataset, decoder_model, scheduler, generator, inter_t) -> torch.Tensor:
+def _decode_latents_to_terrain(samples: torch.Tensor, val_dataset, decoder_model, scheduler, generator, inter_t, disable_laplacian_denoising=False) -> torch.Tensor:
     """Decode [latents(4ch), lowfreq(1ch)] into terrain using evaluation primitives."""
     device = samples.device
     base_dataset = val_dataset.base_dataset if hasattr(val_dataset, 'base_dataset') else val_dataset
@@ -62,7 +62,8 @@ def _decode_latents_to_terrain(samples: torch.Tensor, val_dataset, decoder_model
     # Denormalize and compose terrain
     highfreq = base_dataset.denormalize_residual(residual[:, :1])
     lowfreq = base_dataset.denormalize_lowfreq(lowfreq_input)
-    highfreq, lowfreq = laplacian_denoise(highfreq, lowfreq, sigma=5)
+    if not disable_laplacian_denoising:
+        highfreq, lowfreq = laplacian_denoise(highfreq, lowfreq, sigma=5)
     
     # When calculating FID/KID, we can approximate padding with extrapolation. But typically we can get padding from InfiniteDiffusion directly.
     return laplacian_decode(highfreq, lowfreq, extrapolate=True)
@@ -77,8 +78,9 @@ def _decode_latents_to_terrain(samples: torch.Tensor, val_dataset, decoder_model
 @click.option('--metric', type=click.Choice(['fid', 'kid'], case_sensitive=False), default='fid', help='Metric to evaluate')
 @click.option('-gm', '--guide-model', 'guide_model_path', type=str, default=None, help='Path to guide model (local or HuggingFace repo)')
 @click.option('--guidance-scale', type=float, default=2.15, help='Guidance scale')
-@click.option('--inter-t', type=float, default=0.13, help='Intermediate t for 2-step decoder sampling.')
-def main(model_path, config_path, num_images, batch_size, decoder_batch_size, steps, metric, guide_model_path, guidance_scale, inter_t):
+@click.option('--inter-t', type=float, default=0.13, help='Intermediate t for 2-step decoder sampling. Use 0 or less for one-step model.')
+@click.option('--disable-laplacian-denoising', is_flag=True, default=False, help='Disable laplacian denoising step')
+def main(model_path, config_path, num_images, batch_size, decoder_batch_size, steps, metric, guide_model_path, guidance_scale, inter_t, disable_laplacian_denoising):
     """Evaluate base diffusion using FID/KID on decoded terrain."""
     build_registry()
     
@@ -138,7 +140,7 @@ def main(model_path, config_path, num_images, batch_size, decoder_batch_size, st
         image_metric = FrechetInceptionDistance(normalize=True).to(device)
         
     scheduler_steps = steps
-    inter_t = [inter_t] if inter_t is not None else None
+    inter_t_list = [inter_t] if inter_t > 0 else None
     
     print(f"Evaluating {metric_name.upper()} on {num_images} images with {scheduler_steps} steps...")
     
@@ -191,7 +193,7 @@ def main(model_path, config_path, num_images, batch_size, decoder_batch_size, st
                 assert terrain_fake.shape[0] % decoder_batch_size == 0
                 for i in range(terrain_fake.shape[0]//decoder_batch_size):
                     in_samples = samples[i*decoder_batch_size:(i+1)*decoder_batch_size]
-                    terrain_fake[i*decoder_batch_size:(i+1)*decoder_batch_size] = _decode_latents_to_terrain(in_samples, val_dataset, decoder_model, scheduler, generator, inter_t=inter_t)
+                    terrain_fake[i*decoder_batch_size:(i+1)*decoder_batch_size] = _decode_latents_to_terrain(in_samples, val_dataset, decoder_model, scheduler, generator, inter_t=inter_t_list, disable_laplacian_denoising=disable_laplacian_denoising)
             terrain_fake = torch.sign(terrain_fake) * torch.square(terrain_fake)
             
             # Real terrain

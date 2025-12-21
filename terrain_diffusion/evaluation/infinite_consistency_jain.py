@@ -1,8 +1,8 @@
 import click
 import torch
 import numpy as np
-import math
 import os
+import random
 from pathlib import Path
 from PIL import Image
 from accelerate import Accelerator
@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from torchmetrics.image.fid import FrechetInceptionDistance
 from torchmetrics.image.kid import KernelInceptionDistance
+from pyfastnoiselite.pyfastnoiselite import FastNoiseLite, NoiseType, FractalType
 
 from terrain_diffusion.models.edm_unet import EDMUnet2D
 from terrain_diffusion.common.model_utils import resolve_model_path, MODEL_PATHS
@@ -19,9 +20,35 @@ from terrain_diffusion.training.datasets import LongDataset
 from terrain_diffusion.training.utils import recursive_to
 from terrain_diffusion.data.laplacian_encoder import laplacian_denoise, laplacian_decode
 from terrain_diffusion.training.evaluation.sample_diffusion_decoder import sample_decoder_consistency_tiled
-from terrain_diffusion.training.evaluation import _linear_weight_window, _constant_weight_window, _tile_starts
 from terrain_diffusion.training.evaluation.sample_diffusion_base import _process_cond_img
 from terrain_diffusion.inference.relief_map import get_relief_map
+
+def _perlin_noise_2d(size: int, seed: int, frequency: float = 0.01, octaves: int = 6) -> np.ndarray:
+    """Generate 2D fractal Perlin noise using FastNoiseLite."""
+    noise = FastNoiseLite(seed=seed)
+    noise.noise_type = NoiseType.NoiseType_Perlin
+    noise.frequency = frequency
+    noise.fractal_type = FractalType.FractalType_FBm
+    noise.fractal_octaves = octaves
+    noise.fractal_lacunarity = 2.0
+    noise.fractal_gain = 0.5
+    
+    x = np.arange(0, size, dtype=np.float32)
+    y = np.arange(0, size, dtype=np.float32)
+    xx, yy = np.meshgrid(x, y)
+    coords = np.array([xx.flatten(), yy.flatten()], dtype=np.float32)
+    
+    noise_values = noise.gen_from_coords(coords)
+    return noise_values.reshape(size, size)
+
+def _jain_kernel_2d(size: int, device, dtype) -> torch.Tensor:
+    """Create 2D Jain blending kernel: g(t) = 16t²(1-t)², G = g ⊗ g.
+    
+    Kernel is 1 at center, 0 at edges with smooth derivatives at boundaries.
+    """
+    t = torch.linspace(0, 1, size, device=device, dtype=dtype)
+    g = 16 * t**2 * (1 - t)**2
+    return g.view(-1, 1) * g.view(1, -1)  # outer product
 
 def _normalize_uint8_three_channel(images: torch.Tensor) -> torch.Tensor:
     """Normalize single-channel images to uint8 [0, 255] repeated to 3 channels."""
@@ -80,10 +107,9 @@ def _decode_latents_to_terrain(samples: torch.Tensor, val_dataset, decoder_model
 @click.option('--metric', type=click.Choice(['fid', 'kid'], case_sensitive=False), default='fid', help='Metric to evaluate')
 @click.option('--inter-t', type=float, default=0.61, help='Intermediate t for 2-step sampling. Use 0 or less for one-step model.')
 @click.option('--decoder-inter-t', type=float, default=0.13, help='Intermediate t for 2-step decoder sampling. Use 0 or less for one-step model.')
-@click.option('--weight-window-fn', type=click.Choice(['linear', 'constant'], case_sensitive=False), default='linear', help='Weight window function to use for tiling')
 @click.option('--save-images', type=int, default=0, help='Number of images to save to results directory')
-@click.option('--experiment-name', type=str, default='infinite_consistency', help='Name of experiment folder in results/')
-def main(model_path, config_path, num_images, batch_size, decoder_batch_size, metric, inter_t, decoder_inter_t, weight_window_fn, save_images, experiment_name):
+@click.option('--experiment-name', type=str, default='infinite_consistency_jain', help='Name of experiment folder in results/')
+def main(model_path, config_path, num_images, batch_size, decoder_batch_size, metric, inter_t, decoder_inter_t, save_images, experiment_name):
     """Evaluate base diffusion using FID/KID on decoded terrain."""
     build_registry()
     
@@ -93,7 +119,7 @@ def main(model_path, config_path, num_images, batch_size, decoder_batch_size, me
     keys_to_delete = [k for k in config.keys() if k not in kept_keys]
     for k in keys_to_delete:
         del config[k]
-    config['results_dataset']['crop_size'] = 192
+    config['results_dataset']['crop_size'] = 192  # same dataset as infinite_consistency.py
     resolved = registry.resolve(config, validate=False)
     
     # Setup accelerator
@@ -162,6 +188,10 @@ def main(model_path, config_path, num_images, batch_size, decoder_batch_size, me
             cond_inputs = batch['cond_inputs_img']
             histogram_raw = batch['histogram_raw']
             
+            # Central crop cond_inputs from 8x8 to 6x6 for 2x2 tiling
+            if cond_inputs.ndim == 4:
+                cond_inputs = cond_inputs[..., 1:7, 1:7]
+            
             # Adjust batch size if we need fewer images to finish
             remaining = num_images - pbar.n
             if images.shape[0] > remaining:
@@ -171,7 +201,8 @@ def main(model_path, config_path, num_images, batch_size, decoder_batch_size, me
                 
             bs = images.shape[0]
             
-            # Sample latents using evaluation primitive
+            # Naive tiling with shared conditioning: generate 4 independent tiles per batch item
+            # Tiles use overlapping conditioning regions (stride 2 on cond_inputs)
             with accelerator.autocast():
                 device = accelerator.device
                 dtype = torch.float32
@@ -184,72 +215,124 @@ def main(model_path, config_path, num_images, batch_size, decoder_batch_size, me
                 else:
                     t_scalars = (init_t,)
 
-                # Tiled sampling
-                B, C, H, W = shape = images.shape
-                tile_size = 64
-                stride = 64 // 2
-                if weight_window_fn == 'linear':
-                    weights = _linear_weight_window(tile_size, device, dtype)
-                elif weight_window_fn == 'constant':
-                    weights = _constant_weight_window(tile_size, device, dtype)
-                else:
-                    raise ValueError(f"Invalid weight window function: {weight_window_fn}")
-
-                h_starts = _tile_starts(H, tile_size, stride)
-                w_starts = _tile_starts(W, tile_size, stride)
+                B, C, _, _ = images.shape
+                tile_size = 64  # model expects 64x64 tiles
                 
-                if cond_inputs.ndim == 1 and len(h_starts) * len(w_starts) > 1:
-                    raise ValueError(f"cond_inputs must be a tensor image for tiled sampling. Cond inputs must have width {len(w_starts)+3} and height {len(h_starts)+3}.")
-                elif cond_inputs.ndim == 4:
-                    assert cond_inputs.shape[-1] == len(w_starts)+3
-                    assert cond_inputs.shape[-2] == len(h_starts)+3
+                # Generate 4 tiles per batch item (2x2 grid)
+                num_tiles = 4
+                tile_shape = (B * num_tiles, C, tile_size, tile_size)
+                
+                # Prepare conditioning with stride 2 (overlapping regions from shared global input)
+                tile_conds_list = []
+                if cond_inputs.ndim == 4:
+                    for ic in range(2):
+                        for jc in range(2):
+                            tile_cond = cond_inputs[..., ic:ic+4, jc:jc+4]
+                            tile_cond = _process_cond_img(tile_cond, histogram_raw, torch.zeros(7, device=device), torch.ones(7, device=device), torch.zeros(bs, 1, device=device))
+                            tile_conds_list.append(tile_cond)
+                else:
+                    tile_conds_list = [cond_inputs] * num_tiles
+                
+                # Sample each tile separately to save memory
+                samples = torch.zeros(tile_shape, device=device, dtype=dtype)
+                for tile_idx in range(num_tiles):
+                    tile_cond = [tile_conds_list[tile_idx]]
+                    tile_sample = torch.zeros((B, C, tile_size, tile_size), device=device, dtype=dtype)
+                    
+                    for step, t_scalar in enumerate(t_scalars):
+                        step_noise = torch.randn((B, C, tile_size, tile_size), generator=generator, device=device, dtype=dtype)
+                        z = step_noise * sigma_data
+                        
+                        t = t_scalar.view(1, 1, 1, 1).expand(B, 1, 1, 1)
+                        x_t = torch.cos(t) * tile_sample + torch.sin(t) * z
+                        
+                        model_in = x_t / sigma_data
+                        pred = -model(model_in, noise_labels=t.flatten(), conditional_inputs=tile_cond)
+                        tile_sample = torch.cos(t) * x_t - torch.sin(t) * sigma_data * pred
+                    
+                    # Store samples grouped by batch item: [b0_t0, b0_t1, b0_t2, b0_t3, b1_t0, ...]
+                    for b in range(B):
+                        samples[b * num_tiles + tile_idx] = tile_sample[b]
 
-                sample = torch.zeros(shape, device=device, dtype=dtype)
-                for step, t_scalar in enumerate(t_scalars):
-                    step_noise = torch.randn(shape, generator=generator, device=device, dtype=dtype)
-                    output = torch.zeros(shape, device=device, dtype=dtype)
-                    output_weights = torch.zeros(shape, device=device, dtype=dtype)
-                    for ic, i0 in enumerate(h_starts):
-                        for jc, j0 in enumerate(w_starts):
-                            # Don't need to sample edges here
-                            if step == 1 and (ic == 0 or jc == 0 or ic == len(h_starts) - 1 or jc == len(w_starts) - 1):
-                                continue
-                            
-                            if cond_inputs.ndim == 4:
-                                tile_cond = cond_inputs[..., ic:ic+4, jc:jc+4]
-                                tile_cond = [_process_cond_img(tile_cond, histogram_raw, torch.zeros(7, device=device), torch.ones(7, device=device), torch.zeros(bs, 1, device=device))]
-                            else:
-                                tile_cond = [cond_inputs]
-                            
-                            i1, j1 = i0 + tile_size, j0 + tile_size
-                            z = step_noise[..., i0:i1, j0:j1] * sigma_data
-                            tile_sample = sample[..., i0:i1, j0:j1]
+                samples = samples / scheduler.config.sigma_data
 
-                            t = t_scalar.view(1, 1, 1, 1).expand(B, 1, 1, 1)
-                            x_t = torch.cos(t) * tile_sample + torch.sin(t) * z
-                            
-                            model_in = x_t / sigma_data
-                            pred = -model(model_in, noise_labels=t.flatten(), conditional_inputs=tile_cond)
-                            tile_samples = torch.cos(t) * x_t - torch.sin(t) * sigma_data * pred
-
-                            output[..., i0:i1, j0:j1] += tile_samples * weights
-                            output_weights[..., i0:i1, j0:j1] += weights
-
-                    sample = output / output_weights
-
-                samples = sample / scheduler.config.sigma_data
-
-            # Central crop samples to 64x64
-            start_h = (samples.shape[-2] - 64) // 2
-            start_w = (samples.shape[-1] - 64) // 2
-            samples = samples[..., start_h:start_h+64, start_w:start_w+64]
-
-            terrain_fake = torch.zeros(bs, 1, samples.shape[-2]*8, samples.shape[-1]*8, device=device)
+            # Decode each tile independently to 512x512, then blend with Jain kernel + Perlin noise
+            tile_terrain_size = 64 * 8  # 64 * 8 = 512
+            output_size = tile_terrain_size * 2  # 1024x1024 (no overlap, adjacent tiles)
+            
             with accelerator.autocast():
-                assert terrain_fake.shape[0] % decoder_batch_size == 0
-                for i in range(terrain_fake.shape[0]//decoder_batch_size):
-                    in_samples = samples[i*decoder_batch_size:(i+1)*decoder_batch_size]
-                    terrain_fake[i*decoder_batch_size:(i+1)*decoder_batch_size] = _decode_latents_to_terrain(in_samples, val_dataset, decoder_model, scheduler, generator, inter_t=decoder_inter_t_list)
+                # Decode all tiles
+                all_decoded = torch.zeros(B * num_tiles, 1, tile_terrain_size, tile_terrain_size, device=device)
+                total_tiles = B * num_tiles
+                for i in range(0, total_tiles, decoder_batch_size):
+                    end_i = min(i + decoder_batch_size, total_tiles)
+                    in_samples = samples[i:end_i]
+                    all_decoded[i:end_i] = _decode_latents_to_terrain(in_samples, val_dataset, decoder_model, scheduler, generator, inter_t=decoder_inter_t_list)
+                
+                # Create Jain blending kernel for each tile (512x512)
+                kernel = _jain_kernel_2d(tile_terrain_size, device, dtype)
+                
+                # Build kernel grid for full 2x2 output (each tile gets its own kernel)
+                kernel_grid = torch.zeros(output_size, output_size, device=device, dtype=dtype)
+                positions = [(0, 0), (0, tile_terrain_size), (tile_terrain_size, 0), (tile_terrain_size, tile_terrain_size)]
+                for (y, x) in positions:
+                    kernel_grid[y:y+tile_terrain_size, x:x+tile_terrain_size] = kernel
+                
+                # Stitch tiles into 2x2 grid (no overlap)
+                terrain_grid = torch.zeros(bs, 1, output_size, output_size, device=device, dtype=dtype)
+                for b in range(bs):
+                    for tile_idx, (y, x) in enumerate(positions):
+                        tile = all_decoded[b * num_tiles + tile_idx]
+                        terrain_grid[b, 0, y:y+tile_terrain_size, x:x+tile_terrain_size] = tile
+                
+                # Paper formula: G ∘ ρ'_SR + λ(1-G) ∘ fpn, where λ ∈ [0.75, 1]
+                lambda_scale = 0.875
+                
+                terrain_fake = torch.zeros(bs, 1, output_size, output_size, device=device, dtype=dtype)
+                for b in range(bs):
+                    # Compute tile means for bilinear interpolation base
+                    tile_means = torch.zeros(2, 2, device=device, dtype=dtype)
+                    tile_stds = torch.zeros(2, 2, device=device, dtype=dtype)
+                    for tile_idx, (y, x) in enumerate(positions):
+                        tile = terrain_grid[b, 0, y:y+tile_terrain_size, x:x+tile_terrain_size]
+                        tile_means[y // tile_terrain_size, x // tile_terrain_size] = tile.mean()
+                        tile_stds[y // tile_terrain_size, x // tile_terrain_size] = tile.std()
+                    
+                    # Create bilinear interpolation grid from tile means (smooth low-freq transition)
+                    # Coordinates: 0 = center of top-left tile, 1 = center of bottom-right tile
+                    ys = torch.linspace(0, 1, output_size, device=device, dtype=dtype)
+                    xs = torch.linspace(0, 1, output_size, device=device, dtype=dtype)
+                    yy, xx = torch.meshgrid(ys, xs, indexing='ij')
+                    
+                    # Bilinear interpolation of means
+                    interp_mean = (
+                        tile_means[0, 0] * (1 - yy) * (1 - xx) +
+                        tile_means[0, 1] * (1 - yy) * xx +
+                        tile_means[1, 0] * yy * (1 - xx) +
+                        tile_means[1, 1] * yy * xx
+                    )
+                    # Bilinear interpolation of stds
+                    interp_std = (
+                        tile_stds[0, 0] * (1 - yy) * (1 - xx) +
+                        tile_stds[0, 1] * (1 - yy) * xx +
+                        tile_stds[1, 0] * yy * (1 - xx) +
+                        tile_stds[1, 1] * yy * xx
+                    )
+                    
+                    # Generate Perlin noise for high-frequency detail
+                    perlin = _perlin_noise_2d(output_size, seed=random.randint(0, 2**30), frequency=0.005, octaves=6)
+                    perlin = torch.from_numpy(perlin).to(device=device, dtype=dtype)
+                    perlin = (perlin - perlin.mean()) / (perlin.std() + 1e-8)  # normalize to unit variance
+                    
+                    # Combine: bilinear base + scaled Perlin for detail
+                    fill_noise = interp_mean + interp_std * perlin
+                    
+                    # Blend: G * terrain + λ*(1-G) * fill_noise
+                    terrain_fake[b, 0] = kernel_grid * terrain_grid[b, 0] + lambda_scale * (1 - kernel_grid) * fill_noise
+            
+            # Central crop from 1024x1024 to 512x512
+            crop_start = (output_size - 512) // 2  # 256
+            terrain_fake = terrain_fake[..., crop_start:crop_start+512, crop_start:crop_start+512]
             terrain_fake = torch.sign(terrain_fake) * torch.square(terrain_fake)
             
             # Real terrain

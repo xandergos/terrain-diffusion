@@ -3,6 +3,8 @@ import torch
 import numpy as np
 import math
 import os
+from pathlib import Path
+from PIL import Image
 from accelerate import Accelerator
 from confection import Config, registry
 from torch.utils.data import DataLoader
@@ -17,7 +19,8 @@ from terrain_diffusion.training.datasets import LongDataset
 from terrain_diffusion.training.utils import recursive_to
 from terrain_diffusion.data.laplacian_encoder import laplacian_denoise, laplacian_decode
 from terrain_diffusion.training.evaluation.sample_diffusion_decoder import sample_decoder_consistency_tiled
-from terrain_diffusion.training.evaluation.sample_diffusion_base import sample_base_consistency
+from terrain_diffusion.training.evaluation.sample_diffusion_base import _process_cond_img
+from terrain_diffusion.inference.relief_map import get_relief_map
 
 def _normalize_uint8_three_channel(images: torch.Tensor) -> torch.Tensor:
     """Normalize single-channel images to uint8 [0, 255] repeated to 3 channels."""
@@ -28,7 +31,7 @@ def _normalize_uint8_three_channel(images: torch.Tensor) -> torch.Tensor:
     normalized = torch.clamp(((images - image_mid) / image_range + 0.5) * 255, 0, 255)
     return normalized.repeat(1, 3, 1, 1).to(torch.uint8)
 
-def _decode_latents_to_terrain(samples: torch.Tensor, val_dataset, decoder_model, scheduler, generator, inter_t, disable_laplacian_denoising=False) -> torch.Tensor:
+def _decode_latents_to_terrain(samples: torch.Tensor, val_dataset, decoder_model, scheduler, generator, inter_t) -> torch.Tensor:
     """Decode [latents(4ch), lowfreq(1ch)] into terrain using evaluation primitives."""
     device = samples.device
     base_dataset = val_dataset.base_dataset if hasattr(val_dataset, 'base_dataset') else val_dataset
@@ -62,8 +65,7 @@ def _decode_latents_to_terrain(samples: torch.Tensor, val_dataset, decoder_model
     # Denormalize and compose terrain
     highfreq = base_dataset.denormalize_residual(residual[:, :1])
     lowfreq = base_dataset.denormalize_lowfreq(lowfreq_input)
-    if not disable_laplacian_denoising:
-        highfreq, lowfreq = laplacian_denoise(highfreq, lowfreq, sigma=5)
+    highfreq, lowfreq = laplacian_denoise(highfreq, lowfreq, sigma=5)
     
     # When calculating FID/KID, we can approximate padding with extrapolation. But typically we can get padding from InfiniteDiffusion directly.
     return laplacian_decode(highfreq, lowfreq, extrapolate=True)
@@ -77,8 +79,9 @@ def _decode_latents_to_terrain(samples: torch.Tensor, val_dataset, decoder_model
 @click.option('--metric', type=click.Choice(['fid', 'kid'], case_sensitive=False), default='fid', help='Metric to evaluate')
 @click.option('--inter-t', type=float, default=0.61, help='Intermediate t for 2-step sampling. Use 0 or less for one-step model.')
 @click.option('--decoder-inter-t', type=float, default=0.13, help='Intermediate t for 2-step decoder sampling. Use 0 or less for one-step model.')
-@click.option('--disable-laplacian-denoising', is_flag=True, default=False, help='Disable laplacian denoising step')
-def main(model_path, config_path, num_images, batch_size, decoder_batch_size, metric, inter_t, decoder_inter_t, disable_laplacian_denoising):
+@click.option('--save-images', type=int, default=0, help='Number of images to save to results directory')
+@click.option('--experiment-name', type=str, default='infinite_consistency_smarter', help='Name of experiment folder in results/')
+def main(model_path, config_path, num_images, batch_size, decoder_batch_size, metric, inter_t, decoder_inter_t, save_images, experiment_name):
     """Evaluate base diffusion using FID/KID on decoded terrain."""
     build_registry()
     
@@ -88,6 +91,7 @@ def main(model_path, config_path, num_images, batch_size, decoder_batch_size, me
     keys_to_delete = [k for k in config.keys() if k not in kept_keys]
     for k in keys_to_delete:
         del config[k]
+    config['results_dataset']['crop_size'] = 192  # same dataset as infinite_consistency.py
     resolved = registry.resolve(config, validate=False)
     
     # Setup accelerator
@@ -132,7 +136,13 @@ def main(model_path, config_path, num_images, batch_size, decoder_batch_size, me
         
     decoder_inter_t_list = [decoder_inter_t] if decoder_inter_t > 0 else None
     
-    print(f"Evaluating {metric_name.upper()} on {num_images}")
+    print(f"Evaluating {metric_name.upper()} on {num_images} images")
+    
+    # Setup results directory for saving images
+    results_dir = Path("results") / experiment_name
+    if save_images > 0:
+        results_dir.mkdir(parents=True, exist_ok=True)
+    saved_count = 0
     
     generator = torch.Generator(device=device).manual_seed(548)
     
@@ -150,6 +160,10 @@ def main(model_path, config_path, num_images, batch_size, decoder_batch_size, me
             cond_inputs = batch['cond_inputs_img']
             histogram_raw = batch['histogram_raw']
             
+            # Central crop cond_inputs from 8x8 to 6x6 for stride-2 2x2 tiling
+            if cond_inputs.ndim == 4:
+                cond_inputs = cond_inputs[..., 1:7, 1:7]
+            
             # Adjust batch size if we need fewer images to finish
             remaining = num_images - pbar.n
             if images.shape[0] > remaining:
@@ -159,29 +173,89 @@ def main(model_path, config_path, num_images, batch_size, decoder_batch_size, me
                 
             bs = images.shape[0]
             
-            # Sample latents using evaluation primitive
+            # Naive tiling with shared conditioning: generate 4 independent tiles per batch item
+            # Tiles use overlapping conditioning regions (stride 2 on cond_inputs)
             with accelerator.autocast():
-                samples = sample_base_consistency(
-                    model=model,
-                    scheduler=scheduler,
-                    shape=(bs, 5, 64, 64), # Latents + lowfreq
-                    cond_inputs=cond_inputs,
-                    cond_means=torch.zeros(7, device=device),
-                    cond_stds=torch.ones(7, device=device),
-                    noise_level=torch.zeros(bs, 1, device=device),
-                    histogram_raw=histogram_raw,
-                    intermediate_t=inter_t,
-                    generator=generator,
-                    tile_size=64
-                )
+                device = accelerator.device
+                dtype = torch.float32
+                sigma0 = scheduler.sigmas[0].to(device)
+                sigma_data = scheduler.config.sigma_data
+                
+                init_t = torch.atan(sigma0 / sigma_data).to(device=device, dtype=dtype)
+                if inter_t > 0:
+                    t_scalars = (init_t, torch.tensor(inter_t, device=device, dtype=dtype))
+                else:
+                    t_scalars = (init_t,)
 
+                B, C, _, _ = images.shape
+                tile_size = 64  # model expects 64x64 tiles
+                
+                # Generate 4 tiles per batch item (2x2 grid)
+                num_tiles = 4
+                tile_shape = (B * num_tiles, C, tile_size, tile_size)
+                
+                # Prepare conditioning with stride 2 (overlapping regions from shared global input)
+                tile_conds_list = []
+                if cond_inputs.ndim == 4:
+                    for ic in range(2):
+                        for jc in range(2):
+                            tile_cond = cond_inputs[..., ic*2:ic*2+4, jc*2:jc*2+4]
+                            tile_cond = _process_cond_img(tile_cond, histogram_raw, torch.zeros(7, device=device), torch.ones(7, device=device), torch.zeros(bs, 1, device=device))
+                            tile_conds_list.append(tile_cond)
+                else:
+                    tile_conds_list = [cond_inputs] * num_tiles
+                
+                # Sample each tile separately to save memory
+                samples = torch.zeros(tile_shape, device=device, dtype=dtype)
+                for tile_idx in range(num_tiles):
+                    tile_cond = [tile_conds_list[tile_idx]]
+                    tile_sample = torch.zeros((B, C, tile_size, tile_size), device=device, dtype=dtype)
+                    
+                    for step, t_scalar in enumerate(t_scalars):
+                        step_noise = torch.randn((B, C, tile_size, tile_size), generator=generator, device=device, dtype=dtype)
+                        z = step_noise * sigma_data
+                        
+                        t = t_scalar.view(1, 1, 1, 1).expand(B, 1, 1, 1)
+                        x_t = torch.cos(t) * tile_sample + torch.sin(t) * z
+                        
+                        model_in = x_t / sigma_data
+                        pred = -model(model_in, noise_labels=t.flatten(), conditional_inputs=tile_cond)
+                        tile_sample = torch.cos(t) * x_t - torch.sin(t) * sigma_data * pred
+                    
+                    # Store samples grouped by batch item: [b0_t0, b0_t1, b0_t2, b0_t3, b1_t0, ...]
+                    for b in range(B):
+                        samples[b * num_tiles + tile_idx] = tile_sample[b]
 
-            terrain_fake = torch.zeros(bs, 1, samples.shape[-2]*8, samples.shape[-1]*8, device=device)
+                samples = samples / scheduler.config.sigma_data
+
+            # Decode each tile independently to 512x512, then stitch
+            tile_terrain_size = 64 * 8  # 64 * 8 = 512
+            terrain_fake = torch.zeros(bs, 1, tile_terrain_size * 2, tile_terrain_size * 2, device=device)
+            
             with accelerator.autocast():
-                assert terrain_fake.shape[0] % decoder_batch_size == 0
-                for i in range(terrain_fake.shape[0]//decoder_batch_size):
-                    in_samples = samples[i*decoder_batch_size:(i+1)*decoder_batch_size]
-                    terrain_fake[i*decoder_batch_size:(i+1)*decoder_batch_size] = _decode_latents_to_terrain(in_samples, val_dataset, decoder_model, scheduler, generator, inter_t=decoder_inter_t_list, disable_laplacian_denoising=disable_laplacian_denoising)
+                # Decode all tiles
+                all_decoded = torch.zeros(B * num_tiles, 1, tile_terrain_size, tile_terrain_size, device=device)
+                total_tiles = B * num_tiles
+                for i in range(0, total_tiles, decoder_batch_size):
+                    end_i = min(i + decoder_batch_size, total_tiles)
+                    in_samples = samples[i:end_i]
+                    all_decoded[i:end_i] = _decode_latents_to_terrain(in_samples, val_dataset, decoder_model, scheduler, generator, inter_t=decoder_inter_t_list)
+                
+                # Stitch tiles into 2x2 grid per batch item
+                for b in range(bs):
+                    tile_idx = b * num_tiles
+                    # Top-left
+                    terrain_fake[b, :, :tile_terrain_size, :tile_terrain_size] = all_decoded[tile_idx]
+                    # Top-right
+                    terrain_fake[b, :, :tile_terrain_size, tile_terrain_size:] = all_decoded[tile_idx + 1]
+                    # Bottom-left
+                    terrain_fake[b, :, tile_terrain_size:, :tile_terrain_size] = all_decoded[tile_idx + 2]
+                    # Bottom-right
+                    terrain_fake[b, :, tile_terrain_size:, tile_terrain_size:] = all_decoded[tile_idx + 3]
+            
+            # Central crop from 1024x1024 to 512x512
+            crop_start = (terrain_fake.shape[-1] - 512) // 2
+            terrain_fake = terrain_fake[..., crop_start:crop_start+512, crop_start:crop_start+512]
             terrain_fake = torch.sign(terrain_fake) * torch.square(terrain_fake)
             
             # Real terrain
@@ -190,6 +264,28 @@ def main(model_path, config_path, num_images, batch_size, decoder_batch_size, me
                  ground_truth = ground_truth[:bs]
             terrain_real = ground_truth
             terrain_real = torch.sign(terrain_real) * torch.square(terrain_real)
+            
+            # Central crop ground_truth to 512x512
+            start_h = (terrain_real.shape[-2] - 512) // 2
+            start_w = (terrain_real.shape[-1] - 512) // 2
+            terrain_real = terrain_real[..., start_h:start_h+512, start_w:start_w+512]
+            
+            # Save images if requested
+            if saved_count < save_images:
+                for i in range(min(bs, save_images - saved_count)):
+                    # terrain_fake/real are in meters after signed-square transform
+                    fake_img = terrain_fake[i, 0].cpu().numpy()
+                    real_img = terrain_real[i, 0].cpu().numpy()
+                    fake_img_norm = ((fake_img - fake_img.min()) / (fake_img.max() - fake_img.min() + 1e-8) * 255).astype(np.uint8)
+                    real_img_norm = ((real_img - real_img.min()) / (real_img.max() - real_img.min() + 1e-8) * 255).astype(np.uint8)
+                    Image.fromarray(fake_img_norm).save(results_dir / f"fake_{saved_count:05d}.png")
+                    Image.fromarray(real_img_norm).save(results_dir / f"real_{saved_count:05d}.png")
+                    # Save shaded relief maps
+                    fake_relief = get_relief_map(fake_img, None, None, None)
+                    real_relief = get_relief_map(real_img, None, None, None)
+                    Image.fromarray((fake_relief * 255).astype(np.uint8)).save(results_dir / f"fake_relief_{saved_count:05d}.png")
+                    Image.fromarray((real_relief * 255).astype(np.uint8)).save(results_dir / f"real_relief_{saved_count:05d}.png")
+                    saved_count += 1
             
             # Disable autocast for metric calculation
             with torch.autocast(device_type=device.type, enabled=False):
