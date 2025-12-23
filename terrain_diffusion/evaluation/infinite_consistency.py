@@ -205,14 +205,15 @@ def main(model_path, config_path, num_images, batch_size, decoder_batch_size, me
                     assert cond_inputs.shape[-2] == len(h_starts)+3
 
                 sample = torch.zeros(shape, device=device, dtype=dtype)
+                num_steps = len(t_scalars)
                 for step, t_scalar in enumerate(t_scalars):
                     step_noise = torch.randn(shape, generator=generator, device=device, dtype=dtype)
                     output = torch.zeros(shape, device=device, dtype=dtype)
                     output_weights = torch.zeros(shape, device=device, dtype=dtype)
                     for ic, i0 in enumerate(h_starts):
                         for jc, j0 in enumerate(w_starts):
-                            # Don't need to sample edges here
-                            if step == 1 and (ic == 0 or jc == 0 or ic == len(h_starts) - 1 or jc == len(w_starts) - 1):
+                            # Don't need to sample edges on the last step (they get cropped)
+                            if step == num_steps - 1 and (ic == 0 or jc == 0 or ic == len(h_starts) - 1 or jc == len(w_starts) - 1):
                                 continue
                             
                             if cond_inputs.ndim == 4:

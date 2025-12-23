@@ -16,7 +16,7 @@ NUM_RUNS = 100
 SEPARATION = 200 * 256  # Separation between tiles to avoid cache overlap
 
 
-def measure_latency(device: str = 'cuda', seed: int = 42) -> dict:
+def measure_latency(device: str = 'cuda', seed: int = 42, onestep_latent: bool = False) -> dict:
     """Measure TTFT and TTST."""
     world = WorldPipeline.from_local_models(
         seed=seed,
@@ -25,6 +25,7 @@ def measure_latency(device: str = 'cuda', seed: int = 42) -> dict:
         dtype='fp32',
         caching_strategy='direct',
         cache_limit=None,
+        onestep_latent=onestep_latent,
     )
     world.to(device)
     world.bind("TEMP")
@@ -78,13 +79,19 @@ def measure_latency(device: str = 'cuda', seed: int = 42) -> dict:
     }
 
 
-def main():
+import click
+
+
+@click.command()
+@click.option('--onestep-latent', is_flag=True, default=False, help='Use 1-step latent model instead of 2-step')
+def main(onestep_latent):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Using device: {device}")
     print(f"Tile size: {TILE_SIZE}x{TILE_SIZE}")
-    print(f"Number of runs: {NUM_RUNS}\n")
+    print(f"Number of runs: {NUM_RUNS}")
+    print(f"Latent steps: {'1-step' if onestep_latent else '2-step'}\n")
     
-    result = measure_latency(device=device)
+    result = measure_latency(device=device, onestep_latent=onestep_latent)
     print(f"\nTTFT: {result['ttft_mean']:.2f}s ± {result['ttft_std']:.2f}s")
     print(f"TTST: {result['ttst_mean']:.2f}s ± {result['ttst_std']:.2f}s")
 

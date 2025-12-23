@@ -305,6 +305,7 @@ class WorldPipeline(ConfigMixin):
         coarse_stds: list = None,
         caching_strategy: str = 'indirect',
         cache_limit: int | None = 100 * 1024 * 1024,
+        onestep_latent: bool = False,
     ):
         super().__init__()
         
@@ -322,6 +323,7 @@ class WorldPipeline(ConfigMixin):
         self.torch_compile = torch_compile
         self.caching_strategy = caching_strategy
         self.cache_limit = cache_limit
+        self.onestep_latent = onestep_latent
         self.kwargs = {
             'latent_compression': latent_compression,
             'log_mode': log_mode,
@@ -929,20 +931,22 @@ class WorldPipeline(ConfigMixin):
             **self._common_tile_kwargs()
         )
         
-        inter_t = [torch.arctan(torch.tensor(0.35) / 0.5)]
-        for i, t in enumerate(inter_t):
-            tensor = self.tile_store.get_or_create(
-                f"step_latent_map_{i}",
-                shape=(6, None, None),
-                f=lambda ctxs, samples, conds, t=t, i=i: self._latent_inference(
-                    ctxs, samples, conds, t, scheduler, weight_window, HISTOGRAM_RAW, COND_INPUT_MEAN, COND_INPUT_STD, seed_offset=5820+i
-                ),
-                output_window=output_window,
-                args=(tensor, self.coarse,),
-                args_windows=(output_window, coarse_window,),
-                batch_size=self.latents_batch_size,
-                **self._common_tile_kwargs()
-            )
+        # Skip intermediate refinement steps for 1-step latent model
+        if not self.onestep_latent:
+            inter_t = [torch.arctan(torch.tensor(0.35) / 0.5)]
+            for i, t in enumerate(inter_t):
+                tensor = self.tile_store.get_or_create(
+                    f"step_latent_map_{i}",
+                    shape=(6, None, None),
+                    f=lambda ctxs, samples, conds, t=t, i=i: self._latent_inference(
+                        ctxs, samples, conds, t, scheduler, weight_window, HISTOGRAM_RAW, COND_INPUT_MEAN, COND_INPUT_STD, seed_offset=5820+i
+                    ),
+                    output_window=output_window,
+                    args=(tensor, self.coarse,),
+                    args_windows=(output_window, coarse_window,),
+                    batch_size=self.latents_batch_size,
+                    **self._common_tile_kwargs()
+                )
         
         return tensor
     
