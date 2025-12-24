@@ -306,6 +306,8 @@ class WorldPipeline(ConfigMixin):
         caching_strategy: str = 'indirect',
         cache_limit: int | None = 100 * 1024 * 1024,
         onestep_latent: bool = False,
+        decoder_tile_size: int = 512,
+        decoder_tile_stride: int = 384,
     ):
         super().__init__()
         
@@ -324,6 +326,8 @@ class WorldPipeline(ConfigMixin):
         self.caching_strategy = caching_strategy
         self.cache_limit = cache_limit
         self.onestep_latent = onestep_latent
+        self.decoder_tile_size = decoder_tile_size
+        self.decoder_tile_stride = decoder_tile_stride
         self.kwargs = {
             'latent_compression': latent_compression,
             'log_mode': log_mode,
@@ -954,10 +958,10 @@ class WorldPipeline(ConfigMixin):
     # Decoder Stage
     # =========================================================================
     
-    def _decoder_inference(self, ctx, latents, scheduler, weight_window, t_list):
+    def _decoder_inference(self, ctx, latents, scheduler, weight_window, t_list, tile_size, tile_stride):
         """Run inference for one decoder tile."""
-        TILE_SIZE = 512
-        TILE_STRIDE = TILE_SIZE - 128
+        TILE_SIZE = tile_size
+        TILE_STRIDE = tile_stride
         
         if self.log_mode == 'verbose':
             print(f"Residual f at {ctx}")
@@ -991,8 +995,8 @@ class WorldPipeline(ConfigMixin):
     
     def _build_decoder_stage(self):
         """Build and register the decoder stage."""
-        TILE_SIZE = 512
-        TILE_STRIDE = TILE_SIZE - 128
+        TILE_SIZE = self.decoder_tile_size
+        TILE_STRIDE = self.decoder_tile_stride
         
         scheduler = EDMDPMSolverMultistepScheduler(sigma_min=0.002, sigma_max=80, sigma_data=0.5)
         weight_window = linear_weight_window(TILE_SIZE, 'cpu', torch.float32)
@@ -1001,7 +1005,7 @@ class WorldPipeline(ConfigMixin):
         #t_list += [torch.arctan(torch.tensor(0.065) / 0.5)]
         
         def f(ctx, latents):
-            return self._decoder_inference(ctx, latents, scheduler, weight_window, t_list)
+            return self._decoder_inference(ctx, latents, scheduler, weight_window, t_list, TILE_SIZE, TILE_STRIDE)
         
         lc = self.latent_compression
         output_window = TensorWindow(size=(2, TILE_SIZE, TILE_SIZE), stride=(2, TILE_STRIDE, TILE_STRIDE))
