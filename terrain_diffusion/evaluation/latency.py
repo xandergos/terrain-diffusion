@@ -4,6 +4,7 @@ Measure generation latency (TTFT and TTST).
 TTFT: Time to First Tile - delay from initialization to first tile
 TTST: Time to Second Tile - time to generate adjacent tile thereafter
 """
+import math
 import time
 import random
 from tqdm import tqdm
@@ -24,16 +25,19 @@ def measure_latency(
     num_runs: int = 100,
     decoder_tile_size: int = 512,
     decoder_tile_stride: int = 384,
+    max_batch_size: int = 16,
 ) -> dict:
     """Measure TTFT and TTST."""
     # Reset peak memory before warmup
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
         
+    assert 2**round(math.log2(max_batch_size)) == max_batch_size
+        
     use_cuda = device == 'cuda'
     world = WorldPipeline.from_local_models(
         seed=seed,
-        latents_batch_size=[1], # , 2, 3, 2**2, 5, 6, 3**2, 4**2, 5**2
+        latents_batch_size=[2**i for i in range(round(math.log2(max_batch_size)) + 1)],
         torch_compile=use_cuda, 
         dtype='fp32',
         caching_strategy='direct',
@@ -101,11 +105,22 @@ def measure_latency(
     
     world.close()
     
+    def percentile(data, p):
+        s = sorted(data)
+        k = int((len(s) - 1) * p / 100 + 0.5)
+        return s[k]
+    
     return {
         'ttft_mean': sum(ttft_times) / len(ttft_times),
         'ttst_mean': sum(ttst_times) / len(ttst_times),
         'ttft_std': (sum((t - sum(ttft_times)/len(ttft_times))**2 for t in ttft_times) / len(ttft_times)) ** 0.5,
         'ttst_std': (sum((t - sum(ttst_times)/len(ttst_times))**2 for t in ttst_times) / len(ttst_times)) ** 0.5,
+        'ttft_p5': percentile(ttft_times, 5),
+        'ttft_p50': percentile(ttft_times, 50),
+        'ttft_p95': percentile(ttft_times, 95),
+        'ttst_p5': percentile(ttst_times, 5),
+        'ttst_p50': percentile(ttst_times, 50),
+        'ttst_p95': percentile(ttst_times, 95),
         'peak_vram_mb': peak_vram_mb,
     }
 
@@ -118,7 +133,8 @@ def measure_latency(
 @click.option('-n', '--num-runs', default=100, type=int, help='Number of measurement runs')
 @click.option('--decoder-tile-size', default=512, type=int, help='Decoder tile size')
 @click.option('--decoder-stride', default=384, type=int, help='Decoder tile stride')
-def main(onestep_latent, cpu, tile_size, grid_aligned, num_runs, decoder_tile_size, decoder_stride):
+@click.option('--max-batch-size', default=16, type=int, help='Maximum batch size')
+def main(onestep_latent, cpu, tile_size, grid_aligned, num_runs, decoder_tile_size, decoder_stride, max_batch_size):
     if cpu:
         device = 'cpu'
         print("Note: torch.compile disabled on CPU")
@@ -142,9 +158,10 @@ def main(onestep_latent, cpu, tile_size, grid_aligned, num_runs, decoder_tile_si
         num_runs=num_runs,
         decoder_tile_size=decoder_tile_size,
         decoder_tile_stride=decoder_stride,
+        max_batch_size=max_batch_size,
     )
-    print(f"\nTTFT: {result['ttft_mean']:.2f}s ± {result['ttft_std']:.2f}s")
-    print(f"TTST: {result['ttst_mean']:.2f}s ± {result['ttst_std']:.2f}s")
+    print(f"\nTTFT: {result['ttft_mean']:.2f}s ± {result['ttft_std']:.2f}s (p5={result['ttft_p5']:.2f}, p50={result['ttft_p50']:.2f}, p95={result['ttft_p95']:.2f})")
+    print(f"TTST: {result['ttst_mean']:.2f}s ± {result['ttst_std']:.2f}s (p5={result['ttst_p5']:.2f}, p50={result['ttst_p50']:.2f}, p95={result['ttst_p95']:.2f})")
     if result['peak_vram_mb'] is not None:
         print(f"Peak VRAM: {result['peak_vram_mb']:.0f} MB")
 
