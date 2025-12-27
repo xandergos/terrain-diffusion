@@ -383,12 +383,17 @@ class WorldPipeline(ConfigMixin):
         return kwargs
     
     def _apply_dtype_and_compile(self):
-        """Apply dtype conversion and torch.compile to models."""
+        """Apply eval mode, dtype conversion and torch.compile to models."""
         models = [
             ('coarse_model', self.coarse_model),
             ('base_model', self.base_model),
             ('decoder_model', self.decoder_model),
         ]
+        
+        # Set eval mode
+        for name, model in models:
+            if model is not None:
+                model.eval()
         
         # Apply dtype conversion
         if self._dtype is not None:
