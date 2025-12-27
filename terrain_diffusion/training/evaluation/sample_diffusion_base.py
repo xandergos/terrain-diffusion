@@ -29,7 +29,9 @@ def _process_cond_img(
     Returns:
         torch.Tensor: Processed conditioning tensor to be passed into the model.
     """
-    cond_img = (cond_img - torch.tensor(cond_means, device=cond_img.device).view(1, -1, 1, 1)) / torch.tensor(cond_stds, device=cond_img.device).view(1, -1, 1, 1)
+    cond_means_tensor = torch.as_tensor(cond_means, device=cond_img.device)
+    cond_stds_tensor = torch.as_tensor(cond_stds, device=cond_img.device)
+    cond_img = (cond_img - cond_means_tensor.view(1, -1, 1, 1)) / cond_stds_tensor.view(1, -1, 1, 1)
     
     cond_img[0:1] = cond_img[0:1].nan_to_num(cond_means[0])
     cond_img[1:2] = cond_img[1:2].nan_to_num(cond_means[1])
@@ -176,7 +178,7 @@ def sample_base_consistency(
     cond_stds: torch.Tensor|np.ndarray,
     noise_level: float = 0.0,
     histogram_raw: torch.Tensor,
-    intermediate_t: float,
+    intermediate_t: float = 0.0,
     dtype: torch.dtype = torch.float32,
     generator: Optional[torch.Generator] = None,
     tile_size: Optional[int] = None,
@@ -209,8 +211,11 @@ def sample_base_consistency(
     sigma0 = scheduler.sigmas[0].to(device)
     sigma_data = scheduler.config.sigma_data
     
-    t_scalars = (torch.tensor(torch.atan(sigma0 / sigma_data), device=device, dtype=dtype), 
-                 torch.tensor(intermediate_t, device=device, dtype=dtype))
+    init_t = torch.atan(sigma0 / sigma_data).to(device=device, dtype=dtype)
+    if intermediate_t > 0:
+        t_scalars = (init_t, torch.tensor(intermediate_t, device=device, dtype=dtype))
+    else:
+        t_scalars = (init_t,)
 
     # Tiled sampling
     B, C, H, W = shape

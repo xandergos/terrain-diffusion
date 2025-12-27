@@ -170,7 +170,7 @@ def sample_decoder_consistency_tiled(
 
     sigma_data = float(scheduler.config.sigma_data)
     s0 = float(scheduler.sigmas[0])
-    init_t = torch.tensor(torch.atan(torch.as_tensor(s0 / sigma_data)), device=device, dtype=dtype)
+    init_t = torch.atan(torch.as_tensor(s0 / sigma_data, device=device, dtype=dtype))
 
     if intermediate_t is None:
         t_scalars = (init_t,)
