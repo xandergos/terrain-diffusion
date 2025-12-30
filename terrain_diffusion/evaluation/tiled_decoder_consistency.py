@@ -41,23 +41,26 @@ def _get_weights(size):
 @click.option('-c', '--config', 'config_path', type=click.Path(exists=True), required=True, help='Path to the consistency decoder configuration file', default='configs/diffusion_decoder/consistency_decoder_64-3.cfg')
 @click.option('--num-images', type=int, default=50000, help='Number of images to evaluate')
 @click.option('--batch-size', type=int, default=10, help='Batch size for evaluation')
-@click.option('--tile-size', type=int, default=512, help='Tile size for processing')
-@click.option('--tile-stride', type=int, default=None, help='Tile stride for processing. Defaults to tile_size // 2')
 @click.option('--intermediate-sigma', type=float, default=0.065, help='Intermediate sigma for 2-step sampling. Use 0 or less for one-step model.')
 @click.option('--metric', type=click.Choice(['fid', 'kid'], case_sensitive=False), default='fid', help='Metric to evaluate')
-@click.option('--image-size', type=int, default=None, help='Image size for processing. Overrides config if specified.')
 @click.option('--save-images', type=int, default=0, help='Number of images to save to results directory')
-@click.option('--experiment-name', type=str, default='decoder_consistency', help='Name of experiment folder in results/')
-def main(model_path, config_path, num_images, batch_size, tile_size, tile_stride, intermediate_sigma, metric, image_size, save_images, experiment_name):
-    """Evaluate consistency decoder using FID/KID."""
+@click.option('--experiment-name', type=str, default='tiled_decoder_consistency', help='Name of experiment folder in results/')
+def main(model_path, config_path, num_images, batch_size, intermediate_sigma, metric, save_images, experiment_name):
+    """Evaluate tiled consistency decoder using FID/KID with 2x2 tiling and center crop."""
     build_registry()
+    
+    # Fixed tiling parameters
+    image_size = 896
+    tile_size = 512
+    tile_stride = 384
+    crop_size = 512
     
     # Load config
     config = Config().from_disk(config_path)
-
-    if image_size is not None:
-        assert 'crop_size' in config['results_dataset'], 'crop_size is not in results_dataset'
-        config['results_dataset']['crop_size'] = image_size
+    
+    # Override crop_size to 896 for 2x2 tiling
+    assert 'crop_size' in config['results_dataset'], 'crop_size is not in results_dataset'
+    config['results_dataset']['crop_size'] = image_size
     
     # Remove all keys from config except 'scheduler' and 'results_dataset'
     kept_keys = {'scheduler', 'results_dataset'}
@@ -97,7 +100,7 @@ def main(model_path, config_path, num_images, batch_size, tile_size, tile_stride
     else:
         image_metric = FrechetInceptionDistance(normalize=True).to(device)
     
-    print(f"Evaluating {metric_name.upper()} on {num_images} images with intermediate sigma {intermediate_sigma}...")
+    print(f"Evaluating {metric_name.upper()} on {num_images} images with 2x2 tiling (tile={tile_size}, stride={tile_stride})...")
     
     # Setup results directory for image saving
     results_dir = Path("results") / experiment_name
@@ -108,9 +111,6 @@ def main(model_path, config_path, num_images, batch_size, tile_size, tile_stride
     generator = torch.Generator(device=device).manual_seed(548)
     weights = _get_weights(tile_size).to(device)
     
-    if tile_stride is None:
-        tile_stride = tile_size // 2
-        
     sigma_data = config['results_dataset']['sigma_data']
     init_t = torch.tensor(np.arctan(scheduler.sigmas[0] / sigma_data), device=device)
     if intermediate_sigma > 0:
@@ -119,6 +119,10 @@ def main(model_path, config_path, num_images, batch_size, tile_size, tile_stride
         intermediate_t = None
     
     pbar = tqdm(total=num_images, desc=f"Calculating {metric_name.upper()}")
+    
+    # Center crop boundaries
+    crop_start = (image_size - crop_size) // 2
+    crop_end = crop_start + crop_size
     
     with torch.no_grad(), accelerator.autocast():
         while pbar.n < pbar.total:
@@ -144,11 +148,9 @@ def main(model_path, config_path, num_images, batch_size, tile_size, tile_stride
             output = torch.zeros(images.shape, device=device)
             output_weights = torch.zeros(images.shape, device=device)
             
-            num_tiles = (images.shape[-1] - tile_size) // tile_stride + 1
-            
-            # 2-step consistency sampling with tiling
-            for i in range(num_tiles):
-                for j in range(num_tiles):
+            # 2x2 tiling
+            for i in range(2):
+                for j in range(2):
                     h_start = i * tile_stride
                     h_end = h_start + tile_size
                     w_start = j * tile_stride
@@ -188,6 +190,10 @@ def main(model_path, config_path, num_images, batch_size, tile_size, tile_stride
             
             output_full = torch.sign(output_full) * torch.square(output_full)
             images_full = torch.sign(images_full) * torch.square(images_full)
+            
+            # Center crop to 512x512
+            output_full = output_full[..., crop_start:crop_end, crop_start:crop_end]
+            images_full = images_full[..., crop_start:crop_end, crop_start:crop_end]
             
             # Disable autocast for metric calculation to prevent NaN in Inception features
             with torch.autocast(device_type=device.type, enabled=False):
