@@ -6,7 +6,6 @@ import torch
 from tqdm import tqdm
 from terrain_diffusion.models.edm_autoencoder import EDMAutoencoder
 from terrain_diffusion.models.edm_unet import EDMUnet2D
-from terrain_diffusion.models.mp_generator import MPGenerator
 from safetensors.torch import load_model
 from ema_pytorch import PostHocEMA
 from diffusers.configuration_utils import ConfigMixin
@@ -33,8 +32,6 @@ def load_model_from_checkpoint(checkpoint_path, ema_step=None, sigma_rel=None):
         model = EDMUnet2D.from_config(EDMUnet2D.load_config(config_path))
     elif config['_class_name'] == 'EDMAutoencoder':
         model = EDMAutoencoder.from_config(EDMAutoencoder.load_config(config_path))
-    elif config['_class_name'] == 'MPGenerator':
-        model = MPGenerator.from_config(MPGenerator.load_config(config_path))
     elif config['_class_name'] == 'Perceptron':
         model = Perceptron.from_config(Perceptron.load_config(config_path))
     else:
