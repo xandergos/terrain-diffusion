@@ -17,4 +17,5 @@ python3.11 -m terrain_diffusion.data.preprocessing.build_base_dataset  \
 
 python3.11 -m terrain_diffusion.data.preprocessing.define_splits data/dataset.h5 0.2
 
+# Calculate beauty scores for the dataset - this had no effect on the final results, and is included only for exact reproducibility
 python3.11 -m terrain_diffusion.data.preprocessing.beauty_score data/dataset.h5

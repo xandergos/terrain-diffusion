@@ -298,7 +298,6 @@ class WorldPipeline(ConfigMixin):
         coarse_pooling: int = 1,
         elev_coarse_pool_mode: str = 'avg',
         p5_coarse_pool_mode: str = 'avg',
-        histogram_raw: list = None,
         residual_mean: float = 0.0,
         residual_std: float = 1.1678,
         coarse_means: list = None,
@@ -308,6 +307,7 @@ class WorldPipeline(ConfigMixin):
         onestep_latent: bool = False,
         decoder_tile_size: int = 512,
         decoder_tile_stride: int = 384,
+        **deprecated_kwargs,
     ):
         super().__init__()
         
@@ -323,6 +323,11 @@ class WorldPipeline(ConfigMixin):
         self.latent_compression = latent_compression
         self.log_mode = log_mode
         self.torch_compile = torch_compile
+        
+        if self.torch_compile and os.name == 'nt':
+            print("WARNING: torch.compile is not currently supported on Windows. This will affect performance.")
+            self.torch_compile = False
+            
         self.caching_strategy = caching_strategy
         self.cache_limit = cache_limit
         self.onestep_latent = onestep_latent
@@ -337,7 +342,7 @@ class WorldPipeline(ConfigMixin):
             'coarse_pooling': coarse_pooling,
             'elev_coarse_pool_mode': elev_coarse_pool_mode,
             'p5_coarse_pool_mode': p5_coarse_pool_mode,
-            'histogram_raw': histogram_raw if histogram_raw is not None else [0.0, 0.0, 0.0, 0.0, 0.0],
+            'histogram_raw': deprecated_kwargs.get('histogram_raw', [0.0, 0.0, 0.0, 0.0, 0.0]),
             'residual_mean': residual_mean,
             'residual_std': residual_std,
             'coarse_means': coarse_means if coarse_means is not None else [-37.67916460232751, 2.22578822145657, 18.030293275011356, 333.8442390481231, 1350.1259248456176, 52.444339366764396],
