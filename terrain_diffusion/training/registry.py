@@ -1,12 +1,8 @@
 import catalogue
 from confection import registry
-from terrain_diffusion.models.mp_injection_generator import MPInjectionGenerator
-from terrain_diffusion.models.mp_injection_discriminator import MPInjectionDiscriminator
 from terrain_diffusion.models.perceptron import Perceptron
 from terrain_diffusion.training.datasets import *
 from terrain_diffusion.data.laplacian_encoder import *
-from terrain_diffusion.models.mp_discriminator import MPDiscriminator
-from terrain_diffusion.models.mp_generator import MPGenerator
 from terrain_diffusion.training.datasets.h5_superres_terrain_dataset import H5SuperresTerrainDataset
 from terrain_diffusion.training.loss import CosineLRScheduler, SqrtLRScheduler, ConstantLRScheduler
 from terrain_diffusion.scheduler.dpmsolver import EDMDPMSolverMultistepScheduler
@@ -25,10 +21,6 @@ def build_registry():
     registry.model = catalogue.create("confection", "models", entry_points=False)
     registry.model.register("unet", func=EDMUnet2D)
     registry.model.register("autoencoder", func=EDMAutoencoder)
-    registry.model.register("generator", func=MPGenerator)
-    registry.model.register("injection_generator", func=MPInjectionGenerator)
-    registry.model.register("injection_discriminator", func=MPInjectionDiscriminator)
-    registry.model.register("discriminator", func=MPDiscriminator)
     registry.model.register("perceptron", func=Perceptron)
     
     registry.lr_sched = catalogue.create("confection", "lr_sched", entry_points=False)
