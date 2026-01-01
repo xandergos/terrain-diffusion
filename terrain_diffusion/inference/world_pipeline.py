@@ -342,7 +342,7 @@ class WorldPipeline(ConfigMixin):
             'coarse_pooling': coarse_pooling,
             'elev_coarse_pool_mode': elev_coarse_pool_mode,
             'p5_coarse_pool_mode': p5_coarse_pool_mode,
-            'histogram_raw': deprecated_kwargs.get('histogram_raw', [0.0, 0.0, 0.0, 0.0, 0.0]),
+            'histogram_raw': deprecated_kwargs.get('histogram_raw', [0.0, 0.0, 0.0, 0.0, 0.0]) or [0.0, 0.0, 0.0, 0.0, 0.0],
             'residual_mean': residual_mean,
             'residual_std': residual_std,
             'coarse_means': coarse_means if coarse_means is not None else [-37.67916460232751, 2.22578822145657, 18.030293275011356, 333.8442390481231, 1350.1259248456176, 52.444339366764396],
