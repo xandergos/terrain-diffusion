@@ -324,8 +324,11 @@ class WorldPipeline(ConfigMixin):
         self.log_mode = log_mode
         self.torch_compile = torch_compile
         
-        if self.torch_compile and os.name == 'nt':
-            print("WARNING: torch.compile is not currently supported on Windows. This will affect performance.")
+        if self.torch_compile and (os.name == 'nt' or not torch.cuda.is_available()):
+            if os.name == 'nt':
+                print("WARNING: torch.compile is not currently supported on Windows. This will affect performance.")
+            else:
+                print("WARNING: torch.compile is not currently supported on CPU.")
             self.torch_compile = False
             
         self.caching_strategy = caching_strategy
@@ -570,7 +573,8 @@ class WorldPipeline(ConfigMixin):
             self.base_model = self.base_model.to(device)
         if self.decoder_model is not None:
             self.decoder_model = self.decoder_model.to(device)
-        self._warmup_compiled_models()
+        if device != 'cpu':
+            self._warmup_compiled_models()
         return self
     
     def bind(
