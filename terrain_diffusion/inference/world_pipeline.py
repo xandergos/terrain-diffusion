@@ -595,6 +595,9 @@ class WorldPipeline(ConfigMixin):
         Returns:
             self for chaining.
         """
+        self._compression = compression
+        self._compression_opts = compression_opts
+        
         if self.caching_strategy == 'direct':
             self._init_tile_store(None, None, None, None)
         else:
@@ -688,15 +691,8 @@ class WorldPipeline(ConfigMixin):
         """Clear the cache for all tensors in the pipeline."""
         if self.tile_store is None:
             return
-        
-        tensor_ids = ["base_coarse_map", "init_latent_map", "init_residual_map"]
-        # Add step_latent_map tensors (there's typically one: step_latent_map_0)
-        inter_t = [torch.arctan(torch.tensor(0.35) / 0.5)]
-        for i in range(len(inter_t)):
-            tensor_ids.append(f"step_latent_map_{i}")
-        
-        for tensor_id in tensor_ids:
-            self.tile_store.evict_cache_for(tensor_id, 0)
+            
+        self.tile_store.clear_direct_caches()
     
     def close(self):
         """Release resources associated with this pipeline."""
@@ -705,6 +701,30 @@ class WorldPipeline(ConfigMixin):
         # Clean up temporary file if this pipeline created one
         if self._is_temp_file:
             cleanup_temp_file(self._hdf5_file_path)
+
+    def change_seed(self, seed: int | None = None):
+        """Change the seed and rebuild all generation stages.
+        
+        The pipeline must have been bound via bind() before calling this method.
+        """
+        self.seed = seed if seed is not None else random.randint(0, 2**31-1)
+        
+        if self.tile_store is None:
+            return
+        
+        if self.caching_strategy == 'direct':
+            self.tile_store = MemoryTileStore()
+        else:
+            if hasattr(self.tile_store, 'close'):
+                self.tile_store.close()
+            with h5py.File(self._hdf5_file_path, 'w') as f:
+                f.attrs['WORLD_PIPELINE_PARAMS'] = json.dumps(
+                    {'seed': self.seed, 'kwargs': self.kwargs}, sort_keys=True
+                )
+            self._init_tile_store(self._hdf5_file_path, 'a', self._compression, self._compression_opts)
+        
+        self._init_conditioning()
+        self._build_hierarchy()
 
     # =========================================================================
     # Coarse Stage

@@ -171,6 +171,26 @@ def health():
     return jsonify({"status": "ok"})
 
 
+@app.get("/seed")
+def get_seed():
+    """Return the current world seed."""
+    world = _get_pipeline()
+    return jsonify({"seed": world.seed})
+
+
+@app.post("/seed")
+def set_seed():
+    """Change the world seed. Accepts JSON {"seed": int} or no body for random."""
+    world = _get_pipeline()
+    body = request.get_json(silent=True) or {}
+    seed = body.get("seed")
+    if seed is not None and not isinstance(seed, int):
+        return jsonify({"error": "seed must be an integer"}), 400
+    world.change_seed(seed)
+    print(f"World seed changed to: {world.seed}")
+    return jsonify({"seed": world.seed})
+
+
 @app.get("/terrain")
 def terrain():
     """
