@@ -351,7 +351,7 @@ def faces_to_obj(
         "sampler": "cubesphere",
         "seed": seed,
     }
-    obj_meta_path = out_path.with_suffix(".json")
+    obj_meta_path = out_path.with_name(out_path.stem + "_obj.json")
     obj_meta_path.write_text(json.dumps(obj_meta, indent=2))
 
     print(f"Wrote: {out_path}")
