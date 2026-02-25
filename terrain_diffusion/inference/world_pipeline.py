@@ -64,12 +64,22 @@ def gaussian_noise_patch(
     tile_h: int = 256,
     tile_w: int = 256,
     dtype: np.dtype = np.float32,
+    x_period: int | None = None,
 ) -> np.ndarray:
     """
     Returns a (C, H, W) patch from an infinite, tile-seeded Gaussian noise field.
     Tiles are seeded deterministically from (base_seed, tile_y, tile_x).
     Coordinates are integer pixel indices; supports negative coordinates.
     """
+    if x_period is not None:
+        if x_period <= 0:
+            raise ValueError("x_period must be positive when provided.")
+        if x_period % tile_w != 0:
+            raise ValueError(f"x_period ({x_period}) must be divisible by tile_w ({tile_w}).")
+        period_tiles_x = x_period // tile_w
+    else:
+        period_tiles_x = None
+
     out = np.empty((channels, h, w), dtype=dtype)
 
     ty0 = (y0) // tile_h
@@ -98,7 +108,8 @@ def gaussian_noise_patch(
             tile_x_off1 = ox1 - tile_x0
 
             # Deterministic RNG per tile from (base_seed, ty, tx)
-            words = np.array([base_seed, ty, tx]).astype(np.uint32)
+            seed_tx = tx % period_tiles_x if period_tiles_x is not None else tx
+            words = np.array([base_seed, ty, seed_tx]).astype(np.uint32)
             ss = np.random.SeedSequence(words)            
             rng = np.random.Generator(np.random.PCG64DXSM(ss))
 
@@ -307,6 +318,7 @@ class WorldPipeline(ConfigMixin):
         onestep_latent: bool = False,
         decoder_tile_size: int = 512,
         decoder_tile_stride: int = 384,
+        planet_period: int | None = 16384,
         **deprecated_kwargs,
     ):
         super().__init__()
@@ -333,9 +345,25 @@ class WorldPipeline(ConfigMixin):
         self.onestep_latent = onestep_latent
         self.decoder_tile_size = decoder_tile_size
         self.decoder_tile_stride = decoder_tile_stride
+        if planet_period is not None:
+            planet_period = int(planet_period)
+            if planet_period <= 0:
+                raise ValueError("planet_period must be positive when provided.")
+            if planet_period % latent_compression != 0:
+                raise ValueError("planet_period must be divisible by latent_compression.")
+            if planet_period % (32 * latent_compression) != 0:
+                raise ValueError("planet_period must be divisible by 32 * latent_compression.")
+            if (planet_period // latent_compression) % 64 != 0:
+                raise ValueError("planet_period / latent_compression must be divisible by 64.")
+            if (planet_period // (32 * latent_compression)) % 64 != 0:
+                raise ValueError("planet_period / (32 * latent_compression) must be divisible by 64.")
+            if planet_period % decoder_tile_size != 0:
+                raise ValueError("planet_period must be divisible by decoder_tile_size.")
+        self.planet_period = planet_period
         self.kwargs = {
             'latent_compression': latent_compression,
             'log_mode': log_mode,
+            'planet_period': planet_period,
             'frequency_mult': frequency_mult if frequency_mult is not None else [1.5, 3, 3, 3, 3],
             'drop_water_pct': drop_water_pct,
             'cond_snr': cond_snr if cond_snr is not None else [0.3, 0.1, 1.0, 0.1, 1.0],
@@ -377,7 +405,12 @@ class WorldPipeline(ConfigMixin):
             if bs >= actual_size:
                 return bs
         return self._batch_sizes[-1]  # fallback to max
-    
+
+    def _period_for_scale(self, scale: int) -> int | None:
+        if self.planet_period is None:
+            return None
+        return self.planet_period // scale
+
     def _common_tile_kwargs(self) -> dict:
         """Get common kwargs for tile_store.get_or_create()."""
         if self.caching_strategy != 'direct':
@@ -386,7 +419,7 @@ class WorldPipeline(ConfigMixin):
         if self.cache_limit is not None:
             kwargs['cache_limit'] = self.cache_limit
         return kwargs
-    
+
     def _apply_dtype_and_compile(self):
         """Apply eval mode, dtype conversion and torch.compile to models."""
         models = [
@@ -661,10 +694,12 @@ class WorldPipeline(ConfigMixin):
     
     def _init_conditioning(self):
         """Initialize conditioning (synthetic maps, etc)."""
+        coarse_scale = 32 * self.latent_compression
         self.synthetic_map_factory = make_synthetic_map_factory(
-            seed=self.seed, 
-            frequency_mult=self.kwargs['frequency_mult'], 
-            drop_water_pct=self.kwargs['drop_water_pct']
+            seed=self.seed,
+            frequency_mult=self.kwargs['frequency_mult'],
+            drop_water_pct=self.kwargs['drop_water_pct'],
+            longitude_period=self._period_for_scale(coarse_scale),
         )
     
     def _build_hierarchy(self):
@@ -725,15 +760,17 @@ class WorldPipeline(ConfigMixin):
         synthetic_map = synthetic_map.to(self.device, dtype=model_dtype)[None]
         
         cond_noise = torch.as_tensor(gaussian_noise_patch(
-            self.seed, i1, j1, TILE_SIZE, TILE_SIZE, 
-            channels=5, tile_h=TILE_SIZE, tile_w=TILE_SIZE
+            self.seed, i1, j1, TILE_SIZE, TILE_SIZE,
+            channels=5, tile_h=TILE_SIZE, tile_w=TILE_SIZE,
+            x_period=self._period_for_scale(32 * self.latent_compression),
         ), device=self.device, dtype=model_dtype)[None]
         cond_img = torch.cos(t_cond.view(1, -1, 1, 1)) * synthetic_map + torch.sin(t_cond.view(1, -1, 1, 1)) * cond_noise
         
         scheduler.set_timesteps(20)
         sample_noise = torch.as_tensor(gaussian_noise_patch(
             self.seed + 1, i1, j1, TILE_SIZE, TILE_SIZE,
-            channels=6, tile_h=TILE_SIZE, tile_w=TILE_SIZE
+            channels=6, tile_h=TILE_SIZE, tile_w=TILE_SIZE,
+            x_period=self._period_for_scale(32 * self.latent_compression),
         ), device=self.device, dtype=model_dtype)[None]
         sample = sample_noise * scheduler.sigmas[0]
         
@@ -875,8 +912,9 @@ class WorldPipeline(ConfigMixin):
             ).to(self.device, dtype=model_dtype)
             
             noise = torch.as_tensor(gaussian_noise_patch(
-                self.seed + seed_offset, ctx[1]*TILE_STRIDE, ctx[2]*TILE_STRIDE, 
-                TILE_SIZE, TILE_SIZE, channels=5, tile_h=TILE_SIZE, tile_w=TILE_SIZE
+                self.seed + seed_offset, ctx[1]*TILE_STRIDE, ctx[2]*TILE_STRIDE,
+                TILE_SIZE, TILE_SIZE, channels=5, tile_h=TILE_SIZE, tile_w=TILE_SIZE,
+                x_period=self._period_for_scale(self.latent_compression),
             ))[None]
             
             z = noise.to(self.device, dtype=model_dtype) * scheduler.config.sigma_data
@@ -989,8 +1027,9 @@ class WorldPipeline(ConfigMixin):
         
         for i, t in enumerate(t_list):
             noise = torch.as_tensor(gaussian_noise_patch(
-                self.seed + 5819 + i, ctx[1]*TILE_STRIDE, ctx[2]*TILE_STRIDE, 
-                TILE_SIZE, TILE_SIZE, channels=1, tile_h=TILE_SIZE, tile_w=TILE_SIZE
+                self.seed + 5819 + i, ctx[1]*TILE_STRIDE, ctx[2]*TILE_STRIDE,
+                TILE_SIZE, TILE_SIZE, channels=1, tile_h=TILE_SIZE, tile_w=TILE_SIZE,
+                x_period=self._period_for_scale(1),
             ))[None]
             t = t.view(1, 1, 1, 1).to(self.device)
             z = noise.to(self.device, dtype=model_dtype) * scheduler.config.sigma_data

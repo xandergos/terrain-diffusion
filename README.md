@@ -59,12 +59,31 @@ You can also view the temperature of the high resolution map with `Temperature` 
 python -m terrain_diffusion explore xandergos/terrain-diffusion-90m
 ```
 
+The pipeline now uses a periodic longitude by default (`planet_period=16384` at native resolution), so world generation tiles seamlessly east-west for spherical wrapping.
+You can override or disable it with:
+
+```
+python -m terrain_diffusion explore xandergos/terrain-diffusion-90m --kwarg planet_period=32768
+python -m terrain_diffusion explore xandergos/terrain-diffusion-90m --kwarg planet_period=null
+```
+
 ### API for Minecraft
 
 If you are running the [minecraft mod](https://github.com/xandergos/terrain-diffusion-mc), you need to run this API in the background.
 
 ```
 python -m terrain_diffusion mc-api xandergos/terrain-diffusion-90m
+```
+
+### Export Seamless Planet Mesh (OBJ)
+
+Exports a sphere mesh sampled from the actual 90m world pipeline (not synthetic post-noise), with seam closure controlled by `planet_period`.
+
+```
+python -m terrain_diffusion export-faces xandergos/terrain-diffusion-90m \
+  --output outputs/planet.json \
+  --diameter-m 2000 \
+  --kwarg planet_period=16384
 ```
 
 ### General API

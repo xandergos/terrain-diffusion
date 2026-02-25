@@ -40,7 +40,12 @@ def _ensure_wc_files():
     os.remove(zip_path)
     print("Done.")
 
-def make_synthetic_map_factory(frequency_mult=[1.0, 1.0, 1.0, 1.0, 1.0], seed=None, drop_water_pct=0.0):
+def make_synthetic_map_factory(
+    frequency_mult=[1.0, 1.0, 1.0, 1.0, 1.0],
+    seed=None,
+    drop_water_pct=0.0,
+    longitude_period: int | None = None,
+):
     _ensure_wc_files()
     
     elev_img = rasterio.open("data/global/etopo_10m.tif").read(1)
@@ -120,8 +125,13 @@ def make_synthetic_map_factory(frequency_mult=[1.0, 1.0, 1.0, 1.0, 1.0], seed=No
         return noise, transform_fn
         
         
+    if longitude_period is not None and longitude_period <= 0:
+        raise ValueError("longitude_period must be a positive integer when provided.")
+
     def sample_synthetic_map(noise, transform_fn, i1, j1, i2, j2):
         x = np.arange(i1, i2, dtype=np.float32)
+        if longitude_period is not None:
+            x = np.mod(x, float(longitude_period))
         y = np.arange(j1, j2, dtype=np.float32)
         xx, yy = np.meshgrid(x, y)
 
