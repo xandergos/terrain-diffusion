@@ -75,15 +75,47 @@ If you are running the [minecraft mod](https://github.com/xandergos/terrain-diff
 python -m terrain_diffusion mc-api xandergos/terrain-diffusion-90m
 ```
 
-### Export Seamless Planet Mesh (OBJ)
+### Generate a 3D Planet
 
-Exports a sphere mesh sampled from the actual 90m world pipeline (not synthetic post-noise), with seam closure controlled by `planet_period`.
+Export a seamless sphere mesh from the 90m world pipeline in three steps:
+
+**Step 1: Export cube face heightmaps**
+
+Samples 6 cube-sphere faces from the diffusion pipeline. `--face-resolution` controls the per-face pixel resolution (256 is fast, 1024+ for detail). Faces are saved as float32 TIFF heightmaps.
 
 ```
 python -m terrain_diffusion export-faces xandergos/terrain-diffusion-90m \
   --output outputs/planet.json \
+  --face-resolution 256 \
+  --face-format tiff \
   --diameter-m 2000 \
+  --no-compile \
   --kwarg planet_period=16384
+```
+
+**Step 2 (optional): Add noise detail**
+
+Adds slope-adaptive Perlin noise to the face heightmaps for finer terrain detail.
+
+```
+python -m terrain_diffusion apply-noise outputs/planet.json
+```
+
+**Step 3: Build OBJ mesh**
+
+Converts the face heightmaps into a watertight cube-sphere OBJ mesh. `--elevation-scale` controls terrain exaggeration — use small values (e.g. 0.01) relative to the sphere radius.
+
+```
+python -m terrain_diffusion faces-to-obj outputs/planet.json \
+  --elevation-scale 0.01
+```
+
+**View in Blender**
+
+A viewer script is included that sets up terrain coloring, camera, and lighting:
+
+```
+blender --python outputs/view_planet.py -- /full/path/to/outputs/planet.obj
 ```
 
 ### General API
