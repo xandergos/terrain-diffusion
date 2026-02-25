@@ -8,6 +8,9 @@ from terrain_diffusion.inference.world_explorer import main as explore_main
 from terrain_diffusion.inference.world_generator import main as generate_main
 from terrain_diffusion.inference.api import main as api_main
 from terrain_diffusion.inference.minecraft_api import main as mc_api_main
+from terrain_diffusion.inference.sphere_export import main as export_faces_main
+from terrain_diffusion.inference.apply_noise import main as apply_noise_main
+from terrain_diffusion.inference.faces_to_obj import main as faces_to_obj_main
 
 @click.group()
 def cli():
@@ -28,6 +31,9 @@ cli.add_command(explore_main, name='explore')
 cli.add_command(generate_main, name='generate')
 cli.add_command(api_main, name='api')
 cli.add_command(mc_api_main, name='mc-api')
+cli.add_command(export_faces_main, name='export-faces')
+cli.add_command(apply_noise_main, name='apply-noise')
+cli.add_command(faces_to_obj_main, name='faces-to-obj')
 
 if __name__ == '__main__':
     cli()

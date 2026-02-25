@@ -257,3 +257,10 @@ data/global/*
 !data/global/etopo_10m.tif
 tmp/
 .cursor/
+
+# Generated planet outputs
+outputs/*.obj
+outputs/*.json
+outputs/*.png
+outputs/*.tiff
+outputs/*.log
