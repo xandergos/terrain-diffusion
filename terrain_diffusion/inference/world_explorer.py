@@ -255,13 +255,32 @@ def start_explorer(model_path: str, hdf5_file: str | None = None, seed: int | No
             right_mode = mode
             show_right_panel()
 
+        def new_seed(_evt) -> None:
+            nonlocal last_elev, last_biome, last_climate, last_climate0, last_ci, last_cj
+            nonlocal coarse_ss_all_np
+            world.change_seed()
+            print(f"World seed changed to: {world.seed}")
+            fig.suptitle(f'Seed: {world.seed}', fontsize=10)
+            last_elev = last_biome = last_climate = last_climate0 = None
+            last_ci = last_cj = None
+            set_channel(selected_channel)
+            coarse_ss_all = world.coarse[:, ci0:ci1, cj0:cj1]
+            coarse_ss_all = coarse_ss_all[:-1] / coarse_ss_all[-1:]
+            coarse_ss_all_np = coarse_ss_all.detach().cpu().numpy()
+            im_relief.set_data(np.zeros((2, 2, 3), dtype=np.float32))
+            ax_relief.set_title('Relief map')
+            fig.canvas.draw_idle()
+
         mode_bottom = 0.13
         mode_width = 0.10
         mode_height = 0.06
+        ax_new_seed = fig.add_axes([0.64, mode_bottom, mode_width, mode_height])
         ax_mode_relief = fig.add_axes([0.76, mode_bottom, mode_width, mode_height])
         ax_mode_clim0 = fig.add_axes([0.87, mode_bottom, mode_width, mode_height])
+        btn_new_seed = Button(ax_new_seed, 'New Seed')
         btn_mode_relief = Button(ax_mode_relief, 'Relief')
         btn_mode_clim0 = Button(ax_mode_clim0, 'Temperature')
+        btn_new_seed.on_clicked(new_seed)
         btn_mode_relief.on_clicked(lambda _evt: set_mode('relief'))
         btn_mode_clim0.on_clicked(lambda _evt: set_mode('temperature'))
 

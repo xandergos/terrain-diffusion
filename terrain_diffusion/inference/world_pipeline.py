@@ -702,13 +702,18 @@ class WorldPipeline(ConfigMixin):
         if self._is_temp_file:
             cleanup_temp_file(self._hdf5_file_path)
 
-    def change_seed(self, seed: int | None = None):
-        """Change the seed and rebuild all generation stages.
+    def rebuild(self):
+        """Reset tile store and rebuild all generation stages.
+        
+        Call after modifying self.seed or self.kwargs entries that affect generation
+        (e.g. frequency_mult, drop_water_pct, cond_snr, coarse_means, coarse_stds,
+        histogram_raw, coarse_pooling, onestep_latent, decoder_tile_size, etc.).
+        
+        Not needed for: log_mode, native_resolution (trivially mutable), or
+        residual_mean/residual_std (applied at output time, not baked into tiles).
         
         The pipeline must have been bound via bind() before calling this method.
         """
-        self.seed = seed if seed is not None else random.randint(0, 2**31-1)
-        
         if self.tile_store is None:
             return
         
@@ -725,6 +730,11 @@ class WorldPipeline(ConfigMixin):
         
         self._init_conditioning()
         self._build_hierarchy()
+
+    def change_seed(self, seed: int | None = None):
+        """Change the seed and rebuild all generation stages."""
+        self.seed = seed if seed is not None else random.randint(0, 2**31-1)
+        self.rebuild()
 
     # =========================================================================
     # Coarse Stage
