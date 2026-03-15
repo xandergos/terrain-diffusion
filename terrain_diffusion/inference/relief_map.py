@@ -71,9 +71,11 @@ def get_relief_map(
     flow_threshold: float = 7,
     sigma_large: float = 6.0,
     sigma_small: float = 1.2,
-    resolution: float=90,
+    resolution: float = 90,
     rgb: np.ndarray | None = None,
     relief: float = 1.0,
+    vmin: float | None = None,
+    vmax: float | None = None,
 ) -> Tuple[plt.Figure, plt.Axes]:
     """Plot a GDAL-style shaded relief map using Matplotlib, with optional river overlay.
 
@@ -131,12 +133,22 @@ def get_relief_map(
     # Colorize elevation; this will be used where biome is unknown
     if rgb is None:
         land_elev = np.maximum(0, elev)
-        vmin, vmax = float(np.nanmin(land_elev)), float(np.nanmax(land_elev))
-        if not np.isfinite(vmin) or not np.isfinite(vmax) or vmax == vmin:
-            vmin, vmax = 0.0, 1.0
-        norm = (land_elev - vmin) / (vmax - vmin + 1e-8)
+        if vmin is None or vmax is None:
+            _vmin = float(np.nanmin(land_elev))
+            _vmax = float(np.nanmax(land_elev))
+            if not np.isfinite(_vmin) or not np.isfinite(_vmax) or _vmax == _vmin:
+                _vmin, _vmax = 0.0, 1.0
+        else:
+            _vmin, _vmax = max(0.0, float(vmin)), float(vmax)
+        norm = (land_elev - _vmin) / (_vmax - _vmin + 1e-8)
         cmap = plt.get_cmap("terrain")
-        rgb = cmap(np.clip(norm**0.7, 0.0, 1.0))[..., :3].astype(np.float32)
+        # terrain cmap 0–0.25 is water-blue; when vmin=0 (absolute scale) map
+        # land to the 0.25–1.0 range so sea level starts at lowland green.
+        if _vmin == 0.0:
+            norm_cmap = 0.25 + np.clip(norm ** 0.7, 0.0, 1.0) * 0.75
+        else:
+            norm_cmap = np.clip(norm ** 0.7, 0.0, 1.0)
+        rgb = cmap(norm_cmap)[..., :3].astype(np.float32)
 
     # Base RGB: prefer biome colors when available, otherwise elevation colormap
     base_rgb = rgb

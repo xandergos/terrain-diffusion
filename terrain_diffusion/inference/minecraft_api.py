@@ -570,7 +570,7 @@ def _classify_biome(elev: torch.Tensor, climate: Optional[torch.Tensor], i0: int
         mtn_snowy_forest_dense = mtn_soil & has_snow & (trees_dense | trees_rainforest)
         out[mtn_snowy_forest_dense] = _BIOME_ID["snowy_taiga"]
         
-        # No snow + no trees: windswept (extreme arid) vs grove (cold steppe) vs plains
+        # No snow + no trees: windswept (high-altitude bare rock) vs grove (cold steppe) vs plains
         mtn_windswept = mtn_soil & ~has_snow & trees_none & barren
         out[mtn_windswept] = _BIOME_ID["windswept_hills"]
         # Semi-arid mountains = grove (brown steppe)
@@ -612,9 +612,9 @@ def _classify_biome(elev: torch.Tensor, climate: Optional[torch.Tensor], i0: int
     # Hot + arid = desert
     desert_mask = dry_barren & (warm | hot)
     out[desert_mask] = _BIOME_ID["desert"]
-    # Cool/cold + extreme arid = windswept (bare stone)
+    # Cool/cold + extreme arid = grove (steppe)
     windswept_mask = dry_barren & (cold | cool | temperate) & ~lowland & barren
-    out[windswept_mask] = _BIOME_ID["windswept_hills"]
+    out[windswept_mask] = _BIOME_ID["grove"]
     # Semi-arid = grove (brown steppe) - aridity drives brown vs green grass
     # Use both tree_moisture AND precipitation floor - green grass needs ~350mm minimum
     cold_steppe = dry_barren & ((tree_moisture < 0.35) | (precip < 350)) & ~barren
@@ -693,26 +693,6 @@ def health():
     return jsonify({"status": "ok"})
 
 
-@app.get("/seed")
-def get_seed():
-    """Return the current world seed."""
-    world = _get_pipeline()
-    return jsonify({"seed": world.seed})
-
-
-@app.post("/seed")
-def set_seed():
-    """Change the world seed. Accepts JSON {"seed": int} or no body for random."""
-    world = _get_pipeline()
-    body = request.get_json(silent=True) or {}
-    seed = body.get("seed")
-    if seed is not None and not isinstance(seed, int):
-        return jsonify({"error": "seed must be an integer"}), 400
-    world.change_seed(seed)
-    print(f"World seed changed to: {world.seed}")
-    return jsonify({"seed": world.seed})
-
-
 def _parse_noise() -> float:
     """Parse noise query param. Defaults to 1.0. Accepts float values."""
     val = request.args.get("noise", "1.0")
@@ -725,10 +705,17 @@ def _get_base_pixel_size() -> float:
     return _get_pipeline().native_resolution
 
 
+def _maybe_update_seed(world: WorldPipeline) -> None:
+    seed = request.args.get("seed", type=int)
+    if seed is not None and world.change_seed(seed):
+        print(f"World seed changed to: {world.seed}")
+
+
 def _handle_1x():
     """Handler for 1x (base) resolution."""
     i1, j1, i2, j2 = _parse_quad()
     world = _get_pipeline()
+    _maybe_update_seed(world)
     out_pad = world.get(i1 - 1, j1 - 1, i2 + 1, j2 + 1, with_climate=False)
     elev_padded = out_pad["elev"]
     out = world.get(i1, j1, i2, j2, with_climate=True)
@@ -745,6 +732,7 @@ def _handle_upsampled(scale: int):
     i1, j1, i2, j2 = _parse_quad()
     noise_scale = _parse_noise()
     world = _get_pipeline()
+    _maybe_update_seed(world)
     pixel_size_m = _get_base_pixel_size() / scale
     out = _get_upsampled(world, i1, j1, i2, j2, scale=scale, noise_scale=noise_scale, pixel_size_m=pixel_size_m)
     elev = out["elev"]
@@ -766,6 +754,7 @@ def terrain():
         i1, j1, i2, j2: Bounding box in target resolution coordinates
         scale: Integer scale factor relative to native resolution (default: 1)
         noise: Noise scale factor (default: 1.0)
+        seed: World seed (optional; changes seed when different from current)
         format: 'json' for JSON output, otherwise binary
     """
     try:

@@ -171,26 +171,6 @@ def health():
     return jsonify({"status": "ok"})
 
 
-@app.get("/seed")
-def get_seed():
-    """Return the current world seed."""
-    world = _get_pipeline()
-    return jsonify({"seed": world.seed})
-
-
-@app.post("/seed")
-def set_seed():
-    """Change the world seed. Accepts JSON {"seed": int} or no body for random."""
-    world = _get_pipeline()
-    body = request.get_json(silent=True) or {}
-    seed = body.get("seed")
-    if seed is not None and not isinstance(seed, int):
-        return jsonify({"error": "seed must be an integer"}), 400
-    world.change_seed(seed)
-    print(f"World seed changed to: {world.seed}")
-    return jsonify({"seed": world.seed})
-
-
 @app.get("/terrain")
 def terrain():
     """
@@ -200,6 +180,7 @@ def terrain():
         i1, j1, i2, j2: Bounding box in target resolution coordinates
         scale: Integer scale factor relative to native resolution (default: 1)
                1 = native, 2 = 2x, 4 = 4x, 8 = 8x, etc.
+        seed: World seed (optional; changes seed when different from current)
     
     Returns binary data:
         - elevation: int16-le (H*W*2 bytes), meters
@@ -213,6 +194,9 @@ def terrain():
             raise ValueError("scale must be >= 1")
 
         world = _get_pipeline()
+        seed = request.args.get("seed", type=int)
+        if seed is not None and world.change_seed(seed):
+            print(f"World seed changed to: {world.seed}")
         out = _get_terrain(world, i1, j1, i2, j2, scale)
         return _binary_response(out["elev"], out.get("climate"))
     except Exception as e:

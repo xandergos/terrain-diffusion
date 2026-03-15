@@ -312,7 +312,7 @@ class WorldPipeline(ConfigMixin):
         super().__init__()
         
         # Resolve seed
-        self.seed = seed if seed is not None else random.randint(0, 2**31-1)
+        self.seed = (seed % (2**31)) if seed is not None else random.randint(0, 2**31-1)
         # Normalize batch sizes to sorted list
         if isinstance(latents_batch_size, int):
             self._batch_sizes = [latents_batch_size]
@@ -733,8 +733,12 @@ class WorldPipeline(ConfigMixin):
 
     def change_seed(self, seed: int | None = None):
         """Change the seed and rebuild all generation stages."""
-        self.seed = seed if seed is not None else random.randint(0, 2**31-1)
+        new_seed = (seed % (2**31)) if seed is not None else random.randint(0, 2**31-1)
+        if new_seed == self.seed:
+            return False
+        self.seed = new_seed
         self.rebuild()
+        return True
 
     # =========================================================================
     # Coarse Stage
