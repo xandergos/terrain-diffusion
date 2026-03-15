@@ -8,6 +8,7 @@ from terrain_diffusion.inference.explorer.server import main as explore_main
 from terrain_diffusion.inference.world_generator import main as generate_main
 from terrain_diffusion.inference.api import main as api_main
 from terrain_diffusion.inference.minecraft_api import main as mc_api_main
+from terrain_diffusion.onnx.export import main as onnx_export_main
 
 @click.group()
 def cli():
@@ -28,6 +29,7 @@ cli.add_command(explore_main, name='explore')
 cli.add_command(generate_main, name='generate')
 cli.add_command(api_main, name='api')
 cli.add_command(mc_api_main, name='mc-api')
+cli.add_command(onnx_export_main, name='onnx-export')
 
 if __name__ == '__main__':
     cli()
