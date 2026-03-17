@@ -1,6 +1,5 @@
+import random
 from tempfile import NamedTemporaryFile, TemporaryDirectory
-
-from terrain_diffusion.inference.portable_rng import fill_standard_normal, next_seed, standard_normal
 import time
 import json
 import os
@@ -55,14 +54,6 @@ def _cleanup_all_temp_files():
 
 atexit.register(_cleanup_all_temp_files)
     
-def _tile_seed(base_seed: int, ty: int, tx: int) -> int:
-    """Portable 64-bit seed from (base_seed, ty, tx). Same inputs -> same seed on any platform."""
-    h = (int(base_seed) & 0xFFFFFFFFFFFFFFFF) * 0x9E3779B9
-    h = (h + (int(ty) & 0xFFFFFFFF)) & 0xFFFFFFFFFFFFFFFF
-    h = (h * 0x9E3779B9 + (int(tx) & 0xFFFFFFFF)) & 0xFFFFFFFFFFFFFFFF
-    return h
-
-
 def gaussian_noise_patch(
     base_seed: int,
     y0: int,
@@ -77,7 +68,6 @@ def gaussian_noise_patch(
     """
     Returns a (C, H, W) patch from an infinite, tile-seeded Gaussian noise field.
     Tiles are seeded deterministically from (base_seed, tile_y, tile_x).
-    Uses portable RNG (PCG64 + Marsaglia polar); same algorithm can be implemented in C++/Java.
     Coordinates are integer pixel indices; supports negative coordinates.
     """
     out = np.empty((channels, h, w), dtype=dtype)
@@ -107,9 +97,14 @@ def gaussian_noise_patch(
             tile_x_off0 = ox0 - tile_x0
             tile_x_off1 = ox1 - tile_x0
 
-            seed = _tile_seed(base_seed, ty, tx)
-            tile = np.empty((channels, tile_h, tile_w), dtype=dtype)
-            fill_standard_normal(seed, tile.ravel())
+            # Deterministic RNG per tile from (base_seed, ty, tx)
+            words = np.array([base_seed, ty, tx]).astype(np.uint32)
+            ss = np.random.SeedSequence(words)            
+            rng = np.random.Generator(np.random.PCG64DXSM(ss))
+
+            # Generate full tile (C, tile_h, tile_w) to keep tile content invariant across requests
+            tile = rng.standard_normal(size=(channels, tile_h, tile_w), dtype=dtype)
+
             out[:, out_y0:out_y1, out_x0:out_x1] = tile[:, tile_y_off0:tile_y_off1, tile_x_off0:tile_x_off1]
 
     return out    
@@ -289,8 +284,8 @@ class WorldPipeline(ConfigMixin):
     @register_to_config
     def __init__(
         self,
-        seed: int | None = None,  # 64-bit when provided; default from portable RNG
-        latents_batch_size: int | list[int] = [1, 2, 4, 8, 16],
+        seed: int | None = None,
+        latents_batch_size: int | list[int] = 1,
         native_resolution: float = 90.0,
         *,
         log_mode: str = 'info',
@@ -311,13 +306,13 @@ class WorldPipeline(ConfigMixin):
         cache_limit: int | None = 100 * 1024 * 1024,
         onestep_latent: bool = False,
         decoder_tile_size: int = 512,
-        decoder_tile_stride: int = 384,
+        decoder_tile_stride: int = 256,
         **deprecated_kwargs,
     ):
         super().__init__()
         
-        # Resolve seed (64-bit when provided; portable RNG for default)
-        self.seed = (int(seed) & 0xFFFFFFFFFFFFFFFF) if seed is not None else next_seed(None)
+        # Resolve seed
+        self.seed = seed if seed is not None else random.randint(0, 2**31-1)
         # Normalize batch sizes to sorted list
         if isinstance(latents_batch_size, int):
             self._batch_sizes = [latents_batch_size]
@@ -376,7 +371,6 @@ class WorldPipeline(ConfigMixin):
         self._is_temp_file = False
         self.synthetic_map_factory = None
         self.coarse = None
-        self.latents = None
         self.residual = None
     
     def _get_padded_batch_size(self, actual_size: int) -> int:
@@ -428,7 +422,7 @@ class WorldPipeline(ConfigMixin):
             print("Model compilation complete.")
     
     def _warmup_compiled_models(self):
-        """Warmup compiled models with all batch sizes. Uses portable RNG for dummy inputs."""
+        """Warmup compiled models with all batch sizes."""
         if not self.torch_compile:
             return
         
@@ -436,30 +430,31 @@ class WorldPipeline(ConfigMixin):
         print(f"Warming up compiled models with batch sizes: {warmup_batch_sizes}...")
         device = self.device
         dtype = self._dtype or torch.float32
-
-        def _to_t(x, d=device, dt=dtype):
-            return torch.from_numpy(x).to(device=d, dtype=dt)
         
+        # Warmup coarse model (batch size 1)
         if self.coarse_model is not None:
             print("  Warming up coarse_model...")
-            dummy_in = _to_t(standard_normal(0x5EED0001, (1, 11, 64, 64)))
-            dummy_noise = _to_t(standard_normal(0x5EED0002, (1,)))
+            dummy_in = torch.randn(1, 11, 64, 64, device=device, dtype=dtype)
+            dummy_noise = torch.randn(1, device=device, dtype=dtype)
             with torch.no_grad():
                 self.coarse_model(dummy_in, noise_labels=dummy_noise, conditional_inputs=[torch.zeros(1, device=device, dtype=dtype) for _ in range(5)])
         
+        # Warmup base model (latent stage) with each batch size
+        # Conditioning size: 16 (means) + 16 (p5) + 4 (climate) + 16 (mask) + 5 (histogram) + 1 (noise_level) = 58
         if self.base_model is not None:
             for bs in warmup_batch_sizes:
                 print(f"  Warming up base_model with batch size {bs}...")
-                dummy_in = _to_t(standard_normal(0x5EED0010 + bs, (bs, 5, 64, 64)))
-                dummy_cond = _to_t(standard_normal(0x5EED0020 + bs, (bs, 58)))
-                dummy_noise = _to_t(standard_normal(0x5EED0030 + bs, (bs,)))
+                dummy_in = torch.randn(bs, 5, 64, 64, device=device, dtype=dtype)
+                dummy_cond = torch.randn(bs, 58, device=device, dtype=dtype)
+                dummy_noise = torch.randn(bs, device=device, dtype=dtype)
                 with torch.no_grad():
                     self.base_model(dummy_in, noise_labels=dummy_noise, conditional_inputs=[dummy_cond])
         
+        # Warmup decoder model (batch size 1)
         if self.decoder_model is not None:
             print("  Warming up decoder_model...")
-            dummy_in = _to_t(standard_normal(0x5EED0040, (1, 5, 512, 512)))
-            dummy_noise = _to_t(standard_normal(0x5EED0041, (1,)))
+            dummy_in = torch.randn(1, 5, 512, 512, device=device, dtype=dtype)
+            dummy_noise = torch.randn(1, device=device, dtype=dtype)
             with torch.no_grad():
                 self.decoder_model(dummy_in, noise_labels=dummy_noise, conditional_inputs=[])
         
@@ -681,8 +676,7 @@ class WorldPipeline(ConfigMixin):
     def _build_hierarchy(self):
         """Build the generation hierarchy."""
         self.coarse = self._build_coarse_stage()
-        self.latents = self._build_latent_stage()
-        self.residual = self._build_decoder_stage()
+        self.residual = self._build_combined_stage()
         
     def __enter__(self):
         return self
@@ -737,12 +731,8 @@ class WorldPipeline(ConfigMixin):
 
     def change_seed(self, seed: int | None = None):
         """Change the seed and rebuild all generation stages."""
-        new_seed = (int(seed) & 0xFFFFFFFFFFFFFFFF) if seed is not None else next_seed(None)
-        if new_seed == self.seed:
-            return False
-        self.seed = new_seed
+        self.seed = seed if seed is not None else random.randint(0, 2**31-1)
         self.rebuild()
-        return True
 
     # =========================================================================
     # Coarse Stage
@@ -832,7 +822,7 @@ class WorldPipeline(ConfigMixin):
         )
 
     # =========================================================================
-    # Latent Stage
+    # Combined Latent + Decoder Stage
     # =========================================================================
     
     def _pool_channel(self, x, pool_size, mode):
@@ -855,15 +845,12 @@ class WorldPipeline(ConfigMixin):
         ch_rest_pooled = torch.nn.functional.avg_pool2d(cond_img[2:].unsqueeze(0), kernel_size=n, stride=n).squeeze(0)
         return torch.cat([ch0_pooled, ch1_pooled, ch_rest_pooled], dim=0)
 
-    def _process_latent_conditioning(self, cond_img, histogram_raw, cond_means, cond_stds, noise_level, seed_offset: int = 0):
-        """Process conditioning for latent stage. seed_offset makes NaN fill deterministic per tile (portable)."""
+    def _process_latent_conditioning(self, cond_img, histogram_raw, cond_means, cond_stds, noise_level):
+        """Process conditioning for latent stage."""
         COND_MAX_NOISE = 0.0
-        n, _, nh, nw = cond_img.shape
-        if COND_MAX_NOISE != 0 and noise_level != 0:
-            s0 = standard_normal(self.seed + 9998 + seed_offset, (n, 1, nh, nw), dtype=np.float32)
-            s1 = standard_normal(self.seed + 9997 + seed_offset, (n, 1, nh, nw), dtype=np.float32)
-            cond_img[0:1] = cond_img[0:1] + torch.from_numpy(s0).to(cond_img.device, cond_img.dtype) * noise_level * COND_MAX_NOISE
-            cond_img[1:2] = cond_img[1:2] + torch.from_numpy(s1).to(cond_img.device, cond_img.dtype) * noise_level * COND_MAX_NOISE
+        
+        cond_img[0:1] = cond_img[0:1] + torch.randn_like(cond_img[:, 0:1]) * noise_level * COND_MAX_NOISE
+        cond_img[1:2] = cond_img[1:2] + torch.randn_like(cond_img[:, 1:2]) * noise_level * COND_MAX_NOISE
         cond_img = (cond_img - cond_means.to(cond_img.device).view(1, -1, 1, 1)) / cond_stds.to(cond_img.device).view(1, -1, 1, 1)
         
         cond_img[0:1] = cond_img[0:1].nan_to_num(cond_means[0])
@@ -874,13 +861,7 @@ class WorldPipeline(ConfigMixin):
         climate_means_crop = cond_img[:, 2:6, 1:3, 1:3].mean(dim=(2, 3))
         mask_crop = cond_img[:, 6:7]
         
-        nan_mask = torch.isnan(climate_means_crop)
-        nan_count = nan_mask.sum().item()
-        if nan_count > 0:
-            fill = standard_normal(self.seed + 9999 + seed_offset, (nan_count,), dtype=np.float32)
-            climate_means_crop[nan_mask] = torch.from_numpy(fill).to(
-                device=climate_means_crop.device, dtype=climate_means_crop.dtype
-            )
+        climate_means_crop[torch.isnan(climate_means_crop)] = torch.randn_like(climate_means_crop[torch.isnan(climate_means_crop)])
         
         noise_level_norm = (noise_level - 0.5) * np.sqrt(12)
         return mp_concat([
@@ -888,198 +869,131 @@ class WorldPipeline(ConfigMixin):
             mask_crop.flatten(1), histogram_raw, noise_level_norm.view(-1, 1)
         ], dim=1).float()
 
-    def _latent_inference(self, ctxs, samples, cond_imgs, t, scheduler, weight_window, histogram_raw, cond_means, cond_stds, seed_offset=0):
-        """Run inference for latent tiles."""
-        TILE_SIZE = 64
-        TILE_STRIDE = TILE_SIZE // 2
-        NOISE_LEVEL = 0.0
+    def _run_latent_step(self, sample, lat_y, lat_x, tile_size, t, scheduler, cond_inputs, model_dtype, seed_offset):
+        """Run a single latent diffusion step."""
+        noise = torch.as_tensor(gaussian_noise_patch(
+            self.seed + seed_offset, lat_y, lat_x,
+            tile_size, tile_size, channels=5, tile_h=tile_size, tile_w=tile_size
+        ))[None]
         
-        if self.log_mode == 'verbose':
-            print(f"Latent f batch size {len(ctxs)} at {ctxs}")
-        if MOCK:
-            return [torch.ones((6, TILE_SIZE, TILE_SIZE)) for _ in ctxs]
+        t_val = torch.as_tensor(t, device=self.device)
+        z = noise.to(self.device, dtype=model_dtype) * scheduler.config.sigma_data
+        t_view = t_val.view(1, 1, 1, 1)
+        x_t = torch.cos(t_view) * sample + torch.sin(t_view) * z
+        model_in = x_t / scheduler.config.sigma_data
         
-        if samples is None:
-            samples = [None] * len(ctxs)
-        
-        model_in_list = []
-        cond_inputs_list = []
-        samples_processed = []
-        
-        t_tensor = torch.as_tensor(t, device=self.device)
+        pred = -self.base_model(model_in, noise_labels=t_val.view(1).to(model_dtype), conditional_inputs=[cond_inputs])
+        return torch.cos(t_view) * x_t - torch.sin(t_view) * scheduler.config.sigma_data * pred
+
+    def _combined_inference(self, ctx, coarse_cond, latent_scheduler, decoder_scheduler,
+                            weight_window, t_init, t_refine_list, t_decoder_list,
+                            histogram_raw, cond_means, cond_stds, tile_size, tile_stride):
+        """Run combined latent (2-step) + decoder inference for one window."""
+        LATENT_SIZE = 64
+        lc = self.latent_compression
         model_dtype = self._dtype or torch.float32
         
-        for ctx, sample, cond_img in zip(ctxs, samples, cond_imgs):
-            if sample is None:
-                sample = torch.zeros((1, 5, TILE_SIZE, TILE_SIZE), device=self.device, dtype=model_dtype)
-            else:
-                sample = torch.as_tensor(sample, device=self.device, dtype=model_dtype)
-                sample = sample[:-1] / sample[-1:] * scheduler.config.sigma_data
-            
-            cond_img = cond_img[:-1] / cond_img[-1:]
-            
-            mask = torch.ones((1, 4, 4))
-            cond_img = torch.cat([cond_img, mask], dim=0)[None]
-            
-            tile_seed_off = ctx[1] * 65536 + ctx[2]
-            cond_inputs = self._process_latent_conditioning(
-                cond_img, histogram_raw, cond_means, cond_stds, torch.tensor(NOISE_LEVEL), seed_offset=tile_seed_off
-            ).to(self.device, dtype=model_dtype)
-            
+        _, di, dj = ctx
+        dec_y = di * tile_stride
+        dec_x = dj * tile_stride
+        lat_y = dec_y // lc
+        lat_x = dec_x // lc
+        
+        if self.log_mode == 'verbose':
+            print(f"Combined f at {ctx}")
+        if MOCK:
+            return torch.ones((3, tile_size, tile_size))
+        
+        cond_img = coarse_cond[:-1] / coarse_cond[-1:]
+        mask = torch.ones((1, cond_img.shape[1], cond_img.shape[2]))
+        cond_img = torch.cat([cond_img, mask], dim=0)[None]
+        cond_inputs = self._process_latent_conditioning(
+            cond_img, histogram_raw, cond_means, cond_stds, torch.tensor(0.0)
+        ).to(self.device, dtype=model_dtype)
+        
+        # Latent step 1 (from noise)
+        sample = torch.zeros((1, 5, LATENT_SIZE, LATENT_SIZE), device=self.device, dtype=model_dtype)
+        sample = self._run_latent_step(sample, lat_y, lat_x, LATENT_SIZE,
+                                       t_init, latent_scheduler, cond_inputs, model_dtype, seed_offset=5819)
+        
+        # Latent refinement steps
+        for i, t in enumerate(t_refine_list):
+            sample = self._run_latent_step(sample, lat_y, lat_x, LATENT_SIZE,
+                                           t, latent_scheduler, cond_inputs, model_dtype, seed_offset=5820+i)
+        
+        # Extract latent channels
+        sample_clean = sample / latent_scheduler.config.sigma_data
+        lowfreq = sample_clean[:, 4:5]
+        lowfreq_up = torch.nn.functional.interpolate(
+            lowfreq, size=(tile_size, tile_size), mode='nearest'
+        ).cpu().float()
+        
+        # Decode
+        latents = sample_clean[:, :4]
+        upsampled_latents = torch.nn.functional.interpolate(
+            latents, size=(tile_size, tile_size), mode='nearest'
+        ).to(self.device, dtype=model_dtype)
+        
+        dec_sample = torch.zeros((1, 1, tile_size, tile_size), device=self.device, dtype=model_dtype)
+        for i, t in enumerate(t_decoder_list):
             noise = torch.as_tensor(gaussian_noise_patch(
-                self.seed + seed_offset, ctx[1]*TILE_STRIDE, ctx[2]*TILE_STRIDE, 
-                TILE_SIZE, TILE_SIZE, channels=5, tile_h=TILE_SIZE, tile_w=TILE_SIZE
+                self.seed + 5819 + i, dec_y, dec_x,
+                tile_size, tile_size, channels=1, tile_h=tile_size, tile_w=tile_size
             ))[None]
-            
-            z = noise.to(self.device, dtype=model_dtype) * scheduler.config.sigma_data
-            t_view = t_tensor.view(1, 1, 1, 1).to(self.device)
-            x_t = torch.cos(t_view) * sample + torch.sin(t_view) * z
-            model_in = (x_t / scheduler.config.sigma_data).to(self.device)
-            
-            model_in_list.append(model_in)
-            cond_inputs_list.append(cond_inputs)
-            samples_processed.append((sample, x_t))
-
-        if not model_in_list:
-            return []
-
-        actual_batch_size = len(model_in_list)
-        padded_batch_size = self._get_padded_batch_size(actual_batch_size) if self.torch_compile else actual_batch_size
+            t_v = t.view(1, 1, 1, 1).to(self.device)
+            z = noise.to(self.device, dtype=model_dtype) * decoder_scheduler.config.sigma_data
+            x_t = torch.cos(t_v) * dec_sample + torch.sin(t_v) * z
+            model_in = torch.cat([x_t / decoder_scheduler.config.sigma_data, upsampled_latents], dim=1)
+            pred = -self.decoder_model(model_in, noise_labels=torch.tensor([t.item()], device=self.device, dtype=model_dtype), conditional_inputs=[])
+            dec_sample = torch.cos(t_v) * x_t - torch.sin(t_v) * decoder_scheduler.config.sigma_data * pred
         
-        model_in_batch = torch.cat(model_in_list, dim=0)
-        cond_inputs_batch = torch.cat(cond_inputs_list, dim=0)
-        noise_labels_batch = torch.full((padded_batch_size,), t_tensor.item(), device=self.device, dtype=model_dtype)
+        dec_sample = dec_sample.cpu().float() / decoder_scheduler.config.sigma_data
         
-        # Pad to next legal batch size for torch.compile efficiency
-        if padded_batch_size > actual_batch_size:
-            pad_count = padded_batch_size - actual_batch_size
-            model_in_batch = torch.cat([model_in_batch, model_in_batch[:1].repeat(pad_count, 1, 1, 1)], dim=0)
-            cond_inputs_batch = torch.cat([cond_inputs_batch, cond_inputs_batch[:1].repeat(pad_count, 1)], dim=0)
-        
-        pred_batch = -self.base_model(model_in_batch, noise_labels=noise_labels_batch, conditional_inputs=[cond_inputs_batch])
-        
-        outputs = []
-        for i in range(actual_batch_size):
-            pred = pred_batch[i]
-            sample, x_t = samples_processed[i]
-            pred = pred.unsqueeze(0)
-            t_view = t_tensor.view(1, 1, 1, 1).to(self.device)
-            sample = torch.cos(t_view) * x_t - torch.sin(t_view) * scheduler.config.sigma_data * pred
-            sample = sample.cpu().float() / scheduler.config.sigma_data
-            outputs.append(torch.cat([sample[0] * weight_window[None], weight_window[None]], dim=0))
-        return outputs
+        return torch.cat([
+            dec_sample[0] * weight_window[None],
+            lowfreq_up[0] * weight_window[None],
+            weight_window[None],
+        ], dim=0)
     
-    def _build_latent_stage(self):
-        """Build and register the latent stage."""
-        TILE_SIZE = 64
-        TILE_STRIDE = TILE_SIZE // 2
+    def _build_combined_stage(self):
+        """Build the combined latent + decoder stage."""
+        TILE_SIZE = self.decoder_tile_size
+        TILE_STRIDE = self.decoder_tile_stride
+        lc = self.latent_compression
+        coarse_px = lc * 32  # decoder pixels per coarse pixel
+        assert TILE_STRIDE % coarse_px == 0, f"decoder_tile_stride ({TILE_STRIDE}) must be a multiple of lc*32 ({coarse_px})"
+        
         COND_INPUT_MEAN = torch.tensor([14.99, 11.65, 15.87, 619.26, 833.12, 69.40, 0.66])
         COND_INPUT_STD = torch.tensor([21.72, 21.78, 10.40, 452.29, 738.09, 34.59, 0.47])
         HISTOGRAM_RAW = torch.tensor([self.kwargs['histogram_raw']])
         
-        scheduler = EDMDPMSolverMultistepScheduler(sigma_min=0.002, sigma_max=80, sigma_data=0.5)
+        latent_scheduler = EDMDPMSolverMultistepScheduler(sigma_min=0.002, sigma_max=80, sigma_data=0.5)
+        decoder_scheduler = EDMDPMSolverMultistepScheduler(sigma_min=0.002, sigma_max=80, sigma_data=0.5)
         weight_window = linear_weight_window(TILE_SIZE, 'cpu', torch.float32)
-
-        t_init = torch.atan(scheduler.sigmas[0] / scheduler.config.sigma_data)
-        output_window = TensorWindow(size=(6, TILE_SIZE, TILE_SIZE), stride=(6, TILE_STRIDE, TILE_STRIDE))
-        coarse_window = TensorWindow(size=(7, 4, 4), stride=(7, 1, 1), offset=(0, -1, -1))
         
-        tensor = self.tile_store.get_or_create(
-            "init_latent_map",
-            shape=(6, None, None),
-            f=lambda ctxs, conds: self._latent_inference(
-                ctxs, None, conds, t_init, scheduler, weight_window, HISTOGRAM_RAW, COND_INPUT_MEAN, COND_INPUT_STD, seed_offset=5819
-            ),
+        t_init = torch.atan(latent_scheduler.sigmas[0] / latent_scheduler.config.sigma_data)
+        t_refine_list = [] if self.onestep_latent else [torch.arctan(torch.tensor(0.35) / 0.5)]
+        t_decoder_list = [torch.atan(decoder_scheduler.sigmas[0] / decoder_scheduler.config.sigma_data)]
+        
+        def f(ctx, coarse_cond):
+            return self._combined_inference(
+                ctx, coarse_cond, latent_scheduler, decoder_scheduler, weight_window,
+                t_init, t_refine_list, t_decoder_list,
+                HISTOGRAM_RAW, COND_INPUT_MEAN, COND_INPUT_STD,
+                TILE_SIZE, TILE_STRIDE
+            )
+        
+        coarse_size = TILE_SIZE // coarse_px + 2
+        coarse_stride = TILE_STRIDE // coarse_px
+        output_window = TensorWindow(size=(3, TILE_SIZE, TILE_SIZE), stride=(3, TILE_STRIDE, TILE_STRIDE))
+        coarse_window = TensorWindow(size=(7, coarse_size, coarse_size), stride=(7, coarse_stride, coarse_stride), offset=(0, -1, -1))
+        return self.tile_store.get_or_create(
+            "combined_map",
+            shape=(3, None, None),
+            f=f,
             output_window=output_window,
             args=(self.coarse,),
             args_windows=(coarse_window,),
-            batch_size=self.latents_batch_size,
-            **self._common_tile_kwargs()
-        )
-        
-        # Skip intermediate refinement steps for 1-step latent model
-        if not self.onestep_latent:
-            inter_t = [torch.arctan(torch.tensor(0.35) / 0.5)]
-            for i, t in enumerate(inter_t):
-                tensor = self.tile_store.get_or_create(
-                    f"step_latent_map_{i}",
-                    shape=(6, None, None),
-                    f=lambda ctxs, samples, conds, t=t, i=i: self._latent_inference(
-                        ctxs, samples, conds, t, scheduler, weight_window, HISTOGRAM_RAW, COND_INPUT_MEAN, COND_INPUT_STD, seed_offset=5820+i
-                    ),
-                    output_window=output_window,
-                    args=(tensor, self.coarse,),
-                    args_windows=(output_window, coarse_window,),
-                    batch_size=self.latents_batch_size,
-                    **self._common_tile_kwargs()
-                )
-        
-        return tensor
-    
-    # =========================================================================
-    # Decoder Stage
-    # =========================================================================
-    
-    def _decoder_inference(self, ctx, latents, scheduler, weight_window, t_list, tile_size, tile_stride):
-        """Run inference for one decoder tile."""
-        TILE_SIZE = tile_size
-        TILE_STRIDE = tile_stride
-        
-        if self.log_mode == 'verbose':
-            print(f"Residual f at {ctx}")
-        if MOCK:
-            return torch.ones((2, TILE_SIZE, TILE_SIZE))
-        
-        model_dtype = self._dtype or torch.float32
-        
-        sample = torch.zeros((1, 1, TILE_SIZE, TILE_SIZE), device=self.device, dtype=model_dtype)
-        lc = self.latent_compression
-        latents = (latents[:-1] / latents[-1:])[:4].view(1, 4, TILE_SIZE//lc, TILE_SIZE//lc)
-        upsampled_latents = torch.nn.functional.interpolate(
-            latents, size=(TILE_SIZE, TILE_SIZE), mode='nearest'
-        ).to(self.device, dtype=model_dtype)
-        
-        for i, t in enumerate(t_list):
-            noise = torch.as_tensor(gaussian_noise_patch(
-                self.seed + 5819 + i, ctx[1]*TILE_STRIDE, ctx[2]*TILE_STRIDE, 
-                TILE_SIZE, TILE_SIZE, channels=1, tile_h=TILE_SIZE, tile_w=TILE_SIZE
-            ))[None]
-            t = t.view(1, 1, 1, 1).to(self.device)
-            z = noise.to(self.device, dtype=model_dtype) * scheduler.config.sigma_data
-            x_t = torch.cos(t) * sample + torch.sin(t) * z
-            model_in = (x_t / scheduler.config.sigma_data).to(self.device)
-            model_in = torch.cat([model_in, upsampled_latents], dim=1)
-            pred = -self.decoder_model(model_in, noise_labels=torch.tensor([t.item()], device=self.device, dtype=model_dtype), conditional_inputs=[])
-            sample = torch.cos(t) * x_t - torch.sin(t) * scheduler.config.sigma_data * pred
-            
-        sample = sample.cpu().float() / scheduler.config.sigma_data
-        return torch.cat([sample[0] * weight_window[None], weight_window[None]], dim=0)
-    
-    def _build_decoder_stage(self):
-        """Build and register the decoder stage."""
-        TILE_SIZE = self.decoder_tile_size
-        TILE_STRIDE = self.decoder_tile_stride
-        
-        scheduler = EDMDPMSolverMultistepScheduler(sigma_min=0.002, sigma_max=80, sigma_data=0.5)
-        weight_window = linear_weight_window(TILE_SIZE, 'cpu', torch.float32)
-        
-        t_list = [torch.atan(scheduler.sigmas[0] / scheduler.config.sigma_data)]
-        #t_list += [torch.arctan(torch.tensor(0.065) / 0.5)]
-        
-        def f(ctx, latents):
-            return self._decoder_inference(ctx, latents, scheduler, weight_window, t_list, TILE_SIZE, TILE_STRIDE)
-        
-        lc = self.latent_compression
-        output_window = TensorWindow(size=(2, TILE_SIZE, TILE_SIZE), stride=(2, TILE_STRIDE, TILE_STRIDE))
-        input_window = TensorWindow(size=(6, TILE_SIZE//lc, TILE_SIZE//lc), stride=(6, TILE_STRIDE//lc, TILE_STRIDE//lc))
-        
-        return self.tile_store.get_or_create(
-            "init_residual_map",
-            shape=(2, None, None),
-            f=f,
-            output_window=output_window,
-            args=(self.latents,),
-            args_windows=(input_window,),
             **self._common_tile_kwargs()
         )
 
@@ -1088,13 +1002,14 @@ class WorldPipeline(ConfigMixin):
     # =========================================================================
 
     @torch.no_grad()
-    def _compute_elev(self, i1, j1, i2, j2, residual_map, scale: int):
-        """Compute elevation from residual map."""
+    def _compute_elev(self, i1, j1, i2, j2, combined_map):
+        """Compute elevation from combined residual + lowfreq map."""
         LOWFREQ_MEAN = -31.4
         LOWFREQ_STD = 38.6
         RESIDUAL_MEAN = self.kwargs['residual_mean']
         RESIDUAL_STD = self.kwargs['residual_std']
         
+        scale = self.latent_compression
         sigma = 5
         kernel_size = (int(sigma * 2) // 2) * 2 + 1
         pad_lr = kernel_size // 2 + 1
@@ -1103,7 +1018,6 @@ class WorldPipeline(ConfigMixin):
         def ceil_div(a: int, b: int) -> int:
             return -((-a) // b)
 
-        # Add padding
         pi1_raw, pj1_raw = i1 - pad_hr, j1 - pad_hr
         pi2_raw, pj2_raw = i2 + pad_hr, j2 + pad_hr
         pi1 = (pi1_raw // scale) * scale
@@ -1111,11 +1025,14 @@ class WorldPipeline(ConfigMixin):
         pi2 = ceil_div(pi2_raw, scale) * scale
         pj2 = ceil_div(pj2_raw, scale) * scale
 
-        residual_init = residual_map[:, pi1:pi2, pj1:pj2]
-        residual_p = (residual_init[0] / residual_init[1]) * RESIDUAL_STD + RESIDUAL_MEAN
-        latents_init = self.latents[:, pi1//scale:pi2//scale, pj1//scale:pj2//scale]
-        latents_norm = latents_init[:-1] / latents_init[-1:]
-        lowfreq_p = latents_norm[4] * LOWFREQ_STD + LOWFREQ_MEAN
+        combined = combined_map[:, pi1:pi2, pj1:pj2]
+        weight = combined[2]
+        residual_p = (combined[0] / weight) * RESIDUAL_STD + RESIDUAL_MEAN
+        lowfreq_fullres = (combined[1] / weight) * LOWFREQ_STD + LOWFREQ_MEAN
+
+        lowfreq_p = torch.nn.functional.avg_pool2d(
+            lowfreq_fullres[None, None], kernel_size=scale, stride=scale
+        ).squeeze(0).squeeze(0)
 
         residual_p, lowfreq_p = laplacian_denoise(residual_p, lowfreq_p, sigma=sigma)
         elev_p = laplacian_decode(residual_p, lowfreq_p)
@@ -1123,8 +1040,7 @@ class WorldPipeline(ConfigMixin):
         oi, oj = i1 - pi1, j1 - pj1
         h, w = i2 - i1, j2 - j1
         elev_sqrt = elev_p[oi:oi + h, oj:oj + w]
-        elev = torch.sign(elev_sqrt) * torch.square(elev_sqrt)
-        return elev
+        return torch.sign(elev_sqrt) * torch.square(elev_sqrt)
     
     def _compute_climate(self, i1: int, j1: int, i2: int, j2: int, elev: torch.Tensor, scale: int) -> torch.Tensor | None:
         """Compute climate from coarse map."""
@@ -1189,7 +1105,7 @@ class WorldPipeline(ConfigMixin):
         Returns:
             dict with 'elev' (H, W) in meters and optionally 'climate' (5, H, W)
         """
-        elev = self._compute_elev(i1, j1, i2, j2, self.residual, scale=self.latent_compression)
+        elev = self._compute_elev(i1, j1, i2, j2, self.residual)
         climate = self._compute_climate(i1, j1, i2, j2, elev, scale=self.latent_compression) if with_climate else None
         
         return {

@@ -38,7 +38,7 @@ def _get_pipeline() -> WorldPipeline:
     _PIPELINE = WorldPipeline.from_pretrained(
         cfg.get('model_path', 'xandergos/terrain-diffusion-90m'),
         seed=cfg.get('seed'),
-        latents_batch_size=cfg.get('latents_batch_size', 4),
+        latents_batch_size=cfg.get('latents_batch_size', [1, 2, 4, 8, 16]),
         log_mode=cfg.get('log_mode', 'verbose'),
         torch_compile=cfg.get('torch_compile', False),
         dtype=cfg.get('dtype'),
@@ -79,7 +79,7 @@ def index():
 @app.get('/api/status')
 def status():
     world = _get_pipeline()
-    return jsonify({'seed': world.seed, 'channels': CHANNEL_NAMES, 'native_resolution': world.native_resolution})
+    return jsonify({'seed': str(world.seed), 'channels': CHANNEL_NAMES, 'native_resolution': world.native_resolution})
 
 
 @app.post('/api/seed')
@@ -89,14 +89,14 @@ def set_seed():
         return jsonify({'error': 'seed required'}), 400
     world = _get_pipeline()
     world.change_seed(int(data['seed']))
-    return jsonify({'seed': world.seed})
+    return jsonify({'seed': str(world.seed)})
 
 
 @app.post('/api/new_seed')
 def new_seed():
     world = _get_pipeline()
     world.change_seed()
-    return jsonify({'seed': world.seed})
+    return jsonify({'seed': str(world.seed)})
 
 
 @app.get('/api/coarse.png')
@@ -275,7 +275,7 @@ def detail_raw():
 @click.option("--cache-size", default="100M")
 @click.option("--seed", type=int, default=None)
 @click.option("--device", default=None)
-@click.option("--batch-size", default="1,4")
+@click.option("--batch-size", default="1,2,4,8,16")
 @click.option("--log-mode", type=click.Choice(["info", "verbose"]), default="verbose")
 @click.option("--compile/--no-compile", "torch_compile", default=True)
 @click.option("--dtype", type=click.Choice(["fp32", "bf16", "fp16"]), default="fp32")

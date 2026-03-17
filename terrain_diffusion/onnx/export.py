@@ -112,9 +112,10 @@ class _CondWrapper(nn.Module):
         return self.model(x, noise_labels, list(cond_inputs))
 
 
-def _dummy_inputs(model: EDMUnet2D, batch_size: int, device: str) -> tuple:
+def _dummy_inputs(model: EDMUnet2D, batch_size: int, device: str, image_size: int | None = None) -> tuple:
     cfg = model.config
-    x = torch.randn(batch_size, cfg.in_channels, cfg.image_size, cfg.image_size, device=device)
+    size = image_size if image_size is not None else cfg.image_size
+    x = torch.randn(batch_size, cfg.in_channels, size, size, device=device)
     noise_labels = torch.randn(batch_size, device=device)
 
     conds = []
@@ -135,6 +136,7 @@ def export_model(
     *,
     device: str = "cpu",
     opset: int = 17,
+    image_size: int | None = None,
 ) -> None:
     """Export a single EDMUnet2D model to ONNX.
 
@@ -147,7 +149,7 @@ def export_model(
     model = model.eval().to(device)
     n_cond = len(model.config.conditional_inputs or [])
 
-    dummy = _dummy_inputs(model, batch_size=1, device=device)
+    dummy = _dummy_inputs(model, batch_size=1, device=device, image_size=image_size)
     input_names  = ["x", "noise_labels"] + [f"cond_{i}" for i in range(n_cond)]
     output_names = ["output"]
     dynamic_axes = {name: {0: "batch"} for name in input_names + output_names}
@@ -176,6 +178,7 @@ def verify_model(
     model: EDMUnet2D,
     *,
     device: str = "cpu",
+    image_size: int | None = None,
 ) -> None:
     """Compare ONNX and PyTorch outputs; prints the max absolute difference.
 
@@ -189,7 +192,7 @@ def verify_model(
         return
 
     model = model.eval().to(device)
-    dummy = _dummy_inputs(model, batch_size=2, device=device)
+    dummy = _dummy_inputs(model, batch_size=2, device=device, image_size=image_size)
 
     with torch.no_grad():
         torch_out = model(dummy[0], dummy[1], list(dummy[2:])).cpu().numpy()
@@ -235,11 +238,12 @@ def main(model_path, output, device, opset, verify, models):
 
         click.echo(f"Exporting {name} ...")
         out_path = output_dir / f"{name}.onnx"
-        export_model(model, out_path, device=device, opset=opset)
+        size_override = 64 if name in ("coarse_model", "base_model") else None
+        export_model(model, out_path, device=device, opset=opset, image_size=size_override)
 
         if verify:
             click.echo(f"Verifying {name} ...")
-            verify_model(out_path, model, device=device)
+            verify_model(out_path, model, device=device, image_size=size_override)
 
 
 if __name__ == "__main__":

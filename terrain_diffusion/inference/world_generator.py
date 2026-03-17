@@ -37,7 +37,7 @@ def generate_world(model_path: str, hdf5_file: str | None = None, seed: int | No
 @click.option("--cache-size", default="100M", help="Cache size (e.g., 100M, 1G) for direct caching")
 @click.option("--seed", type=int, default=None, help="Random seed (default: random or from file)")
 @click.option("--device", default=None, help="Device (cuda/cpu, default: auto)")
-@click.option("--batch-size", type=str, default="1,4", help="Batch size(s) for latent generation (e.g. '4' or '1,2,4,8')")
+@click.option("--batch-size", type=str, default="1,2,4,8,16", help="Batch size(s) for latent generation (e.g. '4' or '1,2,4,8,16')")
 @click.option("--log-mode", type=click.Choice(["info", "verbose"]), default="verbose", help="Logging mode")
 @click.option("--coarse-window", type=int, default=50, help="Coarse window size")
 @click.option("--compile/--no-compile", "torch_compile", default=True, help="Use torch.compile for faster inference")

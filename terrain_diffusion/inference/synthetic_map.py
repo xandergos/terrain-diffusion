@@ -1,3 +1,4 @@
+import os
 import random
 import numpy as np
 import rasterio
@@ -12,9 +13,9 @@ WC_FILES = [
     "data/global/wc2.1_10m_bio_15.tif",
 ]
 WC_URL = "https://geodata.ucdavis.edu/climate/worldclim/2_1/base/wc2.1_10m_bio.zip"
+STATS_CACHE_PATH = "data/global/synthetic_map_stats.npz"
 
 def _ensure_wc_files():
-    import os
     missing = [f for f in WC_FILES if not os.path.exists(f)]
     if not missing:
         return
@@ -40,9 +41,9 @@ def _ensure_wc_files():
     os.remove(zip_path)
     print("Done.")
 
-def make_synthetic_map_factory(frequency_mult=[1.0, 1.0, 1.0, 1.0, 1.0], seed=None, drop_water_pct=0.0):
+def _compute_map_stats(frequency_mult, actual_seeds, drop_water_pct):
     _ensure_wc_files()
-    
+
     elev_img = rasterio.open("data/global/etopo_10m.tif").read(1)
     temp_img = rasterio.open("data/global/wc2.1_10m_bio_1.tif").read(1)
     temp_std_img = rasterio.open("data/global/wc2.1_10m_bio_4.tif").read(1)
@@ -50,7 +51,6 @@ def make_synthetic_map_factory(frequency_mult=[1.0, 1.0, 1.0, 1.0, 1.0], seed=No
     precip_std_img = rasterio.open("data/global/wc2.1_10m_bio_15.tif").read(1)
 
     def process_image(img):
-        # Crop to middle 2/3rds (remove first and last 30 degrees of latitude)
         h = img.shape[0]
         crop_start = h // 6
         crop_end = h - h // 6
@@ -63,32 +63,23 @@ def make_synthetic_map_factory(frequency_mult=[1.0, 1.0, 1.0, 1.0, 1.0], seed=No
     temp_std_img = process_image(temp_std_img)
     precip_img = process_image(precip_img)
     precip_std_img = process_image(precip_std_img)
-    
 
-    def get_lapse_rate(precip):
-        lapse_rate = -6.5 + 0.0015 * precip
-        lapse_rate = np.clip(lapse_rate, -9.8, -4.0)
-        return lapse_rate / 1000
-
-    # Compute linear relationship between temp and temp_std
     valid_mask = ~np.isnan(temp_img)
     temp_flat = temp_img[valid_mask]
     temp_std_flat = temp_std_img[valid_mask]
 
-    # Fit linear regression: temp_std = a * temp + b
     coeffs = np.polyfit(temp_flat, temp_std_flat, 1)
     a_temp_std, b_temp_std = coeffs[0], coeffs[1]
 
-    # Remove linear relationship from temp_std
-    temp_std_predicted = a_temp_std * temp_img + b_temp_std
-    temp_std_img = temp_std_img - temp_std_predicted
+    temp_std_img = temp_std_img - (a_temp_std * temp_img + b_temp_std)
 
-    temp_img = temp_img - get_lapse_rate(precip_img) * np.maximum(0, elev_img)
-    
+    lapse = (-6.5 + 0.0015 * precip_img).clip(-9.8, -4.0) / 1000
+    temp_img = temp_img - lapse * np.maximum(0, elev_img)
+
     temp_std_p1 = np.percentile(temp_std_img[valid_mask], 0.1)
     temp_std_p99 = np.percentile(temp_std_img[valid_mask], 99.9)
 
-    def build_synthetic_map(base_image, frequency, octaves, lacunarity, gain, seed, base_image_mask=None):
+    def compute_quantiles(base_image, frequency, octaves, lacunarity, gain, seed, base_image_mask=None):
         noise = FastNoiseLite(seed=seed)
         noise.noise_type = NoiseType.NoiseType_Perlin
         noise.frequency = frequency
@@ -96,51 +87,111 @@ def make_synthetic_map_factory(frequency_mult=[1.0, 1.0, 1.0, 1.0, 1.0], seed=No
         noise.fractal_octaves = octaves
         noise.fractal_lacunarity = lacunarity
         noise.fractal_gain = gain
-        
-        # Generate noise for statistics
+
         size = 32 * 1024
         x = np.arange(0, size, 32, dtype=np.float32)
         y = np.arange(0, size, 32, dtype=np.float32)
         xx, yy = np.meshgrid(x, y)
+        coords = np.array([xx.flatten(), yy.flatten()], dtype=np.float32)
 
-        # Flatten the grid coordinates
-        Xs = xx.flatten()
-        Ys = yy.flatten()
-        coords = np.array([Xs, Ys], dtype=np.float32)
-
-        # Generate noise for all coordinates
-        noise_values = noise.gen_from_coords(coords)
-        noise_quantiles = build_quantiles(noise_values.flatten(), n_quantiles=64, eps=1e-4)
+        noise_q = build_quantiles(noise.gen_from_coords(coords).flatten(), n_quantiles=64, eps=1e-4)
         if base_image_mask is not None:
-            base_image_quantiles = build_quantiles(base_image[base_image_mask].flatten(), n_quantiles=64, eps=1e-4)
+            base_q = build_quantiles(base_image[base_image_mask].flatten(), n_quantiles=64, eps=1e-4)
         else:
-            base_image_quantiles = build_quantiles(base_image.flatten(), n_quantiles=64, eps=1e-4)
-        
+            base_q = build_quantiles(base_image.flatten(), n_quantiles=64, eps=1e-4)
+        return noise_q, base_q
+
+    hist_mask = np.logical_or(np.random.rand(elev_img.shape[0], elev_img.shape[1]) > drop_water_pct, elev_img >= 0)
+    maps = [
+        (elev_img,        0.05 * frequency_mult[0], 4, 2.0, 0.5, actual_seeds[0], hist_mask),
+        (temp_img,        0.05 * frequency_mult[1], 2, 2.0, 0.5, actual_seeds[1], None),
+        (temp_std_img,    0.05 * frequency_mult[2], 4, 2.0, 0.5, actual_seeds[2], None),
+        (precip_img,      0.05 * frequency_mult[3], 4, 2.0, 0.5, actual_seeds[3], None),
+        (precip_std_img,  0.05 * frequency_mult[4], 4, 2.0, 0.5, actual_seeds[4], None),
+    ]
+    all_noise_q, all_base_q = zip(*[compute_quantiles(*args) for args in maps])
+
+    stats = {
+        'a_temp_std': np.float64(a_temp_std),
+        'b_temp_std': np.float64(b_temp_std),
+        'temp_std_p1': np.float64(temp_std_p1),
+        'temp_std_p99': np.float64(temp_std_p99),
+    }
+    for i, (nq, bq) in enumerate(zip(all_noise_q, all_base_q)):
+        stats[f'noise_quantiles_{i}'] = nq
+        stats[f'base_image_quantiles_{i}'] = bq
+    return stats
+
+def _load_stats_cache(frequency_mult, actual_seeds, drop_water_pct):
+    if not os.path.exists(STATS_CACHE_PATH):
+        return None
+    try:
+        data = np.load(STATS_CACHE_PATH)
+        if (np.allclose(data['frequency_mult'], frequency_mult) and
+                np.array_equal(data['actual_seeds'], actual_seeds) and
+                np.isclose(float(data['drop_water_pct']), drop_water_pct)):
+            return data
+    except Exception:
+        pass
+    return None
+
+def _save_stats_cache(frequency_mult, actual_seeds, drop_water_pct, stats):
+    os.makedirs("data/global", exist_ok=True)
+    np.savez(STATS_CACHE_PATH,
+             frequency_mult=np.array(frequency_mult),
+             actual_seeds=np.array(actual_seeds),
+             drop_water_pct=np.float64(drop_water_pct),
+             **stats)
+
+def make_synthetic_map_factory(frequency_mult=[1.0, 1.0, 1.0, 1.0, 1.0], seed=None, drop_water_pct=0.0):
+    actual_seeds = [((seed or random.randint(0, 2**30)) + i + 1) & 0x7FFFFFFF for i in range(5)]
+
+    stats = _load_stats_cache(frequency_mult, actual_seeds, drop_water_pct)
+    if stats is None:
+        stats = _compute_map_stats(frequency_mult, actual_seeds, drop_water_pct)
+        _save_stats_cache(frequency_mult, actual_seeds, drop_water_pct, stats)
+
+    a_temp_std = float(stats['a_temp_std'])
+    b_temp_std = float(stats['b_temp_std'])
+    temp_std_p1 = float(stats['temp_std_p1'])
+    temp_std_p99 = float(stats['temp_std_p99'])
+
+    def build_synthetic_map(frequency, octaves, lacunarity, gain, seed, noise_quantiles, base_image_quantiles):
+        noise = FastNoiseLite(seed=seed)
+        noise.noise_type = NoiseType.NoiseType_Perlin
+        noise.frequency = frequency
+        noise.fractal_type = FractalType.FractalType_FBm
+        noise.fractal_octaves = octaves
+        noise.fractal_lacunarity = lacunarity
+        noise.fractal_gain = gain
         transform_fn = lambda x: transform_perlin(x, noise_quantiles, base_image_quantiles)
         return noise, transform_fn
-        
-        
+
     def sample_synthetic_map(noise, transform_fn, i1, j1, i2, j2):
         x = np.arange(i1, i2, dtype=np.float32)
         y = np.arange(j1, j2, dtype=np.float32)
         xx, yy = np.meshgrid(x, y)
 
-        # Flatten the grid coordinates
         Xs = xx.flatten()
         Ys = yy.flatten()
         coords = np.array([Xs, Ys], dtype=np.float32)
 
-        # Generate noise for all coordinates
         noise_values = noise.gen_from_coords(coords)
         transformed_values = transform_fn(noise_values)
         return transformed_values.reshape(i2 - i1, j2 - j1)
 
-    hist_mask = np.logical_or(np.random.rand(elev_img.shape[0], elev_img.shape[1]) > drop_water_pct, elev_img >= 0)
-    synthetic_elev_params = build_synthetic_map(elev_img, 0.05 * frequency_mult[0], 4, 2.0, 0.5, seed=(seed or random.randint(0, 2**30))+1, base_image_mask=hist_mask)
-    synthetic_temp_params = build_synthetic_map(temp_img, 0.05 * frequency_mult[1], 2, 2.0, 0.5, seed=(seed or random.randint(0, 2**30))+2)
-    synthetic_temp_std_params = build_synthetic_map(temp_std_img, 0.05 * frequency_mult[2], 4, 2.0, 0.5, seed=(seed or random.randint(0, 2**30))+3)
-    synthetic_precip_params = build_synthetic_map(precip_img, 0.05 * frequency_mult[3], 4, 2.0, 0.5, seed=(seed or random.randint(0, 2**30))+4)
-    synthetic_precip_std_params = build_synthetic_map(precip_std_img, 0.05 * frequency_mult[4], 4, 2.0, 0.5, seed=(seed or random.randint(0, 2**30))+5)
+    map_configs = [
+        (0.05 * frequency_mult[0], 4, 2.0, 0.5),
+        (0.05 * frequency_mult[1], 2, 2.0, 0.5),
+        (0.05 * frequency_mult[2], 4, 2.0, 0.5),
+        (0.05 * frequency_mult[3], 4, 2.0, 0.5),
+        (0.05 * frequency_mult[4], 4, 2.0, 0.5),
+    ]
+    synthetic_params = [
+        build_synthetic_map(*cfg, actual_seeds[i], stats[f'noise_quantiles_{i}'], stats[f'base_image_quantiles_{i}'])
+        for i, cfg in enumerate(map_configs)
+    ]
+    synthetic_elev_params, synthetic_temp_params, synthetic_temp_std_params, synthetic_precip_params, synthetic_precip_std_params = synthetic_params
 
     def sample_full_synthetic_map(i1, j1, i2, j2):
         synthetic_elev = sample_synthetic_map(*synthetic_elev_params, i1, j1, i2, j2)
@@ -150,7 +201,8 @@ def make_synthetic_map_factory(frequency_mult=[1.0, 1.0, 1.0, 1.0, 1.0], seed=No
         synthetic_precip_std = sample_synthetic_map(*synthetic_precip_std_params, i1, j1, i2, j2)
 
         # Correcting temp
-        synthetic_temp = synthetic_temp + get_lapse_rate(synthetic_precip) * np.maximum(0, synthetic_elev)
+        lapse_rate = (-6.5 + 0.0015 * synthetic_precip).clip(-9.8, -4.0) / 1000
+        synthetic_temp = synthetic_temp + lapse_rate * np.maximum(0, synthetic_elev)
         synthetic_temp = np.clip(synthetic_temp, -10, 40)
 
         # Correcting  temp std

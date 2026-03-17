@@ -198,7 +198,7 @@ def run_sampler(
 @click.option("--min-land-frac", type=float, default=0.5, help="Minimum land fraction for tile selection")
 @click.option("--caching-strategy", type=click.Choice(["indirect", "direct"]), default="direct")
 @click.option("--cache-size", default="1G", help="Cache size for direct caching")
-@click.option("--batch-size", type=str, default="1,2,4,8,16,32", help="Batch size(s) for latent generation")
+@click.option("--batch-size", type=str, default="1,2,4,8,16", help="Batch size(s) for latent generation")
 @click.option("--compile/--no-compile", "torch_compile", default=True, help="Use torch.compile")
 @click.option("--dtype", type=click.Choice(["fp32", "bf16", "fp16"]), default="fp32", help="Model dtype")
 @click.option("--kwarg", "extra_kwargs", multiple=True, help="Additional key=value kwargs")
