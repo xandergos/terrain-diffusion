@@ -193,31 +193,39 @@ def make_synthetic_map_factory(frequency_mult=[1.0, 1.0, 1.0, 1.0, 1.0], seed=No
     ]
     synthetic_elev_params, synthetic_temp_params, synthetic_temp_std_params, synthetic_precip_params, synthetic_precip_std_params = synthetic_params
 
-    def sample_full_synthetic_map(i1, j1, i2, j2):
-        synthetic_elev = sample_synthetic_map(*synthetic_elev_params, i1, j1, i2, j2)
-        synthetic_temp = sample_synthetic_map(*synthetic_temp_params, i1, j1, i2, j2)
-        synthetic_temp_std = sample_synthetic_map(*synthetic_temp_std_params, i1, j1, i2, j2)
-        synthetic_precip = sample_synthetic_map(*synthetic_precip_params, i1, j1, i2, j2)
-        synthetic_precip_std = sample_synthetic_map(*synthetic_precip_std_params, i1, j1, i2, j2)
+    def finalize_synthetic_map(raw_map):
+        synthetic_elev = np.asarray(raw_map[0], dtype=np.float32)
+        synthetic_temp = np.asarray(raw_map[1], dtype=np.float32)
+        synthetic_temp_std = np.asarray(raw_map[2], dtype=np.float32)
+        synthetic_precip = np.asarray(raw_map[3], dtype=np.float32)
+        synthetic_precip_std = np.asarray(raw_map[4], dtype=np.float32)
 
-        # Correcting temp
         lapse_rate = (-6.5 + 0.0015 * synthetic_precip).clip(-9.8, -4.0) / 1000
         synthetic_temp = synthetic_temp + lapse_rate * np.maximum(0, synthetic_elev)
         synthetic_temp = np.clip(synthetic_temp, -10, 40)
 
-        # Correcting  temp std
         t = (synthetic_temp_std - temp_std_p1) / (temp_std_p99 - temp_std_p1)
         baseline = np.maximum(temp_std_p1, -(a_temp_std * synthetic_temp + b_temp_std))
         synthetic_temp_std = t * (temp_std_p99 - baseline) + baseline
         synthetic_temp_std = synthetic_temp_std + (a_temp_std * synthetic_temp + b_temp_std)
         synthetic_temp_std = np.maximum(synthetic_temp_std, 20)
 
-        # Correcting precip std
         synthetic_precip_std = synthetic_precip_std * np.maximum(0, (185 - 0.04111 * synthetic_precip) / 185)
-        
-        synthetic_elev = np.sign(synthetic_elev) * np.sqrt(np.abs(synthetic_elev))
+        return np.stack([synthetic_elev, synthetic_temp, synthetic_temp_std, synthetic_precip, synthetic_precip_std], axis=0)
 
-        synthetic_map = np.stack([synthetic_elev, synthetic_temp, synthetic_temp_std, synthetic_precip, synthetic_precip_std], axis=0)
+    def sample_raw_synthetic_map(i1, j1, i2, j2):
+        synthetic_elev = sample_synthetic_map(*synthetic_elev_params, i1, j1, i2, j2)
+        synthetic_temp = sample_synthetic_map(*synthetic_temp_params, i1, j1, i2, j2)
+        synthetic_temp_std = sample_synthetic_map(*synthetic_temp_std_params, i1, j1, i2, j2)
+        synthetic_precip = sample_synthetic_map(*synthetic_precip_params, i1, j1, i2, j2)
+        synthetic_precip_std = sample_synthetic_map(*synthetic_precip_std_params, i1, j1, i2, j2)
+        return np.stack([synthetic_elev, synthetic_temp, synthetic_temp_std, synthetic_precip, synthetic_precip_std], axis=0)
+
+    def sample_full_synthetic_map(i1, j1, i2, j2):
+        synthetic_map = finalize_synthetic_map(sample_raw_synthetic_map(i1, j1, i2, j2))
+        synthetic_map[0] = np.sign(synthetic_map[0]) * np.sqrt(np.abs(synthetic_map[0]))
         return torch.from_numpy(synthetic_map).float()
-    
+
+    sample_full_synthetic_map.sample_raw = sample_raw_synthetic_map
+    sample_full_synthetic_map.finalize = finalize_synthetic_map
     return sample_full_synthetic_map

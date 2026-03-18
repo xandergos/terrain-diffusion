@@ -273,7 +273,6 @@ def normalize_tensor(tensor, dim=0):
     idx_den[dim] = slice(-1, None)
     return tensor[tuple(idx_num)] / tensor[tuple(idx_den)]
 
-
 class WorldPipeline(ConfigMixin):
     """Multi-scale terrain generation pipeline."""
     
@@ -378,6 +377,10 @@ class WorldPipeline(ConfigMixin):
         self.coarse = None
         self.latents = None
         self.residual = None
+        self.custom_conditioning_imports = {}
+        self.custom_conditioning_import_origins = {}
+        self.custom_conditioning_default_values = {}
+        self.custom_conditioning_edits = {}
     
     def _get_padded_batch_size(self, actual_size: int) -> int:
         """Get the next highest legal batch size for padding."""
@@ -744,6 +747,217 @@ class WorldPipeline(ConfigMixin):
         self.rebuild()
         return True
 
+    def set_cond_snr(self, cond_snr: list[float]):
+        if len(cond_snr) != 5:
+            raise ValueError("cond_snr must contain exactly 5 values.")
+        self.kwargs['cond_snr'] = [float(x) for x in cond_snr]
+
+    def clear_custom_conditioning(self, channel: int | None = None):
+        if channel is None:
+            self.custom_conditioning_imports.clear()
+            self.custom_conditioning_import_origins.clear()
+            self.custom_conditioning_default_values.clear()
+            self.custom_conditioning_edits.clear()
+            return
+        self.custom_conditioning_imports.pop(int(channel), None)
+        self.custom_conditioning_import_origins.pop(int(channel), None)
+        self.custom_conditioning_default_values.pop(int(channel), None)
+        self.custom_conditioning_edits.pop(int(channel), None)
+
+    def set_custom_conditioning_import(
+        self,
+        channel: int,
+        values: np.ndarray,
+        origin_i: int,
+        origin_j: int,
+        default_value: float | None = None,
+    ):
+        values = np.asarray(values, dtype=np.float32)
+        if values.ndim != 2:
+            raise ValueError("Custom conditioning import must be a 2-D array.")
+        channel = int(channel)
+        self.custom_conditioning_imports[channel] = values.copy()
+        self.custom_conditioning_import_origins[channel] = (int(origin_i), int(origin_j))
+        if default_value is None:
+            self.custom_conditioning_default_values.pop(channel, None)
+        else:
+            self.custom_conditioning_default_values[channel] = float(default_value)
+        self.custom_conditioning_edits[channel] = {}
+
+    def set_custom_conditioning_value(self, channel: int, ci: int, cj: int, value: float):
+        channel = int(channel)
+        self.custom_conditioning_edits.setdefault(channel, {})[(int(ci), int(cj))] = float(value)
+
+    def _sample_base_conditioning(self, ci0: int, ci1: int, cj0: int, cj1: int) -> np.ndarray:
+        base = self.synthetic_map_factory(cj0, ci0, cj1, ci1).detach().cpu().numpy().astype(np.float32)
+        base[0] = np.sign(base[0]) * np.square(base[0])
+        return base
+
+    def _sample_raw_conditioning(self, ci0: int, ci1: int, cj0: int, cj1: int) -> np.ndarray:
+        sample_raw = getattr(self.synthetic_map_factory, "sample_raw", None)
+        if sample_raw is None:
+            return self._sample_base_conditioning(ci0, ci1, cj0, cj1)
+        return np.asarray(sample_raw(cj0, ci0, cj1, ci1), dtype=np.float32)
+
+    def _finalize_conditioning(self, raw: np.ndarray) -> np.ndarray:
+        finalize = getattr(self.synthetic_map_factory, "finalize", None)
+        if finalize is None:
+            return raw
+        return np.asarray(finalize(raw), dtype=np.float32)
+
+    def _sample_custom_conditioning_channel(self, channel: int, ci0: int, ci1: int, cj0: int, cj1: int):
+        import_values = self.custom_conditioning_imports.get(channel)
+        edits = self.custom_conditioning_edits.get(channel, {})
+        default_value = self.custom_conditioning_default_values.get(channel)
+        if import_values is None and not edits and default_value is None:
+            return None, None
+
+        h = ci1 - ci0
+        w = cj1 - cj0
+        if default_value is None:
+            values = np.zeros((h, w), dtype=np.float32)
+            mask = np.zeros((h, w), dtype=bool)
+        else:
+            values = np.full((h, w), float(default_value), dtype=np.float32)
+            mask = np.ones((h, w), dtype=bool)
+
+        if import_values is not None:
+            src_i0, src_j0 = self.custom_conditioning_import_origins[channel]
+            src_i1 = src_i0 + import_values.shape[0]
+            src_j1 = src_j0 + import_values.shape[1]
+            oi0 = max(ci0, src_i0)
+            oi1 = min(ci1, src_i1)
+            oj0 = max(cj0, src_j0)
+            oj1 = min(cj1, src_j1)
+            if oi0 < oi1 and oj0 < oj1:
+                values[oi0 - ci0:oi1 - ci0, oj0 - cj0:oj1 - cj0] = import_values[
+                    oi0 - src_i0:oi1 - src_i0,
+                    oj0 - src_j0:oj1 - src_j0,
+                ]
+                mask[oi0 - ci0:oi1 - ci0, oj0 - cj0:oj1 - cj0] = True
+
+        for (ci, cj), value in edits.items():
+            if ci0 <= ci < ci1 and cj0 <= cj < cj1:
+                values[ci - ci0, cj - cj0] = value
+                mask[ci - ci0, cj - cj0] = True
+
+        if not mask.any():
+            return None, None
+        return values, mask
+
+    def get_conditioning_preview(self, ci0: int, ci1: int, cj0: int, cj1: int) -> np.ndarray:
+        raw = self._sample_raw_conditioning(ci0, ci1, cj0, cj1)
+        for channel in range(raw.shape[0]):
+            values, mask = self._sample_custom_conditioning_channel(channel, ci0, ci1, cj0, cj1)
+            if values is not None:
+                raw[channel][mask] = values[mask]
+        return raw
+
+    def get_conditioning_preview_finalized(self, ci0: int, ci1: int, cj0: int, cj1: int) -> np.ndarray:
+        return self._finalize_conditioning(self.get_conditioning_preview(ci0, ci1, cj0, cj1))
+
+    def get_refined_preview(self, ci0: int, ci1: int, cj0: int, cj1: int) -> np.ndarray:
+        coarse_init = self.coarse[:, ci0:ci1, cj0:cj1].cpu().float()
+        weight = coarse_init[-1:]
+        coarse_map = torch.where(weight > 0, coarse_init[:-1] / weight, torch.nan)
+        elev = torch.sign(coarse_map[0]) * torch.square(torch.abs(coarse_map[0]))
+        refined = torch.stack([elev, coarse_map[2], coarse_map[3], coarse_map[4], coarse_map[5]])
+        return refined.numpy().astype(np.float32)
+
+    def apply_conditioning_brush(
+        self,
+        channel: int,
+        center_ci: float,
+        center_cj: float,
+        radius: float,
+        strength: float,
+        mode: str,
+        target_value: float = 0.0,
+        delta_value: float = 100.0,
+        use_finalized_temp: bool = False,
+    ) -> dict:
+        channel = int(channel)
+        strength = float(np.clip(strength, 0.0, 1.0))
+        radius = float(max(0.0, radius))
+        if strength <= 0:
+            return {'changed_tiles': 0, 'min_value': None, 'max_value': None}
+
+        if radius == 0:
+            ci0 = int(round(center_ci))
+            ci1 = ci0 + 1
+            cj0 = int(round(center_cj))
+            cj1 = cj0 + 1
+        else:
+            ci0 = int(np.floor(center_ci - radius))
+            ci1 = int(np.ceil(center_ci + radius)) + 1
+            cj0 = int(np.floor(center_cj - radius))
+            cj1 = int(np.ceil(center_cj + radius)) + 1
+
+        raw_preview = self.get_conditioning_preview(ci0, ci1, cj0, cj1)
+        base = raw_preview[channel]
+
+        # When working in finalized-temp space (elevation-adjusted display), convert base
+        # to finalized space, apply the brush, then convert the result back to raw.
+        # offset = raw - fin, so raw = fin + offset.
+        fin_to_raw_offset = None
+        if use_finalized_temp and channel == 1:
+            fin_preview = self._finalize_conditioning(raw_preview.copy())
+            fin_to_raw_offset = raw_preview[1] - fin_preview[1]
+            base = fin_preview[1]
+        ys = np.arange(ci0, ci1, dtype=np.float32)[:, None]
+        xs = np.arange(cj0, cj1, dtype=np.float32)[None, :]
+        dist = np.sqrt((ys - center_ci) ** 2 + (xs - center_cj) ** 2)
+        if radius == 0:
+            weight = np.zeros_like(base, dtype=np.float32)
+            weight[int(round(center_ci)) - ci0, int(round(center_cj)) - cj0] = 1.0
+        else:
+            weight = np.clip(1.0 - dist / radius, 0.0, 1.0).astype(np.float32)
+            weight *= weight
+        weight *= strength
+
+        if mode == 'set':
+            updated = base + (float(target_value) - base) * weight
+        elif mode == 'raise':
+            updated = base + float(delta_value) * weight
+        elif mode == 'lower':
+            updated = base - float(delta_value) * weight
+        elif mode == 'smooth':
+            padded = np.pad(base, 1, mode='edge')
+            smooth = (
+                padded[:-2, :-2] + padded[:-2, 1:-1] + padded[:-2, 2:] +
+                padded[1:-1, :-2] + padded[1:-1, 1:-1] + padded[1:-1, 2:] +
+                padded[2:, :-2] + padded[2:, 1:-1] + padded[2:, 2:]
+            ) / 9.0
+            updated = base + (smooth - base) * weight
+        elif mode == 'noise':
+            noise = np.random.normal(0.0, float(delta_value), base.shape).astype(np.float32)
+            updated = base + noise * weight
+        else:
+            raise ValueError(f"Unknown brush mode: {mode}")
+
+        changed = weight > 1e-6
+        if not changed.any():
+            return {'changed_tiles': 0, 'min_value': None, 'max_value': None}
+
+        if fin_to_raw_offset is not None:
+            updated = updated + fin_to_raw_offset
+
+        changed_values = updated[changed]
+        edits = self.custom_conditioning_edits.setdefault(channel, {})
+        for local_i, local_j in np.argwhere(changed):
+            edits[(ci0 + int(local_i), cj0 + int(local_j))] = float(updated[local_i, local_j])
+        return {
+            'changed_tiles': int(changed.sum()),
+            'min_value': float(changed_values.min()),
+            'max_value': float(changed_values.max()),
+        }
+
+    def _conditioning_model_input(self, ci0: int, ci1: int, cj0: int, cj1: int) -> torch.Tensor:
+        cond = self._finalize_conditioning(self.get_conditioning_preview(ci0, ci1, cj0, cj1))
+        cond[0] = np.sign(cond[0]) * np.sqrt(np.abs(cond[0]))
+        cond[1] = np.where(cond[1] > 20, cond[1], (cond[1] - 20) * 1.25 + 20)
+        return torch.from_numpy(cond).float()
+
     # =========================================================================
     # Coarse Stage
     # =========================================================================
@@ -760,9 +974,10 @@ class WorldPipeline(ConfigMixin):
         i1, j1 = i * (TILE_STRIDE // pool_size), j * (TILE_STRIDE // pool_size)
         i1, j1 = i1 * pool_size, j1 * pool_size
         i2, j2 = i1 + TILE_SIZE, j1 + TILE_SIZE
+        if self.log_mode == 'verbose':
+            print(f"Coarse f at {ctx}")
         
-        synthetic_map = torch.as_tensor(self.synthetic_map_factory(j1, i1, j2, i2))
-        synthetic_map[1] = torch.where(synthetic_map[1] > 20, synthetic_map[1], (synthetic_map[1] - 20) * 1.25 + 20)
+        synthetic_map = self._conditioning_model_input(i1, i2, j1, j2)
         synthetic_map = (synthetic_map - MODEL_MEANS[[0, 2, 3, 4, 5], None, None]) / MODEL_STDS[[0, 2, 3, 4, 5], None, None]
         synthetic_map = synthetic_map.to(self.device, dtype=model_dtype)[None]
         

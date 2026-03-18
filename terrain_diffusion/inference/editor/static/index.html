@@ -1,0 +1,1129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Terrain Editor</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #0f1117;
+    --surface: #161924;
+    --card: #1e2235;
+    --border: #2d3458;
+    --accent: #4f8ef7;
+    --accent-dim: #1e3570;
+    --text: #e2e8f0;
+    --muted: #6b7a99;
+    --highlight: #f97316;
+    --good: #22c55e;
+  }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: system-ui, -apple-system, sans-serif;
+    font-size: 13px;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .layout { display: flex; flex: 1; min-height: 0; }
+  .sidebar {
+    width: 340px;
+    flex-shrink: 0;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+  }
+  .sidebar h1 {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--accent);
+    padding: 12px 14px 10px;
+    border-bottom: 1px solid var(--border);
+    letter-spacing: 0.03em;
+  }
+  .section {
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+  }
+  .section-title {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .seed-display {
+    font-size: 18px;
+    font-weight: 600;
+    font-family: monospace;
+  }
+  .row { display: flex; gap: 6px; align-items: center; }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .grid-4 { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .channel-grid { display: flex; flex-wrap: wrap; gap: 6px; }
+  .channel-grid button { flex: 1 1 calc(50% - 6px); }
+  .label-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    color: var(--muted);
+    font-size: 11px;
+  }
+  .hint {
+    color: var(--muted);
+    line-height: 1.45;
+  }
+  .pill {
+    font-family: monospace;
+    color: var(--accent);
+  }
+  input[type="number"], input[type="text"], input[type="range"] {
+    width: 100%;
+  }
+  input[type="number"], input[type="text"] {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text);
+    padding: 5px 7px;
+    font-size: 12px;
+    outline: none;
+    min-width: 0;
+  }
+  input[type="number"]:focus, input[type="text"]:focus { border-color: var(--accent); }
+  input[type="range"] { accent-color: var(--accent); }
+  button {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text);
+    padding: 5px 10px;
+    font-size: 12px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.12s, border-color 0.12s;
+  }
+  button:hover { background: var(--accent-dim); border-color: var(--accent); }
+  button:active { background: var(--accent); }
+  button.active, button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.warn { border-color: var(--highlight); }
+
+  .map-area {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    padding: 8px;
+    min-width: 0;
+    min-height: 0;
+  }
+  .map-panel {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+  }
+  .panel-header {
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    flex-shrink: 0;
+  }
+  .panel-title { font-weight: 600; font-size: 12px; }
+  .panel-info {
+    color: var(--muted);
+    font-size: 11px;
+    font-family: monospace;
+    margin-left: auto;
+    min-width: 0;
+  }
+  .nav-grid {
+    display: grid;
+    grid-template-columns: 28px 1fr 28px;
+    grid-template-rows: 28px 1fr 28px;
+    flex: 1;
+    min-height: 0;
+    padding: 5px;
+    gap: 3px;
+  }
+  .pan-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text);
+    cursor: pointer;
+    font-size: 13px;
+    width: 100%;
+    height: 100%;
+  }
+  .pan-btn:hover { background: var(--accent-dim); border-color: var(--accent); }
+  .btn-up { grid-column: 2; grid-row: 1; }
+  .btn-down { grid-column: 2; grid-row: 3; }
+  .btn-left { grid-column: 1; grid-row: 2; }
+  .btn-right { grid-column: 3; grid-row: 2; }
+  .map-container {
+    grid-column: 2;
+    grid-row: 2;
+    position: relative;
+    overflow: hidden;
+    background: #090b11;
+    border-radius: 3px;
+    cursor: crosshair;
+    user-select: none;
+  }
+  .map-container.brushing { cursor: cell; }
+  .map-img {
+    width: 100%;
+    height: 100%;
+    display: block;
+    transition: opacity 0.2s;
+  }
+  .map-img.loading { opacity: 0.35; }
+  #coarse-img { image-rendering: pixelated; }
+  .map-placeholder {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--muted);
+    font-size: 12px;
+    pointer-events: none;
+  }
+  .spinner {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    width: 16px;
+    height: 16px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    display: none;
+  }
+  .spinner.active { display: block; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .tile-marker, .brush-preview {
+    position: absolute;
+    pointer-events: none;
+    display: none;
+  }
+  .tile-marker {
+    border: 2px solid var(--highlight);
+    box-shadow: 0 0 0 1px rgba(249,115,22,0.3);
+  }
+  .brush-preview {
+    border: 2px solid rgba(79, 142, 247, 0.95);
+    background: rgba(79, 142, 247, 0.1);
+    border-radius: 999px;
+    transform: translate(-50%, -50%);
+  }
+  .hover-tooltip {
+    position: fixed;
+    background: rgba(10, 12, 22, 0.95);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 10px 14px;
+    font-family: monospace;
+    font-size: 13px;
+    line-height: 1.6;
+    pointer-events: none;
+    display: none;
+    z-index: 200;
+    min-width: 200px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+  }
+  .ht-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+  }
+  .ht-label { color: var(--muted); }
+  .ht-val { color: var(--text); font-weight: 600; }
+  .status-bar {
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    padding: 3px 14px;
+    color: var(--muted);
+    font-size: 11px;
+    font-family: monospace;
+    flex-shrink: 0;
+  }
+</style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <h1>Terrain Editor</h1>
+
+    <div class="section">
+      <div class="section-title">Seed</div>
+      <div class="seed-display" id="seed-display">—</div>
+      <div class="row">
+        <input type="number" id="seed-input" placeholder="Enter seed…">
+        <button id="btn-set-seed" class="primary">Set</button>
+      </div>
+      <button id="btn-new-seed">Random</button>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Channel</div>
+      <div class="channel-grid" id="channel-buttons"></div>
+      <div class="hint" id="channel-hint">Editing `Elev` on the coarse map.</div>
+      <button id="btn-temp-elev-adj" style="display:none">Elev Adj: ON</button>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Tool</div>
+      <div class="grid-2">
+        <button class="active" id="tool-select">Select</button>
+        <button id="tool-brush">Brush</button>
+      </div>
+      <div class="grid-4" id="brush-modes">
+        <button class="active" data-mode="set">Set</button>
+        <button data-mode="raise">Raise</button>
+        <button data-mode="lower">Lower</button>
+        <button data-mode="smooth">Smooth</button>
+        <button data-mode="noise">Noise</button>
+      </div>
+      <div class="label-row"><span>Brush Size</span><span class="pill" id="brush-size-label">2.0 tiles</span></div>
+      <input type="range" id="brush-size" min="0" max="12" step="0.5" value="2">
+      <div class="label-row"><span>Brush Strength</span><span class="pill" id="brush-strength-label">0.50</span></div>
+      <input type="range" id="brush-strength" min="0.05" max="1" step="0.05" value="0.5">
+      <div class="label-row"><span id="target-label">Target Value</span><span class="hint">for `Set`</span></div>
+      <input type="number" id="target-elevation" value="0" step="50">
+      <div class="label-row"><span id="delta-label">Raise/Lower Step</span><span class="hint">per brush pass</span></div>
+      <input type="number" id="delta-elevation" value="250" step="25" min="1">
+      <div class="hint">`Select` chooses the detail tile. `Brush` lets you click or drag over the coarse map like a terrain tool.</div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Refinement Strength (Default = 0.5)</div>
+      <div id="cond-snr-controls"></div>
+      <div class="hint">Changing refinement strength updates the staged coarse-model input settings. Click refresh to rebuild with the new values.</div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">World</div>
+      <button id="btn-refresh-detail" class="primary">Refresh Detail (Rebuild)</button>
+      <div class="grid-2">
+        <button id="btn-import">Import TIFF</button>
+        <button id="btn-reset-custom" class="warn">Reset Channel</button>
+      </div>
+      <input type="file" id="file-import" accept=".tif,.tiff" hidden>
+      <div class="hint">Imported TIFFs apply to the current channel. Elevation imports use `-1000 m` outside the image bounds; climate channels keep the base synthetic map outside the import.</div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Selection</div>
+      <div class="hint" id="selection-coords">No detail tile selected.</div>
+      <div class="hint" id="selection-detail-status">Detail map is showing the last rebuilt world.</div>
+    </div>
+  </aside>
+
+  <div class="map-area">
+    <div class="map-panel">
+      <div class="panel-header">
+        <span class="panel-title">Coarse Map</span>
+        <button class="active" id="view-coarse">Coarse Map</button>
+        <button id="view-refined">Refined</button>
+        <button id="coarse-zoom-in">Zoom In</button>
+        <button id="coarse-zoom-out">Zoom Out</button>
+        <span class="pill" id="coarse-zoom-label">100x100</span>
+        <span class="panel-info" id="coarse-info">select a tile or brush the map</span>
+      </div>
+      <div class="nav-grid">
+        <button class="pan-btn btn-up" id="coarse-up">↑</button>
+        <button class="pan-btn btn-left" id="coarse-left">←</button>
+        <div class="map-container" id="coarse-container">
+          <img id="coarse-img" class="map-img" alt="coarse map" draggable="false">
+          <div class="brush-preview" id="brush-preview"></div>
+          <div class="tile-marker" id="tile-marker"></div>
+          <div class="spinner" id="coarse-spinner"></div>
+          <div class="map-placeholder" id="coarse-placeholder">Loading…</div>
+        </div>
+        <button class="pan-btn btn-right" id="coarse-right">→</button>
+        <button class="pan-btn btn-down" id="coarse-down">↓</button>
+      </div>
+    </div>
+
+    <div class="map-panel">
+      <div class="panel-header">
+        <span class="panel-title">Detail Map</span>
+        <button class="active" id="mode-relief">Relief</button>
+        <button id="mode-elevation">Elevation</button>
+        <button id="mode-temperature">Temperature</button>
+        <span class="panel-info" id="detail-info">click coarse map to load</span>
+      </div>
+      <div class="nav-grid">
+        <button class="pan-btn btn-up" id="detail-up">↑</button>
+        <button class="pan-btn btn-left" id="detail-left">←</button>
+        <div class="map-container" id="detail-container">
+          <img id="detail-img" class="map-img" alt="detail map" style="display:none" draggable="false">
+          <div class="spinner" id="detail-spinner"></div>
+          <div class="map-placeholder" id="detail-placeholder">Click coarse map to generate</div>
+        </div>
+        <button class="pan-btn btn-right" id="detail-right">→</button>
+        <button class="pan-btn btn-down" id="detail-down">↓</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="status-bar" id="status-bar">Connecting…</div>
+<div class="hover-tooltip" id="hover-tooltip"></div>
+
+<script>
+  const COARSE_PAN_STEP = 20;
+  const COARSE_WINDOW_MIN = 8;
+  const COARSE_WINDOW_MAX = 120;
+  const DETAIL_PAN_STEP = 256;
+  const DETAIL_SIZE = 1024;
+  const CHANNEL_META = [
+    { name: 'Elev', unit: 'm', step: 50, target: 0, delta: 250 },
+    { name: 'Temp', unit: 'C', step: 1, target: 15, delta: 2 },
+    { name: 'T std', unit: 'C', step: 0.5, target: 10, delta: 2 },
+    { name: 'Precip', unit: 'mm', step: 10, target: 1000, delta: 50 },
+    { name: 'P CV', unit: '%', step: 1, target: 50, delta: 5 },
+  ];
+
+  const state = {
+    seed: null,
+    channels: CHANNEL_META.map((c) => c.name),
+    currentChannel: 0,
+    coarseView: 'coarse',
+    condSnr: [0.3, 0.1, 1.0, 0.1, 1.0],
+    nativeResolution: 90,
+    coarseOffsetI: 0,
+    coarseOffsetJ: 0,
+    coarseWindow: 50,
+    coarseData: null,
+    detailCI: null,
+    detailCJ: null,
+    detailPanI: 0,
+    detailPanJ: 0,
+    detailMode: 'relief',
+    detailRaw: null,
+    tool: 'select',
+    brushMode: 'set',
+    brushSize: 2,
+    brushStrength: 0.5,
+    targetValues: CHANNEL_META.map((c) => c.target),
+    deltaValues: CHANNEL_META.map((c) => c.delta),
+    tempElevAdj: true,
+    coarseVersion: 0,
+    detailVersion: 0,
+    refinedDirty: false,
+    restoreBrushOnCoarse: false,
+    isPainting: false,
+    lastPaintKey: null,
+  };
+
+  const seedDisplay = document.getElementById('seed-display');
+  const seedInput = document.getElementById('seed-input');
+  const channelButtons = document.getElementById('channel-buttons');
+  const channelHint = document.getElementById('channel-hint');
+  const condSnrControls = document.getElementById('cond-snr-controls');
+  const coarseContainer = document.getElementById('coarse-container');
+  const coarseImg = document.getElementById('coarse-img');
+  const coarseSpinner = document.getElementById('coarse-spinner');
+  const coarsePlaceholder = document.getElementById('coarse-placeholder');
+  const coarseInfo = document.getElementById('coarse-info');
+  const coarseZoomLabel = document.getElementById('coarse-zoom-label');
+  const viewCoarseButton = document.getElementById('view-coarse');
+  const viewRefinedButton = document.getElementById('view-refined');
+  const tileMarker = document.getElementById('tile-marker');
+  const brushPreview = document.getElementById('brush-preview');
+  const detailImg = document.getElementById('detail-img');
+  const detailSpinner = document.getElementById('detail-spinner');
+  const detailPlaceholder = document.getElementById('detail-placeholder');
+  const detailInfo = document.getElementById('detail-info');
+  const statusBar = document.getElementById('status-bar');
+  const tooltip = document.getElementById('hover-tooltip');
+  const selectionCoords = document.getElementById('selection-coords');
+  const selectionDetailStatus = document.getElementById('selection-detail-status');
+  const brushSizeInput = document.getElementById('brush-size');
+  const brushStrengthInput = document.getElementById('brush-strength');
+  const brushSizeLabel = document.getElementById('brush-size-label');
+  const brushStrengthLabel = document.getElementById('brush-strength-label');
+  const targetElevationInput = document.getElementById('target-elevation');
+  const deltaElevationInput = document.getElementById('delta-elevation');
+  const targetLabel = document.getElementById('target-label');
+  const deltaLabel = document.getElementById('delta-label');
+  const refinedEditWarning = "You cannot edit the refined map. Control it using cond_snr and the 'Coarse Map'";
+  let refinedRebuildTimer = null;
+  let rebuildPromise = null;
+
+  function clamp(value, min, max) {
+    return Math.min(Math.max(value, min), max);
+  }
+
+  function coarseBounds() {
+    const { coarseOffsetI: oi, coarseOffsetJ: oj, coarseWindow: w } = state;
+    return { ci0: oi - w, ci1: oi + w, cj0: oj - w, cj1: oj + w };
+  }
+
+  function coarseUrl() {
+    const { ci0, ci1, cj0, cj1 } = coarseBounds();
+    const endpoint = state.coarseView === 'refined' ? '/api/refined.png' : '/api/coarse.png';
+    const fin = (!state.tempElevAdj && state.currentChannel === 1) ? '&finalized_temp=1' : '';
+    return `${endpoint}?channel=${state.currentChannel}&ci0=${ci0}&ci1=${ci1}&cj0=${cj0}&cj1=${cj1}&_s=${state.seed}&_r=${state.coarseVersion}${fin}`;
+  }
+
+  function detailUrl() {
+    return `/api/detail.png?ci=${state.detailCI}&cj=${state.detailCJ}&detail_size=${DETAIL_SIZE}&pan_i=${state.detailPanI}&pan_j=${state.detailPanJ}&mode=${state.detailMode}&_s=${state.seed}&_r=${state.detailVersion}`;
+  }
+
+  function currentChannelMeta() {
+    return CHANNEL_META[state.currentChannel];
+  }
+
+  const btnTempElevAdj = document.getElementById('btn-temp-elev-adj');
+
+  function syncTempElevAdj() {
+    btnTempElevAdj.style.display = state.currentChannel === 1 ? '' : 'none';
+    btnTempElevAdj.textContent = `Elev Adj: ${state.tempElevAdj ? 'ON' : 'OFF'}`;
+    btnTempElevAdj.classList.toggle('active', state.tempElevAdj);
+  }
+
+  function syncChannelInputs() {
+    const meta = currentChannelMeta();
+    targetLabel.textContent = `${meta.name} Target`;
+    deltaLabel.textContent = state.brushMode === 'noise' ? `${meta.name} Noise Std Dev` : `${meta.name} Step`;
+    targetElevationInput.step = String(meta.step);
+    deltaElevationInput.step = String(meta.step);
+    targetElevationInput.value = String(state.targetValues[state.currentChannel]);
+    deltaElevationInput.value = String(state.deltaValues[state.currentChannel]);
+    const adjNote = (state.currentChannel === 1 && !state.tempElevAdj) ? ' (elevation-adjusted)' : '';
+    channelHint.textContent = `Editing \`${meta.name}\`${adjNote} on the coarse map.`;
+    syncTempElevAdj();
+  }
+
+  function syncCoarseViewButtons() {
+    viewCoarseButton.classList.toggle('active', state.coarseView === 'coarse');
+    viewRefinedButton.classList.toggle('active', state.coarseView === 'refined');
+  }
+
+  function setCoarseView(view) {
+    if (view !== 'coarse' && view !== 'refined') return;
+    state.coarseView = view;
+    syncCoarseViewButtons();
+    if (view === 'refined') {
+      if (state.tool === 'brush') {
+        state.restoreBrushOnCoarse = true;
+        setTool('select', { preserveBrushRestore: true });
+      }
+      brushPreview.style.display = 'none';
+      statusBar.textContent = 'Viewing refined map.';
+    } else if (state.restoreBrushOnCoarse) {
+      state.restoreBrushOnCoarse = false;
+      setTool('brush');
+    }
+    if (view === 'refined' && state.refinedDirty) {
+      scheduleRefinedRefresh(0);
+      return;
+    }
+    loadCoarse();
+  }
+
+  function buildChannelButtons() {
+    channelButtons.innerHTML = '';
+    state.channels.forEach((name, idx) => {
+      const btn = document.createElement('button');
+      btn.textContent = name;
+      btn.classList.toggle('active', idx === state.currentChannel);
+      btn.addEventListener('click', () => {
+        state.currentChannel = idx;
+        buildChannelButtons();
+        syncChannelInputs();
+        loadCoarse();
+      });
+      channelButtons.appendChild(btn);
+    });
+  }
+
+  let condSnrTimer = null;
+  async function pushCondSnr() {
+    const data = await apiJson('/api/cond_snr', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ values: state.condSnr }),
+    });
+    state.condSnr = data.cond_snr;
+    state.refinedDirty = true;
+    selectionDetailStatus.textContent = 'Detail map is stale until you click Refresh Detail (Rebuild).';
+    statusBar.textContent = 'Updated staged refinement strength values.';
+  }
+
+  function scheduleCondSnrPush() {
+    clearTimeout(condSnrTimer);
+    condSnrTimer = setTimeout(() => {
+      pushCondSnr().catch((err) => { statusBar.textContent = err.message; });
+    }, 200);
+  }
+
+  function buildCondSnrControls() {
+    condSnrControls.innerHTML = '';
+    state.channels.forEach((name, idx) => {
+      const row = document.createElement('div');
+      row.className = 'section';
+      row.style.padding = '0';
+      row.style.borderBottom = 'none';
+      row.style.gap = '4px';
+      row.innerHTML = `
+        <div class="label-row">
+          <span>${name}</span>
+          <span class="pill" id="cond-snr-val-${idx}">${state.condSnr[idx].toFixed(2)}</span>
+        </div>
+        <input type="range" id="cond-snr-${idx}" min="0.01" max="3" step="0.01" value="${state.condSnr[idx]}">
+      `;
+      condSnrControls.appendChild(row);
+      const slider = row.querySelector(`#cond-snr-${idx}`);
+      const label = row.querySelector(`#cond-snr-val-${idx}`);
+      slider.addEventListener('input', () => {
+        state.condSnr[idx] = parseFloat(slider.value);
+        label.textContent = state.condSnr[idx].toFixed(2);
+        scheduleCondSnrPush();
+      });
+    });
+  }
+
+  function setTool(tool, { preserveBrushRestore = false } = {}) {
+    if (tool === 'brush' && state.coarseView !== 'coarse') {
+      state.restoreBrushOnCoarse = true;
+      state.tool = 'select';
+      document.getElementById('tool-select').classList.add('active');
+      document.getElementById('tool-brush').classList.remove('active');
+      coarseContainer.classList.remove('brushing');
+      brushPreview.style.display = 'none';
+      statusBar.textContent = refinedEditWarning;
+      return;
+    }
+    if (tool === 'select' && !preserveBrushRestore) {
+      state.restoreBrushOnCoarse = false;
+    }
+    state.tool = tool;
+    document.getElementById('tool-select').classList.toggle('active', tool === 'select');
+    document.getElementById('tool-brush').classList.toggle('active', tool === 'brush');
+    coarseContainer.classList.toggle('brushing', tool === 'brush' && state.coarseView === 'coarse');
+    coarseInfo.textContent = tool === 'brush' && state.coarseView === 'coarse' ? `brush ${currentChannelMeta().name}: click or drag on the coarse map` : coarseInfo.textContent;
+  }
+
+  function setBrushMode(mode) {
+    state.brushMode = mode;
+    document.querySelectorAll('#brush-modes button').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.mode === mode);
+    });
+    syncChannelInputs();
+  }
+
+  function syncBrushLabels() {
+    state.brushSize = parseFloat(brushSizeInput.value);
+    state.brushStrength = parseFloat(brushStrengthInput.value);
+    brushSizeLabel.textContent = `${state.brushSize.toFixed(1)} tiles`;
+    brushStrengthLabel.textContent = state.brushStrength.toFixed(2);
+  }
+
+  function updateCoarseZoomLabel() {
+    const size = state.coarseWindow * 2;
+    coarseZoomLabel.textContent = `${size}x${size}`;
+  }
+
+  function setCoarseWindow(nextWindow) {
+    const clamped = clamp(nextWindow, COARSE_WINDOW_MIN, COARSE_WINDOW_MAX);
+    if (clamped === state.coarseWindow) return;
+    state.coarseWindow = clamped;
+    updateCoarseZoomLabel();
+    loadCoarse();
+  }
+
+  function resetDetail() {
+    state.detailCI = null;
+    state.detailCJ = null;
+    state.detailPanI = 0;
+    state.detailPanJ = 0;
+    state.detailRaw = null;
+    detailImg.style.display = 'none';
+    detailPlaceholder.style.display = '';
+    detailInfo.textContent = 'click coarse map to load';
+    selectionCoords.textContent = 'No detail tile selected.';
+    tileMarker.style.display = 'none';
+  }
+
+  function updateTileMarker() {
+    if (state.detailCI === null) {
+      tileMarker.style.display = 'none';
+      return;
+    }
+    const { ci0, ci1, cj0, cj1 } = coarseBounds();
+    if (state.detailCI < ci0 || state.detailCI >= ci1 || state.detailCJ < cj0 || state.detailCJ >= cj1) {
+      tileMarker.style.display = 'none';
+      return;
+    }
+    tileMarker.style.left = ((state.detailCJ - cj0) / (cj1 - cj0) * 100) + '%';
+    tileMarker.style.top = ((state.detailCI - ci0) / (ci1 - ci0) * 100) + '%';
+    tileMarker.style.width = (1 / (cj1 - cj0) * 100) + '%';
+    tileMarker.style.height = (1 / (ci1 - ci0) * 100) + '%';
+    tileMarker.style.display = 'block';
+  }
+
+  function showTooltip(e, html) {
+    tooltip.innerHTML = html;
+    tooltip.style.display = 'block';
+    const x = e.clientX + 18;
+    const y = e.clientY - tooltip.offsetHeight / 2;
+    tooltip.style.left = Math.min(x, window.innerWidth - tooltip.offsetWidth - 8) + 'px';
+    tooltip.style.top = Math.max(8, Math.min(y, window.innerHeight - tooltip.offsetHeight - 8)) + 'px';
+  }
+
+  function hideTooltip() {
+    tooltip.style.display = 'none';
+  }
+
+  function coarseCoordsFromEvent(e) {
+    const { ci0, ci1, cj0, cj1 } = coarseBounds();
+    const rect = coarseContainer.getBoundingClientRect();
+    const rows = ci1 - ci0;
+    const cols = cj1 - cj0;
+    const px = clamp(e.clientX - rect.left, 0, rect.width);
+    const py = clamp(e.clientY - rect.top, 0, rect.height);
+    const ciFloat = ci0 + (rows * py) / Math.max(rect.height, 1) - 0.5;
+    const cjFloat = cj0 + (cols * px) / Math.max(rect.width, 1) - 0.5;
+    return {
+      ci: clamp(Math.round(ciFloat), ci0, ci1 - 1),
+      cj: clamp(Math.round(cjFloat), cj0, cj1 - 1),
+      ciFloat,
+      cjFloat,
+      rect,
+      ci0,
+      ci1,
+      cj0,
+      cj1,
+    };
+  }
+
+  function updateBrushPreview(e) {
+    if (state.tool !== 'brush' || state.coarseView !== 'coarse') {
+      brushPreview.style.display = 'none';
+      return;
+    }
+    const { rect, ci1, ci0, cj1, cj0, ciFloat, cjFloat } = coarseCoordsFromEvent(e);
+    const tileH = rect.height / (ci1 - ci0);
+    const tileW = rect.width / (cj1 - cj0);
+    const diameterH = Math.max(tileH, tileH * (state.brushSize * 2 + 1));
+    const diameterW = Math.max(tileW, tileW * (state.brushSize * 2 + 1));
+    brushPreview.style.left = `${((cjFloat - cj0 + 0.5) / (cj1 - cj0)) * rect.width}px`;
+    brushPreview.style.top = `${((ciFloat - ci0 + 0.5) / (ci1 - ci0)) * rect.height}px`;
+    brushPreview.style.width = `${diameterW}px`;
+    brushPreview.style.height = `${diameterH}px`;
+    brushPreview.style.display = 'block';
+  }
+
+  function loadCoarseImage() {
+    state.coarseData = null;
+    state.coarseVersion += 1;
+    coarseImg.classList.add('loading');
+    coarseSpinner.classList.add('active');
+    coarsePlaceholder.style.display = 'none';
+    coarseImg.src = coarseUrl();
+  }
+
+  function loadCoarse() {
+    if (state.coarseView === 'refined' && state.refinedDirty) {
+      scheduleRefinedRefresh(0);
+      return;
+    }
+    loadCoarseImage();
+  }
+
+  async function loadCoarseData() {
+    const { ci0, ci1, cj0, cj1 } = coarseBounds();
+    try {
+      const endpoint = state.coarseView === 'refined' ? '/api/refined_data.json' : '/api/coarse_data.json';
+      const fin = !state.tempElevAdj ? '&finalized_temp=1' : '';
+      const res = await fetch(`${endpoint}?ci0=${ci0}&ci1=${ci1}&cj0=${cj0}&cj1=${cj1}&_s=${state.seed}&_r=${state.coarseVersion}${fin}`);
+      state.coarseData = await res.json();
+    } catch (_) {}
+  }
+
+  function loadDetail() {
+    if (state.detailCI === null) return;
+    state.detailRaw = null;
+    state.detailVersion += 1;
+    detailImg.style.display = 'block';
+    detailImg.classList.add('loading');
+    detailSpinner.classList.add('active');
+    detailPlaceholder.style.display = 'none';
+    detailImg.src = detailUrl();
+    detailInfo.textContent = `ci=${state.detailCI}, cj=${state.detailCJ} | pan=(${state.detailPanI},${state.detailPanJ})`;
+  }
+
+  async function loadDetailRaw() {
+    if (state.detailCI === null) return;
+    try {
+      const res = await fetch(`/api/detail_raw?ci=${state.detailCI}&cj=${state.detailCJ}&detail_size=${DETAIL_SIZE}&pan_i=${state.detailPanI}&pan_j=${state.detailPanJ}&_s=${state.seed}&_r=${state.detailVersion}`);
+      const h = parseInt(res.headers.get('X-Height'));
+      const w = parseInt(res.headers.get('X-Width'));
+      const hasTemp = res.headers.get('X-Has-Temp') === '1';
+      const buf = await res.arrayBuffer();
+      state.detailRaw = {
+        elev: new Int16Array(buf, 0, h * w),
+        temp: hasTemp ? new Float32Array(buf, h * w * 2, h * w) : null,
+        h,
+        w,
+      };
+    } catch (_) {}
+  }
+
+  async function apiJson(url, options = {}) {
+    const res = await fetch(url, options);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `Request failed: ${url}`);
+    return data;
+  }
+
+  function markRefinedDirty() {
+    state.refinedDirty = true;
+    if (state.coarseView === 'refined') {
+      scheduleRefinedRefresh();
+    }
+  }
+
+  async function rebuildWorld(doneStatus = 'World rebuilt. Detail refreshed.') {
+    if (rebuildPromise) {
+      await rebuildPromise;
+      return;
+    }
+    clearTimeout(refinedRebuildTimer);
+    statusBar.textContent = 'Rebuilding world...';
+    rebuildPromise = (async () => {
+      await apiJson('/api/rebuild', { method: 'POST' });
+      state.refinedDirty = false;
+      loadCoarseImage();
+      if (state.detailCI !== null) {
+        loadDetail();
+      }
+      selectionDetailStatus.textContent = 'Detail map matches the current rebuilt world.';
+      statusBar.textContent = doneStatus;
+    })();
+    try {
+      await rebuildPromise;
+    } finally {
+      rebuildPromise = null;
+    }
+  }
+
+  function scheduleRefinedRefresh(delayMs = 350) {
+    clearTimeout(refinedRebuildTimer);
+    refinedRebuildTimer = setTimeout(() => {
+      rebuildWorld('Refined map refreshed.').catch((err) => { statusBar.textContent = err.message; });
+    }, delayMs);
+  }
+
+  async function applyBrush(ciFloat, cjFloat, ci, cj) {
+    const key = `${ci},${cj}`;
+    if (state.lastPaintKey === key) return;
+    state.lastPaintKey = key;
+    const data = await apiJson('/api/coarse_brush', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        channel: state.currentChannel,
+        center_ci: ciFloat,
+        center_cj: cjFloat,
+        radius: state.brushSize,
+        strength: state.brushStrength,
+        mode: state.brushMode,
+        target_value: state.targetValues[state.currentChannel],
+        delta_value: state.deltaValues[state.currentChannel],
+        use_finalized_temp: !state.tempElevAdj && state.currentChannel === 1,
+      }),
+    });
+    markRefinedDirty();
+    loadCoarse();
+    selectionDetailStatus.textContent = 'Detail map is stale until you click Refresh Detail (Rebuild).';
+    statusBar.textContent = `Brush ${state.brushMode} on ${currentChannelMeta().name}: ${data.changed_tiles} tile(s) updated.`;
+  }
+
+  async function rebuildDetail() {
+    await rebuildWorld('World rebuilt. Detail refreshed.');
+  }
+
+  async function resetCustom() {
+    await apiJson('/api/reset_custom', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ channel: state.currentChannel }),
+    });
+    markRefinedDirty();
+    loadCoarse();
+    selectionDetailStatus.textContent = 'Custom edits cleared. Click Refresh Detail (Rebuild) to regenerate detail.';
+    statusBar.textContent = `Custom ${currentChannelMeta().name} edits cleared.`;
+  }
+
+  async function importTiff(file) {
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('channel', String(state.currentChannel));
+    fd.append('use_finalized_temp', (!state.tempElevAdj && state.currentChannel === 1) ? '1' : '0');
+    const data = await apiJson('/api/import_tiff', { method: 'POST', body: fd });
+    markRefinedDirty();
+    loadCoarse();
+    selectionDetailStatus.textContent = 'Imported coarse data is staged. Click Refresh Detail (Rebuild) to regenerate detail.';
+    statusBar.textContent = `Imported ${currentChannelMeta().name} TIFF ${data.shape[0]}x${data.shape[1]} at origin (${data.origin[0]}, ${data.origin[1]}).`;
+  }
+
+  coarseImg.onload = () => {
+    coarseImg.classList.remove('loading');
+    coarseSpinner.classList.remove('active');
+    const { ci0, ci1, cj0, cj1 } = coarseBounds();
+    const viewName = state.coarseView === 'refined' ? 'refined' : 'coarse map';
+    coarseInfo.textContent = `${currentChannelMeta().name} ${viewName} | ${state.tool} | ci=[${ci0}…${ci1}], cj=[${cj0}…${cj1}]`;
+    coarseContainer.classList.toggle('brushing', state.tool === 'brush' && state.coarseView === 'coarse');
+    updateTileMarker();
+    loadCoarseData();
+  };
+  coarseImg.onerror = () => {
+    coarseImg.classList.remove('loading');
+    coarseSpinner.classList.remove('active');
+    statusBar.textContent = 'Error loading coarse map';
+  };
+  detailImg.onload = () => {
+    detailImg.classList.remove('loading');
+    detailSpinner.classList.remove('active');
+    loadDetailRaw();
+  };
+  detailImg.onerror = () => {
+    detailImg.classList.remove('loading');
+    detailSpinner.classList.remove('active');
+    statusBar.textContent = 'Error loading detail map';
+  };
+
+  coarseContainer.addEventListener('mousemove', (e) => {
+    updateBrushPreview(e);
+    if (!state.coarseData) return;
+    const { ci0, ci1, cj0, cj1, channels } = state.coarseData;
+    const { ci, cj, ciFloat, cjFloat } = coarseCoordsFromEvent(e);
+    const row = ci - ci0;
+    const col = cj - cj0;
+    if (row < 0 || row >= ci1 - ci0 || col < 0 || col >= cj1 - cj0) return;
+    let html = `
+      <div class="ht-row"><span class="ht-label">ci</span><span class="ht-val">${ci}</span></div>
+      <div class="ht-row"><span class="ht-label">cj</span><span class="ht-val">${cj}</span></div>
+      <div class="ht-row"><span class="ht-label">tool</span><span class="ht-val">${state.tool}/${state.brushMode}</span></div>
+    `;
+    state.channels.forEach((name, idx) => {
+      const unit = CHANNEL_META[idx].unit ? ` ${CHANNEL_META[idx].unit}` : '';
+      html += `<div class="ht-row"><span class="ht-label">${name}</span><span class="ht-val">${channels[name][row][col].toFixed(2)}${unit}</span></div>`;
+    });
+    showTooltip(e, html);
+    if (state.isPainting && state.tool === 'brush' && state.coarseView === 'coarse') {
+      applyBrush(ciFloat, cjFloat, ci, cj).catch((err) => { statusBar.textContent = err.message; });
+    }
+  });
+
+  coarseContainer.addEventListener('mouseleave', () => {
+    hideTooltip();
+    brushPreview.style.display = 'none';
+    state.isPainting = false;
+    state.lastPaintKey = null;
+  });
+  coarseImg.addEventListener('dragstart', (e) => e.preventDefault());
+  detailImg.addEventListener('dragstart', (e) => e.preventDefault());
+
+  coarseContainer.addEventListener('mousedown', async (e) => {
+    e.preventDefault();
+    const { ci, cj, ciFloat, cjFloat } = coarseCoordsFromEvent(e);
+    if (state.tool === 'brush') {
+      if (state.coarseView !== 'coarse') {
+        setTool('brush');
+        brushPreview.style.display = 'none';
+        return;
+      }
+      state.isPainting = true;
+      state.lastPaintKey = null;
+      try {
+        await applyBrush(ciFloat, cjFloat, ci, cj);
+      } catch (err) {
+        statusBar.textContent = err.message;
+      }
+      return;
+    }
+    state.detailCI = ci;
+    state.detailCJ = cj;
+    state.detailPanI = 0;
+    state.detailPanJ = 0;
+    selectionCoords.textContent = `Selected coarse tile ci=${ci}, cj=${cj}`;
+    selectionDetailStatus.textContent = 'Detail map matches the current rebuilt world.';
+    updateTileMarker();
+    loadDetail();
+    statusBar.textContent = `Selected tile ci=${ci}, cj=${cj}`;
+  });
+
+  window.addEventListener('mouseup', () => {
+    state.isPainting = false;
+    state.lastPaintKey = null;
+  });
+
+  coarseContainer.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const factor = e.deltaY < 0 ? 0.85 : 1.15;
+    setCoarseWindow(Math.round(state.coarseWindow * factor));
+  }, { passive: false });
+
+  detailImg.addEventListener('mousemove', (e) => {
+    if (!state.detailRaw) return;
+    const { elev, temp, h, w } = state.detailRaw;
+    const rect = detailImg.getBoundingClientRect();
+    const col = Math.floor((e.clientX - rect.left) / rect.width * w);
+    const row = Math.floor((e.clientY - rect.top) / rect.height * h);
+    if (row < 0 || row >= h || col < 0 || col >= w) return;
+    const idx = row * w + col;
+    let html = `<div class="ht-row"><span class="ht-label">Elevation</span><span class="ht-val">${elev[idx]} m</span></div>`;
+    if (temp) html += `<div class="ht-row"><span class="ht-label">Temperature</span><span class="ht-val">${temp[idx].toFixed(2)}°</span></div>`;
+    showTooltip(e, html);
+  });
+  detailImg.addEventListener('mouseleave', hideTooltip);
+
+  document.getElementById('tool-select').addEventListener('click', () => setTool('select'));
+  document.getElementById('tool-brush').addEventListener('click', () => setTool('brush'));
+  document.querySelectorAll('#brush-modes button').forEach((btn) => {
+    btn.addEventListener('click', () => setBrushMode(btn.dataset.mode));
+  });
+  brushSizeInput.addEventListener('input', syncBrushLabels);
+  brushStrengthInput.addEventListener('input', syncBrushLabels);
+  targetElevationInput.addEventListener('input', () => {
+    state.targetValues[state.currentChannel] = parseFloat(targetElevationInput.value || '0');
+  });
+  deltaElevationInput.addEventListener('input', () => {
+    state.deltaValues[state.currentChannel] = parseFloat(deltaElevationInput.value || '0');
+  });
+
+  ['relief', 'elevation', 'temperature'].forEach((mode) => {
+    document.getElementById(`mode-${mode}`).addEventListener('click', () => {
+      state.detailMode = mode;
+      ['relief', 'elevation', 'temperature'].forEach((m) => {
+        document.getElementById(`mode-${m}`).classList.toggle('active', m === mode);
+      });
+      loadDetail();
+    });
+  });
+
+  document.getElementById('btn-refresh-detail').addEventListener('click', () => {
+    rebuildDetail().catch((err) => { statusBar.textContent = err.message; });
+  });
+  document.getElementById('btn-reset-custom').addEventListener('click', () => {
+    resetCustom().catch((err) => { statusBar.textContent = err.message; });
+  });
+  document.getElementById('btn-import').addEventListener('click', () => document.getElementById('file-import').click());
+  btnTempElevAdj.addEventListener('click', () => {
+    state.tempElevAdj = !state.tempElevAdj;
+    syncTempElevAdj();
+    syncChannelInputs();
+    loadCoarse();
+  });
+  document.getElementById('file-import').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      try {
+        await importTiff(file);
+      } catch (err) {
+        statusBar.textContent = err.message;
+      }
+    }
+    e.target.value = '';
+  });
+
+  document.getElementById('btn-set-seed').addEventListener('click', async () => {
+    const v = seedInput.value.trim();
+    if (!/^-?\d+$/.test(v)) return;
+    try {
+      const data = await apiJson('/api/seed', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ seed: v }),
+      });
+      state.seed = data.seed;
+      state.refinedDirty = false;
+      seedDisplay.textContent = data.seed;
+      seedInput.value = '';
+      resetDetail();
+      loadCoarse();
+      selectionDetailStatus.textContent = 'Detail map matches the current rebuilt world.';
+      statusBar.textContent = `Seed set to ${data.seed}`;
+    } catch (err) {
+      statusBar.textContent = err.message;
+    }
+  });
+
+  document.getElementById('btn-new-seed').addEventListener('click', async () => {
+    try {
+      const data = await apiJson('/api/new_seed', { method: 'POST' });
+      state.seed = data.seed;
+      state.refinedDirty = false;
+      seedDisplay.textContent = data.seed;
+      resetDetail();
+      loadCoarse();
+      selectionDetailStatus.textContent = 'Detail map matches the current rebuilt world.';
+      statusBar.textContent = `New seed: ${data.seed}`;
+    } catch (err) {
+      statusBar.textContent = err.message;
+    }
+  });
+
+  document.getElementById('coarse-up').addEventListener('click', () => { state.coarseOffsetI -= COARSE_PAN_STEP; loadCoarse(); });
+  document.getElementById('coarse-down').addEventListener('click', () => { state.coarseOffsetI += COARSE_PAN_STEP; loadCoarse(); });
+  document.getElementById('coarse-left').addEventListener('click', () => { state.coarseOffsetJ -= COARSE_PAN_STEP; loadCoarse(); });
+  document.getElementById('coarse-right').addEventListener('click', () => { state.coarseOffsetJ += COARSE_PAN_STEP; loadCoarse(); });
+  viewCoarseButton.addEventListener('click', () => setCoarseView('coarse'));
+  viewRefinedButton.addEventListener('click', () => setCoarseView('refined'));
+  document.getElementById('coarse-zoom-in').addEventListener('click', () => setCoarseWindow(Math.round(state.coarseWindow * 0.8)));
+  document.getElementById('coarse-zoom-out').addEventListener('click', () => setCoarseWindow(Math.round(state.coarseWindow * 1.25)));
+  document.getElementById('detail-up').addEventListener('click', () => { if (state.detailCI !== null) { state.detailPanI -= DETAIL_PAN_STEP; loadDetail(); } });
+  document.getElementById('detail-down').addEventListener('click', () => { if (state.detailCI !== null) { state.detailPanI += DETAIL_PAN_STEP; loadDetail(); } });
+  document.getElementById('detail-left').addEventListener('click', () => { if (state.detailCI !== null) { state.detailPanJ -= DETAIL_PAN_STEP; loadDetail(); } });
+  document.getElementById('detail-right').addEventListener('click', () => { if (state.detailCI !== null) { state.detailPanJ += DETAIL_PAN_STEP; loadDetail(); } });
+
+  async function init() {
+    try {
+      const data = await apiJson('/api/status');
+      state.seed = data.seed;
+      state.channels = data.channels || state.channels;
+      state.condSnr = data.cond_snr || state.condSnr;
+      state.nativeResolution = data.native_resolution || 90;
+      seedDisplay.textContent = data.seed;
+      buildChannelButtons();
+      buildCondSnrControls();
+      syncBrushLabels();
+      syncChannelInputs();
+      syncCoarseViewButtons();
+      updateCoarseZoomLabel();
+      setTool('select');
+      setBrushMode('set');
+      statusBar.textContent = `Connected | seed ${data.seed} | native resolution ${state.nativeResolution} m`;
+      loadCoarse();
+    } catch (err) {
+      statusBar.textContent = err.message || 'Failed to connect to server';
+    }
+  }
+
+  init();
+</script>
+</body>
+</html>

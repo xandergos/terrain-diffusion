@@ -565,6 +565,9 @@
     <div class="map-panel">
       <div class="panel-header">
         <span class="panel-title">Coarse Map</span>
+        <button id="coarse-zoom-in">Zoom In</button>
+        <button id="coarse-zoom-out">Zoom Out</button>
+        <span class="coord-scale-lbl" id="coarse-zoom-label">100x100</span>
         <span class="panel-info" id="coarse-info">click a tile to load detail</span>
       </div>
       <div class="nav-grid">
@@ -611,6 +614,8 @@
 
 <script>
   const COARSE_PAN_STEP = 20;
+  const COARSE_WINDOW_MIN = 8;
+  const COARSE_WINDOW_MAX = 120;
   const DETAIL_PAN_STEP = 256;
   const DETAIL_SIZE = 1024;
 
@@ -649,10 +654,12 @@
   const filterEnable    = document.getElementById('filter-enable');
   const filterChannels  = document.getElementById('filter-channels');
   const btnStats        = document.getElementById('btn-stats');
+  const coarseContainer = document.getElementById('coarse-container');
   const coarseImg       = document.getElementById('coarse-img');
   const coarseSpinner   = document.getElementById('coarse-spinner');
   const coarsePlaceholder = document.getElementById('coarse-placeholder');
   const coarseInfo      = document.getElementById('coarse-info');
+  const coarseZoomLabel = document.getElementById('coarse-zoom-label');
   const tileMarker      = document.getElementById('tile-marker');
   const detailImg       = document.getElementById('detail-img');
   const detailSpinner   = document.getElementById('detail-spinner');
@@ -664,6 +671,10 @@
   const coordScaleFill  = document.getElementById('coord-scale-fill');
   const coordScaleLbl   = document.getElementById('coord-scale-lbl');
   const coordBlockSize  = document.getElementById('coord-block-size');
+
+  function clamp(value, min, max) {
+    return Math.min(Math.max(value, min), max);
+  }
 
   // ── Build filter channel widgets ──
   CHANNEL_META.forEach(({ ch, name, unit, step, defMin, defMax }) => {
@@ -744,6 +755,19 @@
     const barKm = niceScaleKm(totalKm * 0.25);
     coordScaleFill.style.width = (barKm / totalKm * 100).toFixed(1) + '%';
     coordScaleLbl.textContent = barKm >= 1 ? `${barKm} km` : `${barKm * 1000} m`;
+  }
+
+  function updateCoarseZoomLabel() {
+    const size = state.coarseWindow * 2;
+    coarseZoomLabel.textContent = `${size}x${size}`;
+  }
+
+  function setCoarseWindow(nextWindow) {
+    const clamped = clamp(nextWindow, COARSE_WINDOW_MIN, COARSE_WINDOW_MAX);
+    if (clamped === state.coarseWindow) return;
+    state.coarseWindow = clamped;
+    updateCoarseZoomLabel();
+    loadCoarse();
   }
 
   let _lastDetailClick = null;
@@ -1066,6 +1090,14 @@
   document.getElementById('coarse-down').addEventListener('click',  () => { state.coarseOffsetI += COARSE_PAN_STEP; loadCoarse(); });
   document.getElementById('coarse-left').addEventListener('click',  () => { state.coarseOffsetJ -= COARSE_PAN_STEP; loadCoarse(); });
   document.getElementById('coarse-right').addEventListener('click', () => { state.coarseOffsetJ += COARSE_PAN_STEP; loadCoarse(); });
+  document.getElementById('coarse-zoom-in').addEventListener('click', () => setCoarseWindow(Math.round(state.coarseWindow * 0.8)));
+  document.getElementById('coarse-zoom-out').addEventListener('click', () => setCoarseWindow(Math.round(state.coarseWindow * 1.25)));
+
+  coarseContainer.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const factor = e.deltaY < 0 ? 0.85 : 1.15;
+    setCoarseWindow(Math.round(state.coarseWindow * factor));
+  }, { passive: false });
 
   document.getElementById('detail-up').addEventListener('click',    () => { if (state.detailCI !== null) { state.detailPanI -= DETAIL_PAN_STEP; loadDetail(); } });
   document.getElementById('detail-down').addEventListener('click',  () => { if (state.detailCI !== null) { state.detailPanI += DETAIL_PAN_STEP; loadDetail(); } });
@@ -1083,6 +1115,7 @@
       seedDisplay.textContent = data.seed;
       buildChannelButtons(data.channels);
       updateCoordScale();
+      updateCoarseZoomLabel();
       statusBar.textContent = `Connected — seed ${data.seed}`;
       loadCoarse();
     } catch (e) {
