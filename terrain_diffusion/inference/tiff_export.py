@@ -56,7 +56,7 @@ def _load_and_pad(path: Path, channel: int, internal_scale: float, default_value
 @click.command()
 @click.argument("tiff_dir", type=click.Path(exists=True))
 @click.argument("output", type=click.Path())
-@click.argument("model_path", default="xandergos/terrain-diffusion-90m")
+@click.argument("model_path", default="xandergos/terrain-diffusion-30m")
 @click.option(
     "--snr",
     metavar="ELEV,TEMP,T_STD,PRECIP,P_CV",

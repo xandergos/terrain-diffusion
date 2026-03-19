@@ -31,7 +31,7 @@ def generate_world(model_path: str, hdf5_file: str | None = None, seed: int | No
 
 
 @click.command()
-@click.argument("model_path", default="xandergos/terrain-diffusion-90m")
+@click.argument("model_path", default="xandergos/terrain-diffusion-30m")
 @click.option("--caching-strategy", type=click.Choice(["indirect", "direct"]), default="indirect", help="Caching strategy: 'indirect' uses HDF5, 'direct' uses in-memory LRU cache")
 @click.option("--hdf5-file", default=None, help="HDF5 file path (required for indirect caching, optional for direct)")
 @click.option("--cache-size", default="100M", help="Cache size (e.g., 100M, 1G) for direct caching")

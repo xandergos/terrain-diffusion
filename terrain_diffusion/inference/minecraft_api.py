@@ -36,7 +36,7 @@ def _get_pipeline() -> WorldPipeline:
     device = cfg.get('device') or _select_device()
     caching_strategy = cfg.get('caching_strategy', 'indirect')
     _PIPELINE = WorldPipeline.from_pretrained(
-        cfg.get('model_path', 'xandergos/terrain-diffusion-90m'),
+        cfg.get('model_path', 'xandergos/terrain-diffusion-30m'),
         seed=cfg.get('seed'),
         latents_batch_size=cfg.get('latents_batch_size', 4),
         log_mode=cfg.get('log_mode', 'verbose'),
@@ -802,7 +802,7 @@ def elev_8x():
 
 
 @click.command()
-@click.argument("model_path", default="xandergos/terrain-diffusion-90m")
+@click.argument("model_path", default="xandergos/terrain-diffusion-30m")
 @click.option("--caching-strategy", type=click.Choice(["indirect", "direct"]), default="direct", help="Caching strategy: 'indirect' uses HDF5, 'direct' uses in-memory LRU cache")
 @click.option("--hdf5-file", default=None, help="HDF5 file path (required for indirect caching, optional for direct)")
 @click.option("--cache-size", default="100M", help="Cache size (e.g., 100M, 1G) for direct caching")

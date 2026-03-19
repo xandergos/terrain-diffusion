@@ -36,7 +36,7 @@ def _get_pipeline() -> WorldPipeline:
     cfg = _PIPELINE_CONFIG
     caching_strategy = cfg.get('caching_strategy', 'indirect')
     _PIPELINE = WorldPipeline.from_pretrained(
-        cfg.get('model_path', 'xandergos/terrain-diffusion-90m'),
+        cfg.get('model_path', 'xandergos/terrain-diffusion-30m'),
         seed=cfg.get('seed'),
         latents_batch_size=cfg.get('latents_batch_size', [1, 2, 4, 8, 16]),
         log_mode=cfg.get('log_mode', 'verbose'),
@@ -269,7 +269,7 @@ def detail_raw():
 
 
 @click.command()
-@click.argument("model_path", default="xandergos/terrain-diffusion-90m")
+@click.argument("model_path", default="xandergos/terrain-diffusion-30m")
 @click.option("--caching-strategy", type=click.Choice(["indirect", "direct"]), default="direct")
 @click.option("--hdf5-file", default=None)
 @click.option("--cache-size", default="100M")

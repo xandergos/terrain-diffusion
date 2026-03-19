@@ -1,9 +1,9 @@
 """Export WorldPipeline EDMUnet2D models to ONNX.
 
 Usage:
-    python -m terrain_diffusion.onnx.export xandergos/terrain-diffusion-90m
+    python -m terrain_diffusion.onnx.export xandergos/terrain-diffusion-30m
     python -m terrain_diffusion.onnx.export ./terrain-diffusion-30m --output ./onnx_out --verify
-    python -m terrain_diffusion.onnx.export xandergos/terrain-diffusion-90m --models base_model decoder_model
+    python -m terrain_diffusion.onnx.export xandergos/terrain-diffusion-30m --models base_model decoder_model
 
 Requires: pip install onnx  (and onnxruntime for --verify)
 """
@@ -222,7 +222,7 @@ def main(model_path, output, device, opset, verify, models):
     """Export WorldPipeline EDMUnet2D models to ONNX.
 
     MODEL_PATH is a local directory or HuggingFace repo ID,
-    e.g. ./terrain-diffusion-30m or xandergos/terrain-diffusion-90m.
+    e.g. ./terrain-diffusion-30m or xandergos/terrain-diffusion-30m.
     """
     output_dir = Path(output)
     output_dir.mkdir(parents=True, exist_ok=True)
