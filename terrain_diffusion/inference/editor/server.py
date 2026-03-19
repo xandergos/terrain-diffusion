@@ -37,7 +37,7 @@ def _get_pipeline() -> WorldPipeline:
     if _PIPELINE is not None:
         return _PIPELINE
     cfg = _PIPELINE_CONFIG
-    caching_strategy = cfg.get('caching_strategy', 'indirect')
+    caching_strategy = cfg.get('caching_strategy', 'direct')
     _PIPELINE = WorldPipeline.from_pretrained(
         cfg.get('model_path', 'xandergos/terrain-diffusion-30m'),
         seed=cfg.get('seed'),

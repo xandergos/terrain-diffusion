@@ -302,7 +302,7 @@ class WorldPipeline(ConfigMixin):
         residual_std: float = 1.1678,
         coarse_means: list = None,
         coarse_stds: list = None,
-        caching_strategy: str = 'indirect',
+        caching_strategy: str = 'direct',
         cache_limit: int | None = 100 * 1024 * 1024,
         onestep_latent: bool = False,
         decoder_tile_size: int = 512,

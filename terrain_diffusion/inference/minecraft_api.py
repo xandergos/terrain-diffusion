@@ -34,7 +34,7 @@ def _get_pipeline() -> WorldPipeline:
 
     cfg = _PIPELINE_CONFIG
     device = cfg.get('device') or _select_device()
-    caching_strategy = cfg.get('caching_strategy', 'indirect')
+    caching_strategy = cfg.get('caching_strategy', 'direct')
     _PIPELINE = WorldPipeline.from_pretrained(
         cfg.get('model_path', 'xandergos/terrain-diffusion-30m'),
         seed=cfg.get('seed'),

@@ -5,7 +5,7 @@ from terrain_diffusion.common.cli_helpers import parse_kwargs, parse_cache_size
 from tqdm import tqdm
 
 
-def generate_world(model_path: str, hdf5_file: str | None = None, seed: int | None = None, coarse_window: int = 64, device: str | None = None, caching_strategy: str = 'indirect', **kwargs) -> None:
+def generate_world(model_path: str, hdf5_file: str | None = None, seed: int | None = None, coarse_window: int = 64, device: str | None = None, caching_strategy: str = 'direct', **kwargs) -> None:
     if device is None:
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         if device == 'cpu':
@@ -32,7 +32,7 @@ def generate_world(model_path: str, hdf5_file: str | None = None, seed: int | No
 
 @click.command()
 @click.argument("model_path", default="xandergos/terrain-diffusion-30m")
-@click.option("--caching-strategy", type=click.Choice(["indirect", "direct"]), default="indirect", help="Caching strategy: 'indirect' uses HDF5, 'direct' uses in-memory LRU cache")
+@click.option("--caching-strategy", type=click.Choice(["indirect", "direct"]), default="direct", help="Caching strategy: 'indirect' uses HDF5, 'direct' uses in-memory LRU cache")
 @click.option("--hdf5-file", default=None, help="HDF5 file path (required for indirect caching, optional for direct)")
 @click.option("--cache-size", default="100M", help="Cache size (e.g., 100M, 1G) for direct caching")
 @click.option("--seed", type=int, default=None, help="Random seed (default: random or from file)")
