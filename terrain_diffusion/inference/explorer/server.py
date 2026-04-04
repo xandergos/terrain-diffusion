@@ -217,7 +217,9 @@ def detail_png():
             norm = matplotlib.colors.Normalize(vmin=vmin, vmax=vmax)
             rgba = plt.get_cmap('RdBu_r')(norm(temp)).astype(np.float32)
         else:
-            relief_rgb = get_relief_map(elev, None, None, None)
+            relief_rgb = get_relief_map(
+                elev, None, None, None, resolution=world.native_resolution
+            )
             rgba = np.concatenate([
                 np.clip(relief_rgb, 0, 1),
                 np.ones((*relief_rgb.shape[:2], 1), dtype=np.float32),
@@ -277,7 +279,7 @@ def detail_raw():
 @click.option("--device", default=None)
 @click.option("--batch-size", default="1,2,4,8,16")
 @click.option("--log-mode", type=click.Choice(["info", "verbose"]), default="verbose")
-@click.option("--compile/--no-compile", "torch_compile", default=True)
+@click.option("--compile/--no-compile", "torch_compile", default=False)
 @click.option("--dtype", type=click.Choice(["fp32", "bf16", "fp16"]), default="fp32")
 @click.option("--host", default="0.0.0.0")
 @click.option("--port", type=int, default=int(os.getenv("PORT", "8080")))

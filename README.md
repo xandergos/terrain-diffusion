@@ -83,7 +83,9 @@ python -m terrain_diffusion api xandergos/terrain-diffusion-30m
 
 ### Azgaar to TIFF
 
-Convert an [Azgaar Fantasy Map Generator](https://azgaar.github.io/Fantasy-Map-Generator/) full JSON export (Tools -> Export -> Export To JSON -> Full) into conditioning GeoTIFFs (elevation, temperature, precipitation, etc.). Outputs can be used in the **Terrain Editor** (Import TIFF) or as input to **TIFF export**. `--scale` sets the output pixel size in km, 100 by default. Larger values result in more manageable outputs for large worlds, but the most realistic value is the coarse pixel size (7.7 for 30m, 23 for 90m)
+Convert an [Azgaar Fantasy Map Generator](https://azgaar.github.io/Fantasy-Map-Generator/) full JSON export (Tools -> Export -> Export To JSON -> Full) into conditioning GeoTIFFs (elevation, temperature, precipitation, etc.). 
+`--scale` sets the output pixel size in km, 100 by default. Larger values result in more manageable outputs for large worlds, but the most realistic value is the 
+coarse pixel size (7.7 for 30m, 23 for 90m). The output directory can be used as the conditioning folder to [TIFF export](#tiff-export) (`tiff-export`).
 
 ```
 python -m terrain_diffusion azgaar-to-tiff "MyMap.json" azgaar-output/ --scale 100
@@ -91,7 +93,7 @@ python -m terrain_diffusion azgaar-to-tiff "MyMap.json" azgaar-output/ --scale 1
 
 ### TIFF export
 
-Generate a high-resolution elevation GeoTIFF from a folder of conditioning TIFFs (e.g. from **Azgaar to TIFF**). The tool adds edge padding so the model has smooth context, then writes only the unpadded region. Use `--snr` to set refinement strength: 5 comma-separated values, one for each input. I found `0.2,0.2,1.0,0.2,1.0` to work well for Azgaar.
+Generate a high-resolution elevation GeoTIFF from a folder of conditioning TIFFs. **Use the directory produced by [Azgaar to TIFF](#azgaar-to-tiff)** as `tiff_dir` (same filenames; see below). The tool adds edge padding so the model has smooth context, then writes only the unpadded region. Use `--snr` to set refinement strength: 5 comma-separated values, one for each input. I found `0.2,0.2,1.0,0.2,1.0` to work well for Azgaar.
 
 Expected files in the folder (missing files fall back to Perlin noise; at least one is required):
 
@@ -103,14 +105,6 @@ Expected files in the folder (missing files fall back to Perlin noise; at least 
 
 ```
 python -m terrain_diffusion xandergos/terrain-diffusion-90m tiff-export azgaar-output/ output.tif --snr 0.2,0.2,1.0,0.2,1.0
-```
-
-### (Experimental) Terrain Editor
-
-Web UI for editing the conditioning map (elevation, temperature, precipitation, etc.) and rebuilding the world from those edits. The left panel shows the **coarse preview**; the right shows the **generated relief**. Edit with brushes or import TIFFs on the left, then click **Refresh Detail (Rebuild)** to regenerate. Edits act as guidance to the coarse model. Use the refinement-strength sliders to make them influence the output more or less. See [editor/README.md](terrain_diffusion/inference/editor/README.md) for details.
-
-```
-python -m terrain_diffusion edit xandergos/terrain-diffusion-30m
 ```
 
 ## Training from scratch

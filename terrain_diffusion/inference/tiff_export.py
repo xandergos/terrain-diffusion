@@ -1,9 +1,10 @@
 """
-Export terrain to GeoTIFF from a conditioning TIFF directory (e.g. azgaar-output/).
+Export terrain to GeoTIFF from a conditioning TIFF directory.
 
-Imports all conditioning channels (elevation, temperature, precipitation, etc.) with
-64-cell edge padding so the model has smooth context at the borders. The padding is
-stripped from the output.
+Typical input is the folder written by ``azgaar-to-tiff`` (``python -m terrain_diffusion
+azgaar-to-tiff ...``), using the same channel filenames as ``CHANNEL_FILES`` below. Imports all
+conditioning channels with 64-cell edge padding so the model has smooth context at the
+borders; padding is stripped from the output.
 
 Usage:
   python -m terrain_diffusion.inference.tiff_export azgaar-output/ output.tif
