@@ -461,7 +461,8 @@ class WorldPipeline(ConfigMixin):
         
         if self.decoder_model is not None:
             print("  Warming up decoder_model...")
-            dummy_in = _to_t(standard_normal(0x5EED0040, (1, 5, 512, 512)))
+            ts = self.decoder_tile_size
+            dummy_in = _to_t(standard_normal(0x5EED0040, (1, 5, ts, ts)))
             dummy_noise = _to_t(standard_normal(0x5EED0041, (1,)))
             with torch.no_grad():
                 self.decoder_model(dummy_in, noise_labels=dummy_noise, conditional_inputs=[])
@@ -1000,7 +1001,7 @@ class WorldPipeline(ConfigMixin):
             scaled_in = scheduler.precondition_inputs(sample, sigma)
             cnoise = scheduler.trigflow_precondition_noise(sigma.view(-1))
 
-            x_in = torch.cat([scaled_in, cond_img], dim=1)
+            x_in = torch.cat([scaled_in, cond_img], dim=1).to(model_dtype)
             model_out = self.coarse_model(x_in, noise_labels=torch.tensor([cnoise.item()], device=self.device, dtype=model_dtype), conditional_inputs=cond_inputs)
             sample = scheduler.step(model_out, t, sample).prev_sample
         
@@ -1024,10 +1025,11 @@ class WorldPipeline(ConfigMixin):
         assert TILE_SIZE % coarse_pool == 0, f"coarse_pooling {coarse_pool} must divide TILE_SIZE {TILE_SIZE}"
         assert TILE_STRIDE % coarse_pool == 0, f"coarse_pooling {coarse_pool} must divide TILE_STRIDE {TILE_STRIDE}"
         
+        model_dtype = self._dtype or torch.float32
         scheduler = EDMDPMSolverMultistepScheduler(sigma_min=0.002, sigma_max=80, sigma_data=0.5)
         weight_window = linear_weight_window(TILE_SIZE // coarse_pool, 'cpu', torch.float32)
         
-        t_cond = torch.atan(COND_SNR).to(self.device)
+        t_cond = torch.atan(COND_SNR).to(self.device, dtype=model_dtype)
         vals = torch.log(torch.tan(t_cond) / 8.0)
         cond_inputs = [v.detach().view(-1) for v in vals]
         
@@ -1121,8 +1123,8 @@ class WorldPipeline(ConfigMixin):
         cond_inputs_list = []
         samples_processed = []
         
-        t_tensor = torch.as_tensor(t, device=self.device)
         model_dtype = self._dtype or torch.float32
+        t_tensor = torch.as_tensor(t, dtype=model_dtype, device=self.device)
         
         for ctx, sample, cond_img in zip(ctxs, samples, cond_imgs):
             if sample is None:
@@ -1259,7 +1261,7 @@ class WorldPipeline(ConfigMixin):
                 self.seed + 5819 + i, ctx[1]*TILE_STRIDE, ctx[2]*TILE_STRIDE, 
                 TILE_SIZE, TILE_SIZE, channels=1, tile_h=TILE_SIZE, tile_w=TILE_SIZE
             ))[None]
-            t = t.view(1, 1, 1, 1).to(self.device)
+            t = t.view(1, 1, 1, 1).to(self.device, dtype=model_dtype)
             z = noise.to(self.device, dtype=model_dtype) * scheduler.config.sigma_data
             x_t = torch.cos(t) * sample + torch.sin(t) * z
             model_in = (x_t / scheduler.config.sigma_data).to(self.device)
