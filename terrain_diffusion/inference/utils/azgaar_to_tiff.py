@@ -136,7 +136,7 @@ def write_tiff(path, arr, transform, crs="EPSG:4326", nodata=None):
 @click.command()
 @click.argument("input", type=click.Path(exists=True))
 @click.argument("output_dir", type=click.Path())
-@click.option("--scale", default=7.0, show_default=True, help="Size of each output pixel in km")
+@click.option("--scale", default=100.0, show_default=True, help="Size of each output pixel in km")
 @click.option("--ocean-max-depth", default=4000.0, show_default=True, help="Maximum ocean depth in meters (at h=0)")
 @click.option("--ocean-power", default=1.5, show_default=True, help="Power curve exponent for ocean depth (higher = steeper near coast)")
 def main(input, output_dir, scale, ocean_max_depth, ocean_power):

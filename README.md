@@ -73,12 +73,20 @@ You can also view the temperature of the high resolution map with `Temperature` 
 python -m terrain_diffusion explore xandergos/terrain-diffusion-30m
 ```
 
-### Azgaar to TIFF
+### General API
 
-Convert an [Azgaar Fantasy Map Generator](https://azgaar.github.io/Fantasy-Map-Generator/) full JSON export (Tools -> Export -> Export To JSON -> Full) into conditioning GeoTIFFs (elevation, temperature, precipitation, etc.). Outputs can be used in the **Terrain Editor** (Import TIFF) or as input to **TIFF export**. `--scale` sets the output pixel size in km. Scale is the coarse pixel size, 1:1 with Earth, by default. Larger values are generally recommended and results in more manageable outputs for large worlds.
+This runs a generalized API that can be used to query for elevation and climate data. See [API_README.md](API_README.md) for details. This is primarily designed for developers who want to experiment with the tool without commiting to full integration.
 
 ```
-python -m terrain_diffusion azgaar-to-tiff "MyMap.json" azgaar-output/ --scale 40
+python -m terrain_diffusion api xandergos/terrain-diffusion-30m
+```
+
+### Azgaar to TIFF
+
+Convert an [Azgaar Fantasy Map Generator](https://azgaar.github.io/Fantasy-Map-Generator/) full JSON export (Tools -> Export -> Export To JSON -> Full) into conditioning GeoTIFFs (elevation, temperature, precipitation, etc.). Outputs can be used in the **Terrain Editor** (Import TIFF) or as input to **TIFF export**. `--scale` sets the output pixel size in km, 100 by default. Larger values result in more manageable outputs for large worlds, but the most realistic value is the coarse pixel size (7.7 for 30m, 23 for 90m)
+
+```
+python -m terrain_diffusion azgaar-to-tiff "MyMap.json" azgaar-output/ --scale 100
 ```
 
 ### TIFF export
@@ -95,14 +103,6 @@ Expected files in the folder (missing files fall back to Perlin noise; at least 
 
 ```
 python -m terrain_diffusion xandergos/terrain-diffusion-90m tiff-export azgaar-output/ output.tif --snr 0.2,0.2,1.0,0.2,1.0
-```
-
-### General API
-
-This runs a generalized API that can be used to query for elevation and climate data. See [API_README.md](API_README.md) for details. This is primarily designed for developers who want to experiment with the tool without commiting to full integration.
-
-```
-python -m terrain_diffusion api xandergos/terrain-diffusion-30m
 ```
 
 ### (Experimental) Terrain Editor
