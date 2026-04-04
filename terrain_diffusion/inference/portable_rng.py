@@ -29,14 +29,17 @@ def _pcg64_next(state: int) -> tuple[int, int]:
 
 
 def next_seed(seed: int | None) -> int:
-    """Portable alternative to random.randint(0, 2**31-1): derive next seed from current or time."""
+    """Derive a new 64-bit seed from an optional parent seed or from time (when seed is None/0).
+
+    Uses two PCG64 outputs to fill 64 bits, consistent with the rest of this module.
+    """
     state = (int(seed) & 0xFFFFFFFFFFFFFFFF) if seed is not None else 0
     if state == 0:
         import time
         state = int(time.perf_counter_ns()) & 0xFFFFFFFFFFFFFFFF
     state, lo = _pcg64_next(state)
     state, hi = _pcg64_next(state)
-    return ((hi << 32) | lo) & 0x7FFFFFFF
+    return int(((hi << 32) | lo) & 0xFFFFFFFFFFFFFFFF)
 
 
 @njit(cache=True)

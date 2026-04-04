@@ -1074,6 +1074,7 @@ class WorldPipeline(ConfigMixin):
 
     def _process_latent_conditioning(self, cond_img, histogram_raw, cond_means, cond_stds, noise_level, seed_offset: int = 0):
         """Process conditioning for latent stage. seed_offset makes NaN fill deterministic per tile (portable)."""
+        # Noise added to latent model conditioning. Didn't find it really helped, so disabled.
         COND_MAX_NOISE = 0.0
         n, _, nh, nw = cond_img.shape
         if COND_MAX_NOISE != 0 and noise_level != 0:
