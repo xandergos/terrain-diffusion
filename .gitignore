@@ -259,3 +259,5 @@ tmp/
 .cursor/
 azgaar-output/
 extras/
+/*.tif
+/*.tiff
