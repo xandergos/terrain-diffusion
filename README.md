@@ -73,14 +73,6 @@ You can also view the temperature of the high resolution map with `Temperature` 
 python -m terrain_diffusion explore xandergos/terrain-diffusion-30m
 ```
 
-### Terrain Editor
-
-Web UI for editing the conditioning map (elevation, temperature, precipitation, etc.) and rebuilding the world from those edits. The left panel shows the **coarse preview**; the right shows the **generated relief**. Edit with brushes or import TIFFs on the left, then click **Refresh Detail (Rebuild)** to regenerate. Edits act as guidance to the coarse model. Use the refinement-strength sliders to make them influence the output more or less. See [editor/README.md](terrain_diffusion/inference/editor/README.md) for details.
-
-```
-python -m terrain_diffusion edit xandergos/terrain-diffusion-30m
-```
-
 ### Azgaar to TIFF
 
 Convert an [Azgaar Fantasy Map Generator](https://azgaar.github.io/Fantasy-Map-Generator/) full JSON export (Tools -> Export -> Export To JSON -> Full) into conditioning GeoTIFFs (elevation, temperature, precipitation, etc.). Outputs can be used in the **Terrain Editor** (Import TIFF) or as input to **TIFF export**. `--scale` sets the output pixel size in km. Scale is the coarse pixel size, 1:1 with Earth, by default. Larger values are generally recommended and results in more manageable outputs for large worlds.
@@ -111,6 +103,14 @@ This runs a generalized API that can be used to query for elevation and climate 
 
 ```
 python -m terrain_diffusion api xandergos/terrain-diffusion-30m
+```
+
+### (Experimental) Terrain Editor
+
+Web UI for editing the conditioning map (elevation, temperature, precipitation, etc.) and rebuilding the world from those edits. The left panel shows the **coarse preview**; the right shows the **generated relief**. Edit with brushes or import TIFFs on the left, then click **Refresh Detail (Rebuild)** to regenerate. Edits act as guidance to the coarse model. Use the refinement-strength sliders to make them influence the output more or less. See [editor/README.md](terrain_diffusion/inference/editor/README.md) for details.
+
+```
+python -m terrain_diffusion edit xandergos/terrain-diffusion-30m
 ```
 
 ## Training from scratch
