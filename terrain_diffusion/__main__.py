@@ -4,7 +4,6 @@ from terrain_diffusion.training.save_model import save_model as save_model_main
 from terrain_diffusion.data.preprocessing.build_base_dataset import process_base_dataset as build_base_dataset_main
 from terrain_diffusion.data.preprocessing.build_encoded_dataset import process_encoded_dataset as build_encoded_dataset_main
 from terrain_diffusion.data.preprocessing.define_splits import split_dataset as define_splits_main
-from terrain_diffusion.inference.editor.server import main as edit_main
 from terrain_diffusion.inference.explorer.server import main as explore_main
 from terrain_diffusion.inference.world_generator import main as generate_main
 from terrain_diffusion.inference.api import main as api_main
@@ -28,7 +27,6 @@ cli.add_command(build_encoded_dataset_main, name='build-encoded-dataset')
 cli.add_command(define_splits_main, name='define-splits')
 
 # Inference commands
-cli.add_command(edit_main, name='edit')
 cli.add_command(explore_main, name='explore')
 cli.add_command(generate_main, name='generate')
 cli.add_command(api_main, name='api')

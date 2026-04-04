@@ -213,6 +213,10 @@ def make_synthetic_map_factory(frequency_mult=[1.0, 1.0, 1.0, 1.0, 1.0], seed=No
         lapse_rate = (-6.5 + 0.0015 * synthetic_precip).clip(-9.8, -4.0) / 1000
         synthetic_temp = synthetic_temp + lapse_rate * np.maximum(0, synthetic_elev)
         synthetic_temp = np.clip(synthetic_temp, -10, 40)
+        # Stretch sub-20 °C values (empirical tweak): spreads cold vs warm mass in the map
+        # so desert and tropical regions read more distinctly. Above 20 °C unchanged;
+        # below, affine expand around the 20 °C pivot by 1.25×.
+        synthetic_temp = np.where(synthetic_temp > 20, synthetic_temp, (synthetic_temp - 20) * 1.25 + 20)
 
         t = (synthetic_temp_std - temp_std_p1) / (temp_std_p99 - temp_std_p1)
         baseline = np.maximum(temp_std_p1, -(a_temp_std * synthetic_temp + b_temp_std))

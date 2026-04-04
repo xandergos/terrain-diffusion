@@ -380,8 +380,11 @@ class WorldPipeline(ConfigMixin):
         self.custom_conditioning_imports = {}
         self.custom_conditioning_import_origins = {}
         self.custom_conditioning_default_values = {}
-        self.custom_conditioning_edits = {}
-    
+
+    def _has_custom_conditioning_imports(self) -> bool:
+        """True once :meth:`set_custom_conditioning_import` has stored at least one channel."""
+        return bool(self.custom_conditioning_imports)
+
     def _get_padded_batch_size(self, actual_size: int) -> int:
         """Get the next highest legal batch size for padding."""
         for bs in self._batch_sizes:
@@ -739,8 +742,20 @@ class WorldPipeline(ConfigMixin):
         self._init_conditioning()
         self._build_hierarchy()
 
-    def change_seed(self, seed: int | None = None):
-        """Change the seed and rebuild all generation stages."""
+    def change_seed(self, seed: int | None = None) -> bool:
+        """Assign a new world seed and rebuild all tile stages (coarse, latent, decoder).
+
+        Re-seeds the synthetic map factory and clears cached tiles so generation matches
+        the new seed.
+
+        Args:
+            seed: Explicit 64-bit seed (masked to 64 bits). If None, draws a new seed
+                via :func:`terrain_diffusion.inference.portable_rng.next_seed`.
+
+        Returns:
+            True if the seed changed and rebuild ran; False if the requested seed
+            equals the current seed (no-op).
+        """
         new_seed = (int(seed) & 0xFFFFFFFFFFFFFFFF) if seed is not None else next_seed(None)
         if new_seed == self.seed:
             return False
@@ -748,22 +763,20 @@ class WorldPipeline(ConfigMixin):
         self.rebuild()
         return True
 
-    def set_cond_snr(self, cond_snr: list[float]):
+    def set_cond_snr(self, cond_snr: list[float]) -> None:
+        """Set per-channel conditioning SNR and rebuild the tile store.
+
+        There must be exactly five values, in the same order as coarse conditioning
+        channels: elevation, temperature, temperature std, precipitation, precip. variability.
+
+        Calls :meth:`rebuild` automatically. If the pipeline has not been bound yet
+        (``tile_store is None``), the rebuild is a no-op and the new SNR takes effect on
+        the next :meth:`bind`.
+        """
         if len(cond_snr) != 5:
             raise ValueError("cond_snr must contain exactly 5 values.")
         self.kwargs['cond_snr'] = [float(x) for x in cond_snr]
-
-    def clear_custom_conditioning(self, channel: int | None = None):
-        if channel is None:
-            self.custom_conditioning_imports.clear()
-            self.custom_conditioning_import_origins.clear()
-            self.custom_conditioning_default_values.clear()
-            self.custom_conditioning_edits.clear()
-            return
-        self.custom_conditioning_imports.pop(int(channel), None)
-        self.custom_conditioning_import_origins.pop(int(channel), None)
-        self.custom_conditioning_default_values.pop(int(channel), None)
-        self.custom_conditioning_edits.pop(int(channel), None)
+        self.rebuild()
 
     def set_custom_conditioning_import(
         self,
@@ -772,7 +785,29 @@ class WorldPipeline(ConfigMixin):
         origin_i: int,
         origin_j: int,
         default_value: float | None = None,
-    ):
+    ) -> None:
+        """Install a 2-D raster for coarse conditioning (used by ``tiff_export``).
+
+        Channel indices: ``0`` elevation, ``1`` temperature, ``2`` temperature std,
+        ``3`` precipitation, ``4`` precipitation coefficient of variation. Use the same
+        internal units as :mod:`~terrain_diffusion.inference.tiff_export` (e.g. temp std
+        as °C×100).
+
+        The array ``values[h, w]`` is anchored so ``values[0, 0]`` is world cell
+        ``(origin_i, origin_j)``. Outside the raster footprint, windows use synthetic
+        Perlin unless ``default_value`` is set.
+
+        After the first call, coarse conditioning uses the import path (merged Perlin + TIFFs,
+        no synthetic ``finalize``, ``sqrt`` on elevation only); see :meth:`_conditioning_model_input`.
+        Calls :meth:`rebuild` (no-op if :meth:`bind` has not run yet).
+
+        Args:
+            channel: Index ``0..4``.
+            values: 2-D ``float32`` copy of the import.
+            origin_i: Top-left row in conditioning cells.
+            origin_j: Top-left column in conditioning cells.
+            default_value: Optional fill where the import does not apply.
+        """
         values = np.asarray(values, dtype=np.float32)
         if values.ndim != 2:
             raise ValueError("Custom conditioning import must be a 2-D array.")
@@ -783,34 +818,29 @@ class WorldPipeline(ConfigMixin):
             self.custom_conditioning_default_values.pop(channel, None)
         else:
             self.custom_conditioning_default_values[channel] = float(default_value)
-        self.custom_conditioning_edits[channel] = {}
-
-    def set_custom_conditioning_value(self, channel: int, ci: int, cj: int, value: float):
-        channel = int(channel)
-        self.custom_conditioning_edits.setdefault(channel, {})[(int(ci), int(cj))] = float(value)
-
-    def _sample_base_conditioning(self, ci0: int, ci1: int, cj0: int, cj1: int) -> np.ndarray:
-        base = self.synthetic_map_factory(cj0, ci0, cj1, ci1).detach().cpu().numpy().astype(np.float32)
-        base[0] = np.sign(base[0]) * np.square(base[0])
-        return base
+        self.rebuild()
 
     def _sample_raw_conditioning(self, ci0: int, ci1: int, cj0: int, cj1: int) -> np.ndarray:
-        sample_raw = getattr(self.synthetic_map_factory, "sample_raw", None)
-        if sample_raw is None:
-            return self._sample_base_conditioning(ci0, ci1, cj0, cj1)
-        return np.asarray(sample_raw(cj0, ci0, cj1, ci1), dtype=np.float32)
-
-    def _finalize_conditioning(self, raw: np.ndarray) -> np.ndarray:
-        finalize = getattr(self.synthetic_map_factory, "finalize", None)
-        if finalize is None:
-            return raw
-        return np.asarray(finalize(raw), dtype=np.float32)
+        """Perlin stack for ``[ci0:ci1) × [cj0:cj1)`` before finalize (args ``i1,j1,i2,j2``)."""
+        return np.asarray(
+            self.synthetic_map_factory.sample_raw(ci0, cj0, ci1, cj1),
+            dtype=np.float32,
+        )
 
     def _sample_custom_conditioning_channel(self, channel: int, ci0: int, ci1: int, cj0: int, cj1: int):
+        """Build per-channel override grid for window ``[ci0:ci1) x [cj0:cj1)``.
+
+        Copies the overlapping region from :attr:`custom_conditioning_imports` and
+        honors :attr:`custom_conditioning_default_values` for cells outside the import.
+
+        Returns:
+            ``(None, None)`` if this channel has no import and no default value.
+            Otherwise ``(values, mask)`` with ``values`` float32 ``(h, w)`` and ``mask``
+            bool selecting which cells should replace synthetic data.
+        """
         import_values = self.custom_conditioning_imports.get(channel)
-        edits = self.custom_conditioning_edits.get(channel, {})
         default_value = self.custom_conditioning_default_values.get(channel)
-        if import_values is None and not edits and default_value is None:
+        if import_values is None and default_value is None:
             return None, None
 
         h = ci1 - ci0
@@ -837,16 +867,12 @@ class WorldPipeline(ConfigMixin):
                 ]
                 mask[oi0 - ci0:oi1 - ci0, oj0 - cj0:oj1 - cj0] = True
 
-        for (ci, cj), value in edits.items():
-            if ci0 <= ci < ci1 and cj0 <= cj < cj1:
-                values[ci - ci0, cj - cj0] = value
-                mask[ci - ci0, cj - cj0] = True
-
         if not mask.any():
             return None, None
         return values, mask
 
-    def get_conditioning_preview(self, ci0: int, ci1: int, cj0: int, cj1: int) -> np.ndarray:
+    def _raw_conditioning_with_imports(self, ci0: int, ci1: int, cj0: int, cj1: int) -> np.ndarray:
+        """Merge Perlin raw stack with GeoTIFF imports (imported-coarse mode only)."""
         raw = self._sample_raw_conditioning(ci0, ci1, cj0, cj1)
         for channel in range(raw.shape[0]):
             values, mask = self._sample_custom_conditioning_channel(channel, ci0, ci1, cj0, cj1)
@@ -854,109 +880,27 @@ class WorldPipeline(ConfigMixin):
                 raw[channel][mask] = values[mask]
         return raw
 
-    def get_conditioning_preview_finalized(self, ci0: int, ci1: int, cj0: int, cj1: int) -> np.ndarray:
-        return self._finalize_conditioning(self.get_conditioning_preview(ci0, ci1, cj0, cj1))
-
-    def get_refined_preview(self, ci0: int, ci1: int, cj0: int, cj1: int) -> np.ndarray:
-        coarse_init = self.coarse[:, ci0:ci1, cj0:cj1].cpu().float()
-        weight = coarse_init[-1:]
-        coarse_map = torch.where(weight > 0, coarse_init[:-1] / weight, torch.nan)
-        elev = torch.sign(coarse_map[0]) * torch.square(torch.abs(coarse_map[0]))
-        refined = torch.stack([elev, coarse_map[2], coarse_map[3], coarse_map[4], coarse_map[5]])
-        return refined.numpy().astype(np.float32)
-
-    def apply_conditioning_brush(
-        self,
-        channel: int,
-        center_ci: float,
-        center_cj: float,
-        radius: float,
-        strength: float,
-        mode: str,
-        target_value: float = 0.0,
-        delta_value: float = 100.0,
-        use_finalized_temp: bool = False,
-    ) -> dict:
-        channel = int(channel)
-        strength = float(np.clip(strength, 0.0, 1.0))
-        radius = float(max(0.0, radius))
-        if strength <= 0:
-            return {'changed_tiles': 0, 'min_value': None, 'max_value': None}
-
-        if radius == 0:
-            ci0 = int(round(center_ci))
-            ci1 = ci0 + 1
-            cj0 = int(round(center_cj))
-            cj1 = cj0 + 1
-        else:
-            ci0 = int(np.floor(center_ci - radius))
-            ci1 = int(np.ceil(center_ci + radius)) + 1
-            cj0 = int(np.floor(center_cj - radius))
-            cj1 = int(np.ceil(center_cj + radius)) + 1
-
-        raw_preview = self.get_conditioning_preview(ci0, ci1, cj0, cj1)
-        base = raw_preview[channel]
-
-        # When working in finalized-temp space (elevation-adjusted display), convert base
-        # to finalized space, apply the brush, then convert the result back to raw.
-        # offset = raw - fin, so raw = fin + offset.
-        fin_to_raw_offset = None
-        if use_finalized_temp and channel == 1:
-            fin_preview = self._finalize_conditioning(raw_preview.copy())
-            fin_to_raw_offset = raw_preview[1] - fin_preview[1]
-            base = fin_preview[1]
-        ys = np.arange(ci0, ci1, dtype=np.float32)[:, None]
-        xs = np.arange(cj0, cj1, dtype=np.float32)[None, :]
-        dist = np.sqrt((ys - center_ci) ** 2 + (xs - center_cj) ** 2)
-        if radius == 0:
-            weight = np.zeros_like(base, dtype=np.float32)
-            weight[int(round(center_ci)) - ci0, int(round(center_cj)) - cj0] = 1.0
-        else:
-            weight = np.clip(1.0 - dist / radius, 0.0, 1.0).astype(np.float32)
-            weight *= weight
-        weight *= strength
-
-        if mode == 'set':
-            updated = base + (float(target_value) - base) * weight
-        elif mode == 'raise':
-            updated = base + float(delta_value) * weight
-        elif mode == 'lower':
-            updated = base - float(delta_value) * weight
-        elif mode == 'smooth':
-            padded = np.pad(base, 1, mode='edge')
-            smooth = (
-                padded[:-2, :-2] + padded[:-2, 1:-1] + padded[:-2, 2:] +
-                padded[1:-1, :-2] + padded[1:-1, 1:-1] + padded[1:-1, 2:] +
-                padded[2:, :-2] + padded[2:, 1:-1] + padded[2:, 2:]
-            ) / 9.0
-            updated = base + (smooth - base) * weight
-        elif mode == 'noise':
-            noise = np.random.normal(0.0, float(delta_value), base.shape).astype(np.float32)
-            updated = base + noise * weight
-        else:
-            raise ValueError(f"Unknown brush mode: {mode}")
-
-        changed = weight > 1e-6
-        if not changed.any():
-            return {'changed_tiles': 0, 'min_value': None, 'max_value': None}
-
-        if fin_to_raw_offset is not None:
-            updated = updated + fin_to_raw_offset
-
-        changed_values = updated[changed]
-        edits = self.custom_conditioning_edits.setdefault(channel, {})
-        for local_i, local_j in np.argwhere(changed):
-            edits[(ci0 + int(local_i), cj0 + int(local_j))] = float(updated[local_i, local_j])
-        return {
-            'changed_tiles': int(changed.sum()),
-            'min_value': float(changed_values.min()),
-            'max_value': float(changed_values.max()),
-        }
-
     def _conditioning_model_input(self, ci0: int, ci1: int, cj0: int, cj1: int) -> torch.Tensor:
-        cond = self._finalize_conditioning(self.get_conditioning_preview(ci0, ci1, cj0, cj1))
+        """Five-channel tensor for coarse U-Net geographic conditioning.
+
+        Default: full synthetic map from the factory only (finalize + ``sqrt`` on elev), same
+        as ``sample_full_synthetic_map``.
+
+        If :meth:`_has_custom_conditioning_imports` (``set_custom_conditioning_import`` has been
+        called): merge Perlin raw with TIFFs, **no** synthetic ``finalize``; only
+        ``sign(x) * sqrt(|x|)`` on channel 0. Channels 1–4 are merged values.
+
+        Args:
+            ci0, ci1: Inclusive-exclusive row bounds (``i1``, ``i2``).
+            cj0, cj1: Inclusive-exclusive column bounds (``j1``, ``j2``).
+
+        Returns:
+            ``torch.float32`` shaped ``(5, ci1-ci0, cj1-cj0)``.
+        """
+        if not self._has_custom_conditioning_imports():
+            return self.synthetic_map_factory(ci0, cj0, ci1, cj1)
+        cond = self._raw_conditioning_with_imports(ci0, ci1, cj0, cj1).copy()
         cond[0] = np.sign(cond[0]) * np.sqrt(np.abs(cond[0]))
-        cond[1] = np.where(cond[1] > 20, cond[1], (cond[1] - 20) * 1.25 + 20)
         return torch.from_numpy(cond).float()
 
     # =========================================================================

@@ -61,7 +61,7 @@ def _load_and_pad(path: Path, channel: int, internal_scale: float, default_value
     "--snr",
     metavar="ELEV,TEMP,T_STD,PRECIP,P_CV",
     help=(
-        "Conditioning strength per channel (same as refinement strength in the editor). "
+        "Conditioning strength per channel (coarse SNR / refinement). "
         "Exactly 5 comma-separated values, e.g. 0.2,0.2,1.0,0.2,1.0"
     ),
     default="0.2,0.2,1.0,0.2,1.0"

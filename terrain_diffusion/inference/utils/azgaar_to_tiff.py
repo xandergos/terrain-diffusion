@@ -1,6 +1,9 @@
 """
 Convert an Azgaar Fantasy Map Builder full JSON export to GeoTIFF rasters.
 
+The output directory is intended as the conditioning-folder argument to ``tiff-export``
+(``python -m terrain_diffusion ... tiff-export <out_dir> output.tif``).
+
 Outputs:
   heightmap.tif        - elevation in meters (float32; uses Azgaar's (h-18)^exponent formula)
   temperature.tif      - mean temperature in °C (float32, from grid cells)
