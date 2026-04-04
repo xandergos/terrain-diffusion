@@ -54,16 +54,17 @@ def _load_and_pad(path: Path, channel: int, internal_scale: float, default_value
 
 
 @click.command()
+@click.argument("model_path", default="xandergos/terrain-diffusion-90m")
 @click.argument("tiff_dir", type=click.Path(exists=True))
 @click.argument("output", type=click.Path())
-@click.argument("model_path", default="xandergos/terrain-diffusion-30m")
 @click.option(
     "--snr",
     metavar="ELEV,TEMP,T_STD,PRECIP,P_CV",
     help=(
         "Conditioning strength per channel (same as refinement strength in the editor). "
-        "Exactly 5 comma-separated values, e.g. 1.0,0.5,2.0,0.5,2.0"
+        "Exactly 5 comma-separated values, e.g. 0.2,0.2,1.0,0.2,1.0"
     ),
+    default="0.2,0.2,1.0,0.2,1.0"
 )
 @click.option("--hdf5-file", default=None, help="HDF5 cache file ('TEMP' for temporary)")
 @click.option("--cache-size", default="1G", help="Cache size for direct caching (e.g. 100M, 1G)")
@@ -73,8 +74,9 @@ def _load_and_pad(path: Path, channel: int, internal_scale: float, default_value
 @click.option("--compile/--no-compile", "torch_compile", default=True)
 @click.option("--dtype", type=click.Choice(["fp32", "bf16", "fp16"]), default="fp32")
 @click.option("--caching-strategy", type=click.Choice(["indirect", "direct"]), default="direct")
+@click.option("--chunk-size", type=int, default=8 * PIXELS_PER_CELL, help="Max query size in output pixels (must be a multiple of 256). Larger values allow bigger batches.")
 def main(tiff_dir, output, model_path, snr, hdf5_file, cache_size, seed, device,
-         batch_size, torch_compile, dtype, caching_strategy):
+         batch_size, torch_compile, dtype, caching_strategy, chunk_size):
     """Generate terrain from conditioning TIFFs and export to GeoTIFF."""
     tiff_dir = Path(tiff_dir)
     output = Path(output)
@@ -148,8 +150,9 @@ def main(tiff_dir, output, model_path, snr, hdf5_file, cache_size, seed, device,
 
     print(f"Output: {output} ({out_w}x{out_h} px)")
 
-    chunk_cells = 8
-    chunk_px = chunk_cells * PIXELS_PER_CELL
+    if chunk_size % PIXELS_PER_CELL != 0:
+        raise click.UsageError(f"--chunk-size must be a multiple of {PIXELS_PER_CELL}.")
+    chunk_cells = chunk_size // PIXELS_PER_CELL
     row_chunks = (H_orig + chunk_cells - 1) // chunk_cells
     col_chunks = (W_orig + chunk_cells - 1) // chunk_cells
 
@@ -157,7 +160,7 @@ def main(tiff_dir, output, model_path, snr, hdf5_file, cache_size, seed, device,
         with rasterio.open(
             output, "w",
             driver="GTiff", height=out_h, width=out_w,
-            count=1, dtype="float32",
+            count=1, dtype="int16",
             crs=ref_crs, transform=out_transform,
             compress="lzw", tiled=True, blockxsize=256, blockysize=256,
         ) as dst:
@@ -173,7 +176,7 @@ def main(tiff_dir, output, model_path, snr, hdf5_file, cache_size, seed, device,
                         pj2 = (PADDING + cj2) * PIXELS_PER_CELL
 
                         result = world.get(pi1, pj1, pi2, pj2, with_climate=False)
-                        elev = result["elev"].numpy().astype(np.float32)
+                        elev = np.clip(result["elev"].numpy(), -32768, 32767).astype(np.int16)
 
                         window = rasterio.windows.Window(
                             cj * PIXELS_PER_CELL, ci * PIXELS_PER_CELL,

@@ -65,18 +65,16 @@ def load_map(path):
     return map_w, map_h, coords, pack["cells"], pack_verts, grid["cells"], grid_verts, height_exponent
 
 
-def h_to_meters(h, exponent):
+def h_to_meters(h, exponent, ocean_max_depth=4000.0, ocean_power=1.5):
     """Convert Azgaar internal height (0-100) to meters.
 
-    Matches Azgaar's getHeight() in general.js:
-      h == 0          -> -990 m (deepest ocean floor)
-      0 < h < 20      -> ((h-20)/h) * 50  (shallow water, approaches 0 at h=19)
-      h >= 20         -> (h-18)^exponent  (land, 0 m at sea level up to ~6700 m)
+    Land (h >= 20) matches Azgaar's getHeight(): (h-18)^exponent
+    Ocean (h < 20) uses a power curve: -ocean_max_depth * ((20-h)/20)^ocean_power
+      h=0  -> -ocean_max_depth (deepest ocean)
+      h=19 -> ~-45 m at defaults (coastal shelf)
     """
-    if h == 0:
-        return -990.0
     if h < 20:
-        return ((h - 20) / h) * 50.0
+        return -ocean_max_depth * ((20 - h) / 20) ** ocean_power
     return float(h - 18) ** exponent
 
 
@@ -139,7 +137,9 @@ def write_tiff(path, arr, transform, crs="EPSG:4326", nodata=None):
 @click.argument("input", type=click.Path(exists=True))
 @click.argument("output_dir", type=click.Path())
 @click.option("--scale", default=7.0, show_default=True, help="Size of each output pixel in km")
-def main(input, output_dir, scale):
+@click.option("--ocean-max-depth", default=4000.0, show_default=True, help="Maximum ocean depth in meters (at h=0)")
+@click.option("--ocean-power", default=1.5, show_default=True, help="Power curve exponent for ocean depth (higher = steeper near coast)")
+def main(input, output_dir, scale, ocean_max_depth, ocean_power):
     """Convert an Azgaar full JSON export to GeoTIFF rasters."""
     input_path = Path(input)
     output_dir = Path(output_dir)
@@ -173,7 +173,7 @@ def main(input, output_dir, scale):
     # --- Heightmap ---
     print("Rasterizing heightmap...")
     arr = rasterize_layer(**grid_kw, dtype="float32", fill=np.nan,
-                          value_fn=lambda c: h_to_meters(c.get("h", 0), height_exponent))
+                          value_fn=lambda c: h_to_meters(c.get("h", 0), height_exponent, ocean_max_depth, ocean_power))
     arr = fill_nodata(arr, np.nan)
     write_tiff(output_dir / "heightmap.tif", arr, transform)
     print(f"  height range: {arr.min():.0f} .. {arr.max():.0f} m")
