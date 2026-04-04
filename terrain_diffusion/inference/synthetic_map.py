@@ -41,7 +41,13 @@ def _ensure_wc_files():
     os.remove(zip_path)
     print("Done.")
 
-def _compute_map_stats(frequency_mult, actual_seeds, drop_water_pct):
+def _compute_map_stats(frequency_mult, drop_water_pct):
+    """Compute quantile-matching stats from global raster data and Perlin noise.
+
+    Uses fixed deterministic seeds for noise generation since the noise
+    distribution is seed-independent — only the frequency/octave parameters
+    matter for quantile computation.
+    """
     _ensure_wc_files()
 
     elev_img = rasterio.open("data/global/etopo_10m.tif").read(1)
@@ -101,13 +107,15 @@ def _compute_map_stats(frequency_mult, actual_seeds, drop_water_pct):
             base_q = build_quantiles(base_image.flatten(), n_quantiles=64, eps=1e-4)
         return noise_q, base_q
 
-    hist_mask = np.logical_or(np.random.rand(elev_img.shape[0], elev_img.shape[1]) > drop_water_pct, elev_img >= 0)
+    fixed_seeds = [1, 2, 3, 4, 5]
+    rng = np.random.default_rng(0)
+    hist_mask = np.logical_or(rng.random((elev_img.shape[0], elev_img.shape[1])) > drop_water_pct, elev_img >= 0)
     maps = [
-        (elev_img,        0.05 * frequency_mult[0], 4, 2.0, 0.5, actual_seeds[0], hist_mask),
-        (temp_img,        0.05 * frequency_mult[1], 2, 2.0, 0.5, actual_seeds[1], None),
-        (temp_std_img,    0.05 * frequency_mult[2], 4, 2.0, 0.5, actual_seeds[2], None),
-        (precip_img,      0.05 * frequency_mult[3], 4, 2.0, 0.5, actual_seeds[3], None),
-        (precip_std_img,  0.05 * frequency_mult[4], 4, 2.0, 0.5, actual_seeds[4], None),
+        (elev_img,        0.05 * frequency_mult[0], 4, 2.0, 0.5, fixed_seeds[0], hist_mask),
+        (temp_img,        0.05 * frequency_mult[1], 2, 2.0, 0.5, fixed_seeds[1], None),
+        (temp_std_img,    0.05 * frequency_mult[2], 4, 2.0, 0.5, fixed_seeds[2], None),
+        (precip_img,      0.05 * frequency_mult[3], 4, 2.0, 0.5, fixed_seeds[3], None),
+        (precip_std_img,  0.05 * frequency_mult[4], 4, 2.0, 0.5, fixed_seeds[4], None),
     ]
     all_noise_q, all_base_q = zip(*[compute_quantiles(*args) for args in maps])
 
@@ -122,34 +130,36 @@ def _compute_map_stats(frequency_mult, actual_seeds, drop_water_pct):
         stats[f'base_image_quantiles_{i}'] = bq
     return stats
 
-def _load_stats_cache(frequency_mult, actual_seeds, drop_water_pct):
+def _load_stats_cache(frequency_mult, drop_water_pct):
+    cache_key = dict(frequency_mult=list(frequency_mult), drop_water_pct=drop_water_pct)
     if not os.path.exists(STATS_CACHE_PATH):
         return None
     try:
         data = np.load(STATS_CACHE_PATH)
+        cached_key = dict(frequency_mult=data['frequency_mult'].tolist(), drop_water_pct=float(data['drop_water_pct']))
         if (np.allclose(data['frequency_mult'], frequency_mult) and
-                np.array_equal(data['actual_seeds'], actual_seeds) and
                 np.isclose(float(data['drop_water_pct']), drop_water_pct)):
+            print(f"Synthetic map stats cache hit: {cache_key}")
             return data
+        print(f"Synthetic map stats cache miss: expected {cache_key}, found {cached_key}. Recomputing.")
     except Exception:
-        pass
+        print(f"Synthetic map stats cache unreadable for key {cache_key}. Recomputing.")
     return None
 
-def _save_stats_cache(frequency_mult, actual_seeds, drop_water_pct, stats):
+def _save_stats_cache(frequency_mult, drop_water_pct, stats):
     os.makedirs("data/global", exist_ok=True)
     np.savez(STATS_CACHE_PATH,
              frequency_mult=np.array(frequency_mult),
-             actual_seeds=np.array(actual_seeds),
              drop_water_pct=np.float64(drop_water_pct),
              **stats)
 
 def make_synthetic_map_factory(frequency_mult=[1.0, 1.0, 1.0, 1.0, 1.0], seed=None, drop_water_pct=0.0):
     actual_seeds = [((seed or random.randint(0, 2**30)) + i + 1) & 0x7FFFFFFF for i in range(5)]
 
-    stats = _load_stats_cache(frequency_mult, actual_seeds, drop_water_pct)
+    stats = _load_stats_cache(frequency_mult, drop_water_pct)
     if stats is None:
-        stats = _compute_map_stats(frequency_mult, actual_seeds, drop_water_pct)
-        _save_stats_cache(frequency_mult, actual_seeds, drop_water_pct, stats)
+        stats = _compute_map_stats(frequency_mult, drop_water_pct)
+        _save_stats_cache(frequency_mult, drop_water_pct, stats)
 
     a_temp_std = float(stats['a_temp_std'])
     b_temp_std = float(stats['b_temp_std'])
