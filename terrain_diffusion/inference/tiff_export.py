@@ -66,7 +66,7 @@ def _load_and_pad(path: Path, channel: int, internal_scale: float, default_value
     ),
 )
 @click.option("--hdf5-file", default=None, help="HDF5 cache file ('TEMP' for temporary)")
-@click.option("--cache-size", default="100M", help="Cache size for direct caching (e.g. 100M, 1G)")
+@click.option("--cache-size", default="1G", help="Cache size for direct caching (e.g. 100M, 1G)")
 @click.option("--seed", type=int, default=None)
 @click.option("--device", default=None, help="Device (cuda/cpu, default: auto)")
 @click.option("--batch-size", default="1,2,4,8,16")
