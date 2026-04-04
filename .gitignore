@@ -258,3 +258,4 @@ data/global/*
 tmp/
 .cursor/
 azgaar-output/
+extras/
