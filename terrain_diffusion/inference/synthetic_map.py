@@ -1,5 +1,6 @@
 import os
 import random
+import json
 import numpy as np
 import rasterio
 from pyfastnoiselite.pyfastnoiselite import FastNoiseLite, NoiseType, FractalType
@@ -13,7 +14,7 @@ WC_FILES = [
     "data/global/wc2.1_10m_bio_15.tif",
 ]
 WC_URL = "https://geodata.ucdavis.edu/climate/worldclim/2_1/base/wc2.1_10m_bio.zip"
-STATS_CACHE_PATH = "data/global/synthetic_map_stats.npz"
+STATS_CACHE_PATH = "data/global/synthetic_map_stats.json"
 
 def _ensure_wc_files():
     missing = [f for f in WC_FILES if not os.path.exists(f)]
@@ -130,36 +131,61 @@ def _compute_map_stats(frequency_mult, drop_water_pct):
         stats[f'base_image_quantiles_{i}'] = bq
     return stats
 
-def _load_stats_cache(frequency_mult, drop_water_pct):
-    cache_key = dict(frequency_mult=list(frequency_mult), drop_water_pct=drop_water_pct)
+def _load_stats_cache():
+    """Load synthetic map stats from JSON cache."""
     if not os.path.exists(STATS_CACHE_PATH):
         return None
     try:
-        data = np.load(STATS_CACHE_PATH)
-        cached_key = dict(frequency_mult=data['frequency_mult'].tolist(), drop_water_pct=float(data['drop_water_pct']))
-        if (np.allclose(data['frequency_mult'], frequency_mult) and
-                np.isclose(float(data['drop_water_pct']), drop_water_pct)):
-            print(f"Synthetic map stats cache hit: {cache_key}")
-            return data
-        print(f"Synthetic map stats cache miss: expected {cache_key}, found {cached_key}. Recomputing.")
+        with open(STATS_CACHE_PATH, "r", encoding="utf-8") as cache_file:
+            data = json.load(cache_file)
+        noise_quantile_tables = data["noise_quantile_tables"]
+        data_quantile_tables = data["data_quantile_tables"]
+        stats = {
+            "a_temp_std": float(data["a_temp_std"]),
+            "b_temp_std": float(data["b_temp_std"]),
+            "temp_std_p1": float(data["temp_std_p1"]),
+            "temp_std_p99": float(data["temp_std_p99"]),
+        }
+        for index, quantile_table in enumerate(noise_quantile_tables):
+            stats[f"noise_quantiles_{index}"] = np.asarray(quantile_table, dtype=np.float64)
+        for index, quantile_table in enumerate(data_quantile_tables):
+            stats[f"base_image_quantiles_{index}"] = np.asarray(quantile_table, dtype=np.float64)
+        print("Synthetic map stats cache hit.")
+        return stats
     except Exception:
-        print(f"Synthetic map stats cache unreadable for key {cache_key}. Recomputing.")
+        print("Synthetic map stats cache unreadable. Recomputing.")
     return None
 
-def _save_stats_cache(frequency_mult, drop_water_pct, stats):
+def _save_stats_cache(stats):
+    """Save synthetic map stats cache as plain JSON."""
     os.makedirs("data/global", exist_ok=True)
-    np.savez(STATS_CACHE_PATH,
-             frequency_mult=np.array(frequency_mult),
-             drop_water_pct=np.float64(drop_water_pct),
-             **stats)
+    noise_quantile_tables = []
+    data_quantile_tables = []
+    quantile_index = 0
+    while f"noise_quantiles_{quantile_index}" in stats and f"base_image_quantiles_{quantile_index}" in stats:
+        noise_quantile_tables.append(np.asarray(stats[f"noise_quantiles_{quantile_index}"], dtype=np.float64).tolist())
+        data_quantile_tables.append(np.asarray(stats[f"base_image_quantiles_{quantile_index}"], dtype=np.float64).tolist())
+        quantile_index += 1
+
+    payload = {
+        "n_quantiles": int(len(noise_quantile_tables[0])) if noise_quantile_tables else 0,
+        "noise_quantile_tables": noise_quantile_tables,
+        "data_quantile_tables": data_quantile_tables,
+        "a_temp_std": float(stats["a_temp_std"]),
+        "b_temp_std": float(stats["b_temp_std"]),
+        "temp_std_p1": float(stats["temp_std_p1"]),
+        "temp_std_p99": float(stats["temp_std_p99"]),
+    }
+    with open(STATS_CACHE_PATH, "w", encoding="utf-8") as cache_file:
+        json.dump(payload, cache_file)
 
 def make_synthetic_map_factory(frequency_mult=[1.0, 1.0, 1.0, 1.0, 1.0], seed=None, drop_water_pct=0.0):
     actual_seeds = [((seed or random.randint(0, 2**30)) + i + 1) & 0x7FFFFFFF for i in range(5)]
 
-    stats = _load_stats_cache(frequency_mult, drop_water_pct)
+    stats = _load_stats_cache()
     if stats is None:
         stats = _compute_map_stats(frequency_mult, drop_water_pct)
-        _save_stats_cache(frequency_mult, drop_water_pct, stats)
+        _save_stats_cache(stats)
 
     a_temp_std = float(stats['a_temp_std'])
     b_temp_std = float(stats['b_temp_std'])
