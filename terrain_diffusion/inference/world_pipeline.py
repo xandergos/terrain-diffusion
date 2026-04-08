@@ -292,6 +292,7 @@ class WorldPipeline(ConfigMixin):
         latents_batch_size: int | list[int] = [1, 2, 4, 8, 16],
         native_resolution: float = 90.0,
         *,
+        T: int = 2,
         log_mode: str = 'info',
         torch_compile: bool = False,
         dtype: str | None = None,
@@ -314,6 +315,10 @@ class WorldPipeline(ConfigMixin):
         **deprecated_kwargs,
     ):
         super().__init__()
+        
+        if T not in (1, 2):
+            raise ValueError(f"T must be 1 or 2, got {T}")
+        self.T = T
         
         # Resolve seed (64-bit when provided; portable RNG for default)
         self.seed = (int(seed) & 0xFFFFFFFFFFFFFFFF) if seed is not None else next_seed(None)
@@ -1143,10 +1148,37 @@ class WorldPipeline(ConfigMixin):
         scheduler = EDMDPMSolverMultistepScheduler(sigma_min=0.002, sigma_max=80, sigma_data=0.5)
         weight_window = linear_weight_window(TILE_SIZE, 'cpu', torch.float32)
 
+        T_INTER = [torch.arctan(torch.tensor(0.35) / 0.5)]
         t_init = torch.atan(scheduler.sigmas[0] / scheduler.config.sigma_data)
         output_window = TensorWindow(size=(6, TILE_SIZE, TILE_SIZE), stride=(6, TILE_STRIDE, TILE_STRIDE))
         coarse_window = TensorWindow(size=(7, 4, 4), stride=(7, 1, 1), offset=(0, -1, -1))
         
+        if self.T == 1:
+            def f_T1(ctxs, conds):
+                outputs = self._latent_inference(
+                    ctxs, None, conds, t_init, scheduler, weight_window,
+                    HISTOGRAM_RAW, COND_INPUT_MEAN, COND_INPUT_STD, seed_offset=5819,
+                )
+                if self.onestep_latent:
+                    return outputs
+                for i, t in enumerate(T_INTER):
+                    outputs = self._latent_inference(
+                        ctxs, outputs, conds, t, scheduler, weight_window,
+                        HISTOGRAM_RAW, COND_INPUT_MEAN, COND_INPUT_STD, seed_offset=5820 + i,
+                    )
+                return outputs
+            return self.tile_store.get_or_create(
+                "latent_map_T1",
+                shape=(6, None, None),
+                f=f_T1,
+                output_window=output_window,
+                args=(self.coarse,),
+                args_windows=(coarse_window,),
+                batch_size=self.latents_batch_size,
+                **self._common_tile_kwargs()
+            )
+
+        # T=2: current two-stage behavior
         tensor = self.tile_store.get_or_create(
             "init_latent_map",
             shape=(6, None, None),
@@ -1160,10 +1192,8 @@ class WorldPipeline(ConfigMixin):
             **self._common_tile_kwargs()
         )
         
-        # Skip intermediate refinement steps for 1-step latent model
         if not self.onestep_latent:
-            inter_t = [torch.arctan(torch.tensor(0.35) / 0.5)]
-            for i, t in enumerate(inter_t):
+            for i, t in enumerate(T_INTER):
                 tensor = self.tile_store.get_or_create(
                     f"step_latent_map_{i}",
                     shape=(6, None, None),
