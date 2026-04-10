@@ -26,6 +26,7 @@ def measure_latency(
     decoder_tile_size: int = 512,
     decoder_tile_stride: int = 384,
     max_batch_size: int = 16,
+    T: int = 2,
 ) -> dict:
     """Measure TTFT and TTST."""
     # Reset peak memory before warmup
@@ -45,6 +46,7 @@ def measure_latency(
         onestep_latent=onestep_latent,
         decoder_tile_size=decoder_tile_size,
         decoder_tile_stride=decoder_tile_stride,
+        T=T,
     )
     world.to(device)
     world.bind("TEMP")
@@ -134,7 +136,8 @@ def measure_latency(
 @click.option('--decoder-tile-size', default=512, type=int, help='Decoder tile size')
 @click.option('--decoder-stride', default=384, type=int, help='Decoder tile stride')
 @click.option('--max-batch-size', default=16, type=int, help='Maximum batch size')
-def main(onestep_latent, cpu, tile_size, grid_aligned, num_runs, decoder_tile_size, decoder_stride, max_batch_size):
+@click.option('-T', default=2, type=click.Choice(['1', '2']), help='Number of diffusion steps (1 or 2)')
+def main(onestep_latent, cpu, tile_size, grid_aligned, num_runs, decoder_tile_size, decoder_stride, max_batch_size, t):
     if cpu:
         device = 'cpu'
         print("Note: torch.compile disabled on CPU")
@@ -148,6 +151,7 @@ def main(onestep_latent, cpu, tile_size, grid_aligned, num_runs, decoder_tile_si
     print(f"Decoder tile: {decoder_tile_size}x{decoder_tile_size}, stride: {decoder_stride}")
     print(f"Number of runs: {num_runs}")
     print(f"Latent steps: {'1-step' if onestep_latent else '2-step'}")
+    print(f"T: {t}")
     print(f"Grid aligned: {grid_aligned}\n")
     
     result = measure_latency(
@@ -159,6 +163,7 @@ def main(onestep_latent, cpu, tile_size, grid_aligned, num_runs, decoder_tile_si
         decoder_tile_size=decoder_tile_size,
         decoder_tile_stride=decoder_stride,
         max_batch_size=max_batch_size,
+        T=int(t),
     )
     print(f"\nTTFT: {result['ttft_mean']:.2f}s ± {result['ttft_std']:.2f}s (p5={result['ttft_p5']:.2f}, p50={result['ttft_p50']:.2f}, p95={result['ttft_p95']:.2f})")
     print(f"TTST: {result['ttst_mean']:.2f}s ± {result['ttst_std']:.2f}s (p5={result['ttst_p5']:.2f}, p50={result['ttst_p50']:.2f}, p95={result['ttst_p95']:.2f})")
