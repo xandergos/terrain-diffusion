@@ -10,7 +10,6 @@ Terrain Diffusion provides:
 - InfiniteDiffusion, an algorithm for unbounded diffusion sampling with constant time random access. Utilizes [infinite-tensor](https://github.com/xandergos/infinite-tensor).
 - A hierarchical stack of models for generating planetary terrain
 - Real time streaming of terrain and climate data
-- API for a pretty cool Minecraft mod
 
 ### Related Repositories
 
