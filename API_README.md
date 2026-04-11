@@ -22,6 +22,31 @@ python -m terrain_diffusion.inference.api --hdf5-file world.h5 --port 8000
 - `--latents-batch-size`: Batch size for latent generation (default: 4)
 - `--log-mode`: Logging mode (`info` or `verbose`, default: `verbose`)
 
+## `GET /seed`
+
+Return the current world seed.
+
+**Response:**
+```json
+{"seed": 123456789}
+```
+
+## `POST /seed`
+
+Change the world seed at runtime. This clears all cached terrain and rebuilds the generation pipeline with the new seed.
+
+**Request Body (JSON, optional):**
+```json
+{"seed": 123456789}
+```
+
+Omit the body or pass `{}` to generate a random seed.
+
+**Response:**
+```json
+{"seed": 123456789}
+```
+
 ## `GET /terrain`
 
 Get terrain elevation and climate data for a bounding box.

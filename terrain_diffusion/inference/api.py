@@ -33,9 +33,9 @@ def _get_pipeline() -> WorldPipeline:
 
     cfg = _PIPELINE_CONFIG
     device = cfg.get('device') or _select_device()
-    caching_strategy = cfg.get('caching_strategy', 'indirect')
+    caching_strategy = cfg.get('caching_strategy', 'direct')
     _PIPELINE = WorldPipeline.from_pretrained(
-        cfg.get('model_path', 'xandergos/terrain-diffusion-90m'),
+        cfg.get('model_path', 'xandergos/terrain-diffusion-30m'),
         seed=cfg.get('seed'),
         latents_batch_size=cfg.get('latents_batch_size', 4),
         log_mode=cfg.get('log_mode', 'verbose'),
@@ -180,6 +180,7 @@ def terrain():
         i1, j1, i2, j2: Bounding box in target resolution coordinates
         scale: Integer scale factor relative to native resolution (default: 1)
                1 = native, 2 = 2x, 4 = 4x, 8 = 8x, etc.
+        seed: World seed (optional; changes seed when different from current)
     
     Returns binary data:
         - elevation: int16-le (H*W*2 bytes), meters
@@ -193,6 +194,9 @@ def terrain():
             raise ValueError("scale must be >= 1")
 
         world = _get_pipeline()
+        seed = request.args.get("seed", type=int)
+        if seed is not None and world.change_seed(seed):
+            print(f"World seed changed to: {world.seed}")
         out = _get_terrain(world, i1, j1, i2, j2, scale)
         return _binary_response(out["elev"], out.get("climate"))
     except Exception as e:
@@ -200,7 +204,7 @@ def terrain():
 
 
 @click.command()
-@click.argument("model_path", default="xandergos/terrain-diffusion-90m")
+@click.argument("model_path", default="xandergos/terrain-diffusion-30m")
 @click.option("--caching-strategy", type=click.Choice(["indirect", "direct"]), default="direct", help="Caching strategy: 'indirect' uses HDF5, 'direct' uses in-memory LRU cache")
 @click.option("--hdf5-file", default=None, help="HDF5 file path (required for indirect caching, optional for direct)")
 @click.option("--cache-size", default="100M", help="Cache size (e.g., 100M, 1G) for direct caching")

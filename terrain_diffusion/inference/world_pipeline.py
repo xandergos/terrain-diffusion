@@ -1,5 +1,6 @@
-import random
 from tempfile import NamedTemporaryFile, TemporaryDirectory
+
+from terrain_diffusion.inference.portable_rng import fill_standard_normal, next_seed, standard_normal
 import time
 import json
 import os
@@ -54,6 +55,14 @@ def _cleanup_all_temp_files():
 
 atexit.register(_cleanup_all_temp_files)
     
+def _tile_seed(base_seed: int, ty: int, tx: int) -> int:
+    """Portable 64-bit seed from (base_seed, ty, tx). Same inputs -> same seed on any platform."""
+    h = (int(base_seed) & 0xFFFFFFFFFFFFFFFF) * 0x9E3779B9
+    h = (h + (int(ty) & 0xFFFFFFFF)) & 0xFFFFFFFFFFFFFFFF
+    h = (h * 0x9E3779B9 + (int(tx) & 0xFFFFFFFF)) & 0xFFFFFFFFFFFFFFFF
+    return h
+
+
 def gaussian_noise_patch(
     base_seed: int,
     y0: int,
@@ -68,6 +77,7 @@ def gaussian_noise_patch(
     """
     Returns a (C, H, W) patch from an infinite, tile-seeded Gaussian noise field.
     Tiles are seeded deterministically from (base_seed, tile_y, tile_x).
+    Uses portable RNG (PCG64 + Marsaglia polar); same algorithm can be implemented in C++/Java.
     Coordinates are integer pixel indices; supports negative coordinates.
     """
     out = np.empty((channels, h, w), dtype=dtype)
@@ -97,14 +107,9 @@ def gaussian_noise_patch(
             tile_x_off0 = ox0 - tile_x0
             tile_x_off1 = ox1 - tile_x0
 
-            # Deterministic RNG per tile from (base_seed, ty, tx)
-            words = np.array([base_seed, ty, tx]).astype(np.uint32)
-            ss = np.random.SeedSequence(words)            
-            rng = np.random.Generator(np.random.PCG64DXSM(ss))
-
-            # Generate full tile (C, tile_h, tile_w) to keep tile content invariant across requests
-            tile = rng.standard_normal(size=(channels, tile_h, tile_w), dtype=dtype)
-
+            seed = _tile_seed(base_seed, ty, tx)
+            tile = np.empty((channels, tile_h, tile_w), dtype=dtype)
+            fill_standard_normal(seed, tile.ravel())
             out[:, out_y0:out_y1, out_x0:out_x1] = tile[:, tile_y_off0:tile_y_off1, tile_x_off0:tile_x_off1]
 
     return out    
@@ -268,7 +273,6 @@ def normalize_tensor(tensor, dim=0):
     idx_den[dim] = slice(-1, None)
     return tensor[tuple(idx_num)] / tensor[tuple(idx_den)]
 
-
 class WorldPipeline(ConfigMixin):
     """Multi-scale terrain generation pipeline."""
     
@@ -284,8 +288,8 @@ class WorldPipeline(ConfigMixin):
     @register_to_config
     def __init__(
         self,
-        seed: int | None = None,
-        latents_batch_size: int | list[int] = 1,
+        seed: int | None = None,  # 64-bit when provided; default from portable RNG
+        latents_batch_size: int | list[int] = [1, 2, 4, 8, 16],
         native_resolution: float = 90.0,
         *,
         log_mode: str = 'info',
@@ -302,7 +306,7 @@ class WorldPipeline(ConfigMixin):
         residual_std: float = 1.1678,
         coarse_means: list = None,
         coarse_stds: list = None,
-        caching_strategy: str = 'indirect',
+        caching_strategy: str = 'direct',
         cache_limit: int | None = 100 * 1024 * 1024,
         onestep_latent: bool = False,
         decoder_tile_size: int = 512,
@@ -311,8 +315,8 @@ class WorldPipeline(ConfigMixin):
     ):
         super().__init__()
         
-        # Resolve seed
-        self.seed = seed if seed is not None else random.randint(0, 2**31-1)
+        # Resolve seed (64-bit when provided; portable RNG for default)
+        self.seed = (int(seed) & 0xFFFFFFFFFFFFFFFF) if seed is not None else next_seed(None)
         # Normalize batch sizes to sorted list
         if isinstance(latents_batch_size, int):
             self._batch_sizes = [latents_batch_size]
@@ -324,8 +328,11 @@ class WorldPipeline(ConfigMixin):
         self.log_mode = log_mode
         self.torch_compile = torch_compile
         
-        if self.torch_compile and os.name == 'nt':
-            print("WARNING: torch.compile is not currently supported on Windows. This will affect performance.")
+        if self.torch_compile and (os.name == 'nt' or not torch.cuda.is_available()):
+            if os.name == 'nt':
+                print("WARNING: torch.compile is not currently supported on Windows. This will affect performance.")
+            else:
+                print("WARNING: torch.compile is not currently supported on CPU.")
             self.torch_compile = False
             
         self.caching_strategy = caching_strategy
@@ -370,7 +377,14 @@ class WorldPipeline(ConfigMixin):
         self.coarse = None
         self.latents = None
         self.residual = None
-    
+        self.custom_conditioning_imports = {}
+        self.custom_conditioning_import_origins = {}
+        self.custom_conditioning_default_values = {}
+
+    def _has_custom_conditioning_imports(self) -> bool:
+        """True once :meth:`set_custom_conditioning_import` has stored at least one channel."""
+        return bool(self.custom_conditioning_imports)
+
     def _get_padded_batch_size(self, actual_size: int) -> int:
         """Get the next highest legal batch size for padding."""
         for bs in self._batch_sizes:
@@ -420,7 +434,7 @@ class WorldPipeline(ConfigMixin):
             print("Model compilation complete.")
     
     def _warmup_compiled_models(self):
-        """Warmup compiled models with all batch sizes."""
+        """Warmup compiled models with all batch sizes. Uses portable RNG for dummy inputs."""
         if not self.torch_compile:
             return
         
@@ -428,31 +442,31 @@ class WorldPipeline(ConfigMixin):
         print(f"Warming up compiled models with batch sizes: {warmup_batch_sizes}...")
         device = self.device
         dtype = self._dtype or torch.float32
+
+        def _to_t(x, d=device, dt=dtype):
+            return torch.from_numpy(x).to(device=d, dtype=dt)
         
-        # Warmup coarse model (batch size 1)
         if self.coarse_model is not None:
             print("  Warming up coarse_model...")
-            dummy_in = torch.randn(1, 11, 64, 64, device=device, dtype=dtype)
-            dummy_noise = torch.randn(1, device=device, dtype=dtype)
+            dummy_in = _to_t(standard_normal(0x5EED0001, (1, 11, 64, 64)))
+            dummy_noise = _to_t(standard_normal(0x5EED0002, (1,)))
             with torch.no_grad():
                 self.coarse_model(dummy_in, noise_labels=dummy_noise, conditional_inputs=[torch.zeros(1, device=device, dtype=dtype) for _ in range(5)])
         
-        # Warmup base model (latent stage) with each batch size
-        # Conditioning size: 16 (means) + 16 (p5) + 4 (climate) + 16 (mask) + 5 (histogram) + 1 (noise_level) = 58
         if self.base_model is not None:
             for bs in warmup_batch_sizes:
                 print(f"  Warming up base_model with batch size {bs}...")
-                dummy_in = torch.randn(bs, 5, 64, 64, device=device, dtype=dtype)
-                dummy_cond = torch.randn(bs, 58, device=device, dtype=dtype)
-                dummy_noise = torch.randn(bs, device=device, dtype=dtype)
+                dummy_in = _to_t(standard_normal(0x5EED0010 + bs, (bs, 5, 64, 64)))
+                dummy_cond = _to_t(standard_normal(0x5EED0020 + bs, (bs, 58)))
+                dummy_noise = _to_t(standard_normal(0x5EED0030 + bs, (bs,)))
                 with torch.no_grad():
                     self.base_model(dummy_in, noise_labels=dummy_noise, conditional_inputs=[dummy_cond])
         
-        # Warmup decoder model (batch size 1)
         if self.decoder_model is not None:
             print("  Warming up decoder_model...")
-            dummy_in = torch.randn(1, 5, 512, 512, device=device, dtype=dtype)
-            dummy_noise = torch.randn(1, device=device, dtype=dtype)
+            ts = self.decoder_tile_size
+            dummy_in = _to_t(standard_normal(0x5EED0040, (1, 5, ts, ts)))
+            dummy_noise = _to_t(standard_normal(0x5EED0041, (1,)))
             with torch.no_grad():
                 self.decoder_model(dummy_in, noise_labels=dummy_noise, conditional_inputs=[])
         
@@ -570,7 +584,8 @@ class WorldPipeline(ConfigMixin):
             self.base_model = self.base_model.to(device)
         if self.decoder_model is not None:
             self.decoder_model = self.decoder_model.to(device)
-        self._warmup_compiled_models()
+        if device != 'cpu':
+            self._warmup_compiled_models()
         return self
     
     def bind(
@@ -591,6 +606,9 @@ class WorldPipeline(ConfigMixin):
         Returns:
             self for chaining.
         """
+        self._compression = compression
+        self._compression_opts = compression_opts
+        
         if self.caching_strategy == 'direct':
             self._init_tile_store(None, None, None, None)
         else:
@@ -684,15 +702,8 @@ class WorldPipeline(ConfigMixin):
         """Clear the cache for all tensors in the pipeline."""
         if self.tile_store is None:
             return
-        
-        tensor_ids = ["base_coarse_map", "init_latent_map", "init_residual_map"]
-        # Add step_latent_map tensors (there's typically one: step_latent_map_0)
-        inter_t = [torch.arctan(torch.tensor(0.35) / 0.5)]
-        for i in range(len(inter_t)):
-            tensor_ids.append(f"step_latent_map_{i}")
-        
-        for tensor_id in tensor_ids:
-            self.tile_store.evict_cache_for(tensor_id, 0)
+            
+        self.tile_store.clear_direct_caches()
     
     def close(self):
         """Release resources associated with this pipeline."""
@@ -701,6 +712,196 @@ class WorldPipeline(ConfigMixin):
         # Clean up temporary file if this pipeline created one
         if self._is_temp_file:
             cleanup_temp_file(self._hdf5_file_path)
+
+    def rebuild(self):
+        """Reset tile store and rebuild all generation stages.
+        
+        Call after modifying self.seed or self.kwargs entries that affect generation
+        (e.g. frequency_mult, drop_water_pct, cond_snr, coarse_means, coarse_stds,
+        histogram_raw, coarse_pooling, onestep_latent, decoder_tile_size, etc.).
+        
+        Not needed for: log_mode, native_resolution (trivially mutable), or
+        residual_mean/residual_std (applied at output time, not baked into tiles).
+        
+        The pipeline must have been bound via bind() before calling this method.
+        """
+        if self.tile_store is None:
+            return
+        
+        if self.caching_strategy == 'direct':
+            self.tile_store = MemoryTileStore()
+        else:
+            if hasattr(self.tile_store, 'close'):
+                self.tile_store.close()
+            with h5py.File(self._hdf5_file_path, 'w') as f:
+                f.attrs['WORLD_PIPELINE_PARAMS'] = json.dumps(
+                    {'seed': self.seed, 'kwargs': self.kwargs}, sort_keys=True
+                )
+            self._init_tile_store(self._hdf5_file_path, 'a', self._compression, self._compression_opts)
+        
+        self._init_conditioning()
+        self._build_hierarchy()
+
+    def change_seed(self, seed: int | None = None) -> bool:
+        """Assign a new world seed and rebuild all tile stages (coarse, latent, decoder).
+
+        Re-seeds the synthetic map factory and clears cached tiles so generation matches
+        the new seed.
+
+        Args:
+            seed: Explicit 64-bit seed (masked to 64 bits). If None, draws a new seed
+                via :func:`terrain_diffusion.inference.portable_rng.next_seed`.
+
+        Returns:
+            True if the seed changed and rebuild ran; False if the requested seed
+            equals the current seed (no-op).
+        """
+        new_seed = (int(seed) & 0xFFFFFFFFFFFFFFFF) if seed is not None else next_seed(None)
+        if new_seed == self.seed:
+            return False
+        self.seed = new_seed
+        self.rebuild()
+        return True
+
+    def set_cond_snr(self, cond_snr: list[float]) -> None:
+        """Set per-channel conditioning SNR and rebuild the tile store.
+
+        There must be exactly five values, in the same order as coarse conditioning
+        channels: elevation, temperature, temperature std, precipitation, precip. variability.
+
+        Calls :meth:`rebuild` automatically. If the pipeline has not been bound yet
+        (``tile_store is None``), the rebuild is a no-op and the new SNR takes effect on
+        the next :meth:`bind`.
+        """
+        if len(cond_snr) != 5:
+            raise ValueError("cond_snr must contain exactly 5 values.")
+        self.kwargs['cond_snr'] = [float(x) for x in cond_snr]
+        self.rebuild()
+
+    def set_custom_conditioning_import(
+        self,
+        channel: int,
+        values: np.ndarray,
+        origin_i: int,
+        origin_j: int,
+        default_value: float | None = None,
+    ) -> None:
+        """Install a 2-D raster for coarse conditioning (used by ``tiff_export``).
+
+        Channel indices: ``0`` elevation, ``1`` temperature, ``2`` temperature std,
+        ``3`` precipitation, ``4`` precipitation coefficient of variation. Use the same
+        internal units as :mod:`~terrain_diffusion.inference.tiff_export` (e.g. temp std
+        as °C×100).
+
+        The array ``values[h, w]`` is anchored so ``values[0, 0]`` is world cell
+        ``(origin_i, origin_j)``. Outside the raster footprint, windows use synthetic
+        Perlin unless ``default_value`` is set.
+
+        After the first call, coarse conditioning uses the import path (merged Perlin + TIFFs,
+        no synthetic ``finalize``, ``sqrt`` on elevation only); see :meth:`_conditioning_model_input`.
+        Calls :meth:`rebuild` (no-op if :meth:`bind` has not run yet).
+
+        Args:
+            channel: Index ``0..4``.
+            values: 2-D ``float32`` copy of the import.
+            origin_i: Top-left row in conditioning cells.
+            origin_j: Top-left column in conditioning cells.
+            default_value: Optional fill where the import does not apply.
+        """
+        values = np.asarray(values, dtype=np.float32)
+        if values.ndim != 2:
+            raise ValueError("Custom conditioning import must be a 2-D array.")
+        channel = int(channel)
+        self.custom_conditioning_imports[channel] = values.copy()
+        self.custom_conditioning_import_origins[channel] = (int(origin_i), int(origin_j))
+        if default_value is None:
+            self.custom_conditioning_default_values.pop(channel, None)
+        else:
+            self.custom_conditioning_default_values[channel] = float(default_value)
+        self.rebuild()
+
+    def _sample_raw_conditioning(self, ci0: int, ci1: int, cj0: int, cj1: int) -> np.ndarray:
+        """Perlin stack for ``[ci0:ci1) × [cj0:cj1)`` before finalize (args ``i1,j1,i2,j2``)."""
+        return np.asarray(
+            self.synthetic_map_factory.sample_raw(ci0, cj0, ci1, cj1),
+            dtype=np.float32,
+        )
+
+    def _sample_custom_conditioning_channel(self, channel: int, ci0: int, ci1: int, cj0: int, cj1: int):
+        """Build per-channel override grid for window ``[ci0:ci1) x [cj0:cj1)``.
+
+        Copies the overlapping region from :attr:`custom_conditioning_imports` and
+        honors :attr:`custom_conditioning_default_values` for cells outside the import.
+
+        Returns:
+            ``(None, None)`` if this channel has no import and no default value.
+            Otherwise ``(values, mask)`` with ``values`` float32 ``(h, w)`` and ``mask``
+            bool selecting which cells should replace synthetic data.
+        """
+        import_values = self.custom_conditioning_imports.get(channel)
+        default_value = self.custom_conditioning_default_values.get(channel)
+        if import_values is None and default_value is None:
+            return None, None
+
+        h = ci1 - ci0
+        w = cj1 - cj0
+        if default_value is None:
+            values = np.zeros((h, w), dtype=np.float32)
+            mask = np.zeros((h, w), dtype=bool)
+        else:
+            values = np.full((h, w), float(default_value), dtype=np.float32)
+            mask = np.ones((h, w), dtype=bool)
+
+        if import_values is not None:
+            src_i0, src_j0 = self.custom_conditioning_import_origins[channel]
+            src_i1 = src_i0 + import_values.shape[0]
+            src_j1 = src_j0 + import_values.shape[1]
+            oi0 = max(ci0, src_i0)
+            oi1 = min(ci1, src_i1)
+            oj0 = max(cj0, src_j0)
+            oj1 = min(cj1, src_j1)
+            if oi0 < oi1 and oj0 < oj1:
+                values[oi0 - ci0:oi1 - ci0, oj0 - cj0:oj1 - cj0] = import_values[
+                    oi0 - src_i0:oi1 - src_i0,
+                    oj0 - src_j0:oj1 - src_j0,
+                ]
+                mask[oi0 - ci0:oi1 - ci0, oj0 - cj0:oj1 - cj0] = True
+
+        if not mask.any():
+            return None, None
+        return values, mask
+
+    def _raw_conditioning_with_imports(self, ci0: int, ci1: int, cj0: int, cj1: int) -> np.ndarray:
+        """Merge Perlin raw stack with GeoTIFF imports (imported-coarse mode only)."""
+        raw = self._sample_raw_conditioning(ci0, ci1, cj0, cj1)
+        for channel in range(raw.shape[0]):
+            values, mask = self._sample_custom_conditioning_channel(channel, ci0, ci1, cj0, cj1)
+            if values is not None:
+                raw[channel][mask] = values[mask]
+        return raw
+
+    def _conditioning_model_input(self, ci0: int, ci1: int, cj0: int, cj1: int) -> torch.Tensor:
+        """Five-channel tensor for coarse U-Net geographic conditioning.
+
+        Default: full synthetic map from the factory only (finalize + ``sqrt`` on elev), same
+        as ``sample_full_synthetic_map``.
+
+        If :meth:`_has_custom_conditioning_imports` (``set_custom_conditioning_import`` has been
+        called): merge Perlin raw with TIFFs, **no** synthetic ``finalize``; only
+        ``sign(x) * sqrt(|x|)`` on channel 0. Channels 1–4 are merged values.
+
+        Args:
+            ci0, ci1: Inclusive-exclusive row bounds (``i1``, ``i2``).
+            cj0, cj1: Inclusive-exclusive column bounds (``j1``, ``j2``).
+
+        Returns:
+            ``torch.float32`` shaped ``(5, ci1-ci0, cj1-cj0)``.
+        """
+        if not self._has_custom_conditioning_imports():
+            return self.synthetic_map_factory(ci0, cj0, ci1, cj1)
+        cond = self._raw_conditioning_with_imports(ci0, ci1, cj0, cj1).copy()
+        cond[0] = np.sign(cond[0]) * np.sqrt(np.abs(cond[0]))
+        return torch.from_numpy(cond).float()
 
     # =========================================================================
     # Coarse Stage
@@ -718,9 +919,10 @@ class WorldPipeline(ConfigMixin):
         i1, j1 = i * (TILE_STRIDE // pool_size), j * (TILE_STRIDE // pool_size)
         i1, j1 = i1 * pool_size, j1 * pool_size
         i2, j2 = i1 + TILE_SIZE, j1 + TILE_SIZE
+        if self.log_mode == 'verbose':
+            print(f"Coarse f at {ctx}")
         
-        synthetic_map = torch.as_tensor(self.synthetic_map_factory(j1, i1, j2, i2))
-        synthetic_map[1] = torch.where(synthetic_map[1] > 20, synthetic_map[1], (synthetic_map[1] - 20) * 1.25 + 20)
+        synthetic_map = self._conditioning_model_input(i1, i2, j1, j2)
         synthetic_map = (synthetic_map - MODEL_MEANS[[0, 2, 3, 4, 5], None, None]) / MODEL_STDS[[0, 2, 3, 4, 5], None, None]
         synthetic_map = synthetic_map.to(self.device, dtype=model_dtype)[None]
         
@@ -743,7 +945,7 @@ class WorldPipeline(ConfigMixin):
             scaled_in = scheduler.precondition_inputs(sample, sigma)
             cnoise = scheduler.trigflow_precondition_noise(sigma.view(-1))
 
-            x_in = torch.cat([scaled_in, cond_img], dim=1)
+            x_in = torch.cat([scaled_in, cond_img], dim=1).to(model_dtype)
             model_out = self.coarse_model(x_in, noise_labels=torch.tensor([cnoise.item()], device=self.device, dtype=model_dtype), conditional_inputs=cond_inputs)
             sample = scheduler.step(model_out, t, sample).prev_sample
         
@@ -767,10 +969,11 @@ class WorldPipeline(ConfigMixin):
         assert TILE_SIZE % coarse_pool == 0, f"coarse_pooling {coarse_pool} must divide TILE_SIZE {TILE_SIZE}"
         assert TILE_STRIDE % coarse_pool == 0, f"coarse_pooling {coarse_pool} must divide TILE_STRIDE {TILE_STRIDE}"
         
+        model_dtype = self._dtype or torch.float32
         scheduler = EDMDPMSolverMultistepScheduler(sigma_min=0.002, sigma_max=80, sigma_data=0.5)
         weight_window = linear_weight_window(TILE_SIZE // coarse_pool, 'cpu', torch.float32)
         
-        t_cond = torch.atan(COND_SNR).to(self.device)
+        t_cond = torch.atan(COND_SNR).to(self.device, dtype=model_dtype)
         vals = torch.log(torch.tan(t_cond) / 8.0)
         cond_inputs = [v.detach().view(-1) for v in vals]
         
@@ -813,12 +1016,16 @@ class WorldPipeline(ConfigMixin):
         ch_rest_pooled = torch.nn.functional.avg_pool2d(cond_img[2:].unsqueeze(0), kernel_size=n, stride=n).squeeze(0)
         return torch.cat([ch0_pooled, ch1_pooled, ch_rest_pooled], dim=0)
 
-    def _process_latent_conditioning(self, cond_img, histogram_raw, cond_means, cond_stds, noise_level):
-        """Process conditioning for latent stage."""
+    def _process_latent_conditioning(self, cond_img, histogram_raw, cond_means, cond_stds, noise_level, seed_offset: int = 0):
+        """Process conditioning for latent stage. seed_offset makes NaN fill deterministic per tile (portable)."""
+        # Noise added to latent model conditioning. Didn't find it really helped, so disabled.
         COND_MAX_NOISE = 0.0
-        
-        cond_img[0:1] = cond_img[0:1] + torch.randn_like(cond_img[:, 0:1]) * noise_level * COND_MAX_NOISE
-        cond_img[1:2] = cond_img[1:2] + torch.randn_like(cond_img[:, 1:2]) * noise_level * COND_MAX_NOISE
+        n, _, nh, nw = cond_img.shape
+        if COND_MAX_NOISE != 0 and noise_level != 0:
+            s0 = standard_normal(self.seed + 9998 + seed_offset, (n, 1, nh, nw), dtype=np.float32)
+            s1 = standard_normal(self.seed + 9997 + seed_offset, (n, 1, nh, nw), dtype=np.float32)
+            cond_img[0:1] = cond_img[0:1] + torch.from_numpy(s0).to(cond_img.device, cond_img.dtype) * noise_level * COND_MAX_NOISE
+            cond_img[1:2] = cond_img[1:2] + torch.from_numpy(s1).to(cond_img.device, cond_img.dtype) * noise_level * COND_MAX_NOISE
         cond_img = (cond_img - cond_means.to(cond_img.device).view(1, -1, 1, 1)) / cond_stds.to(cond_img.device).view(1, -1, 1, 1)
         
         cond_img[0:1] = cond_img[0:1].nan_to_num(cond_means[0])
@@ -829,7 +1036,13 @@ class WorldPipeline(ConfigMixin):
         climate_means_crop = cond_img[:, 2:6, 1:3, 1:3].mean(dim=(2, 3))
         mask_crop = cond_img[:, 6:7]
         
-        climate_means_crop[torch.isnan(climate_means_crop)] = torch.randn_like(climate_means_crop[torch.isnan(climate_means_crop)])
+        nan_mask = torch.isnan(climate_means_crop)
+        nan_count = nan_mask.sum().item()
+        if nan_count > 0:
+            fill = standard_normal(self.seed + 9999 + seed_offset, (nan_count,), dtype=np.float32)
+            climate_means_crop[nan_mask] = torch.from_numpy(fill).to(
+                device=climate_means_crop.device, dtype=climate_means_crop.dtype
+            )
         
         noise_level_norm = (noise_level - 0.5) * np.sqrt(12)
         return mp_concat([
@@ -855,8 +1068,8 @@ class WorldPipeline(ConfigMixin):
         cond_inputs_list = []
         samples_processed = []
         
-        t_tensor = torch.as_tensor(t, device=self.device)
         model_dtype = self._dtype or torch.float32
+        t_tensor = torch.as_tensor(t, dtype=model_dtype, device=self.device)
         
         for ctx, sample, cond_img in zip(ctxs, samples, cond_imgs):
             if sample is None:
@@ -870,8 +1083,9 @@ class WorldPipeline(ConfigMixin):
             mask = torch.ones((1, 4, 4))
             cond_img = torch.cat([cond_img, mask], dim=0)[None]
             
+            tile_seed_off = ctx[1] * 65536 + ctx[2]
             cond_inputs = self._process_latent_conditioning(
-                cond_img, histogram_raw, cond_means, cond_stds, torch.tensor(NOISE_LEVEL)
+                cond_img, histogram_raw, cond_means, cond_stds, torch.tensor(NOISE_LEVEL), seed_offset=tile_seed_off
             ).to(self.device, dtype=model_dtype)
             
             noise = torch.as_tensor(gaussian_noise_patch(
@@ -992,7 +1206,7 @@ class WorldPipeline(ConfigMixin):
                 self.seed + 5819 + i, ctx[1]*TILE_STRIDE, ctx[2]*TILE_STRIDE, 
                 TILE_SIZE, TILE_SIZE, channels=1, tile_h=TILE_SIZE, tile_w=TILE_SIZE
             ))[None]
-            t = t.view(1, 1, 1, 1).to(self.device)
+            t = t.view(1, 1, 1, 1).to(self.device, dtype=model_dtype)
             z = noise.to(self.device, dtype=model_dtype) * scheduler.config.sigma_data
             x_t = torch.cos(t) * sample + torch.sin(t) * z
             model_in = (x_t / scheduler.config.sigma_data).to(self.device)

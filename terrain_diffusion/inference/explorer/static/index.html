@@ -1,0 +1,1129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Terrain Explorer</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0f1117;
+    --surface: #161924;
+    --card: #1e2235;
+    --border: #2d3458;
+    --accent: #4f8ef7;
+    --accent-dim: #1e3570;
+    --text: #e2e8f0;
+    --muted: #6b7a99;
+    --highlight: #f97316;
+    --track: #2a2f4a;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: system-ui, -apple-system, sans-serif;
+    font-size: 13px;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ── App layout ── */
+  .layout {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+  }
+
+  /* ── Sidebar ── */
+  .sidebar {
+    width: 270px;
+    flex-shrink: 0;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .sidebar h1 {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--accent);
+    padding: 12px 14px 10px;
+    border-bottom: 1px solid var(--border);
+    letter-spacing: 0.03em;
+  }
+
+  .section {
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .section-title {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  /* ── Seed ── */
+  .seed-display {
+    font-size: 18px;
+    font-weight: 600;
+    font-family: monospace;
+    color: var(--text);
+  }
+
+  .seed-row {
+    display: flex;
+    gap: 6px;
+  }
+
+  /* ── Channel buttons ── */
+  .channel-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+
+  /* ── Filter ── */
+  .filter-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .toggle-label {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    cursor: pointer;
+    color: var(--muted);
+    font-size: 12px;
+  }
+
+  .toggle-label input[type="checkbox"] {
+    accent-color: var(--accent);
+    cursor: pointer;
+    width: 14px;
+    height: 14px;
+  }
+
+  .fch {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 8px 10px;
+  }
+
+  .fch-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 6px;
+  }
+
+  .fch-name {
+    font-weight: 600;
+    font-size: 12px;
+  }
+
+  .fch-vals {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+    font-family: monospace;
+    color: var(--accent);
+    margin-top: 4px;
+  }
+
+  /* Dual-range slider */
+  .dual-range {
+    position: relative;
+    height: 20px;
+  }
+
+  .dual-range .track-bg {
+    position: absolute;
+    top: 9px;
+    left: 0;
+    right: 0;
+    height: 3px;
+    background: var(--track);
+    border-radius: 2px;
+    pointer-events: none;
+  }
+
+  .dual-range .track-fill {
+    position: absolute;
+    top: 9px;
+    height: 3px;
+    background: var(--accent);
+    border-radius: 2px;
+    pointer-events: none;
+  }
+
+  .dual-range input[type="range"] {
+    position: absolute;
+    width: 100%;
+    height: 20px;
+    top: 0;
+    background: transparent;
+    pointer-events: none;
+    -webkit-appearance: none;
+    appearance: none;
+    outline: none;
+  }
+
+  .dual-range input[type="range"]::-webkit-slider-thumb {
+    pointer-events: all;
+    -webkit-appearance: none;
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
+    border: 2px solid var(--bg);
+    box-shadow: 0 0 0 1px var(--accent);
+  }
+
+  .dual-range input[type="range"]::-moz-range-thumb {
+    pointer-events: all;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
+    border: 2px solid var(--bg);
+  }
+
+  .dual-range input[type="range"]:disabled::-webkit-slider-thumb {
+    background: var(--muted);
+    box-shadow: none;
+  }
+
+  .fch-hint {
+    font-size: 10px;
+    color: var(--muted);
+    text-align: center;
+    padding: 4px 0 2px;
+  }
+
+  /* ── Map area ── */
+  .map-area {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    padding: 8px;
+    min-width: 0;
+    min-height: 0;
+  }
+
+  .map-panel {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .panel-header {
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+
+  .panel-title { font-weight: 600; font-size: 12px; flex-shrink: 0; }
+
+  .panel-info {
+    color: var(--muted);
+    font-size: 11px;
+    font-family: monospace;
+    margin-left: auto;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+  }
+
+  /* nav grid (pan buttons around map) */
+  .nav-grid {
+    display: grid;
+    grid-template-columns: 28px 1fr 28px;
+    grid-template-rows: 28px 1fr 28px;
+    flex: 1;
+    min-height: 0;
+    padding: 5px;
+    gap: 3px;
+  }
+
+  .pan-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text);
+    cursor: pointer;
+    font-size: 13px;
+    width: 100%;
+    height: 100%;
+    transition: background 0.12s;
+  }
+  .pan-btn:hover { background: var(--accent-dim); border-color: var(--accent); }
+  .pan-btn:active { background: var(--accent); }
+
+  .map-container {
+    grid-column: 2;
+    grid-row: 2;
+    position: relative;
+    overflow: hidden;
+    background: #090b11;
+    border-radius: 3px;
+    cursor: crosshair;
+  }
+
+  .map-img {
+    width: 100%;
+    height: 100%;
+    display: block;
+    transition: opacity 0.2s;
+  }
+
+  .map-img.loading { opacity: 0.35; }
+
+  #coarse-img { image-rendering: pixelated; }
+
+  .map-placeholder {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--muted);
+    font-size: 12px;
+    pointer-events: none;
+  }
+
+  .spinner {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    width: 16px;
+    height: 16px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    display: none;
+  }
+  .spinner.active { display: block; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .tile-marker {
+    position: absolute;
+    border: 2px solid var(--highlight);
+    box-shadow: 0 0 0 1px rgba(249,115,22,0.3);
+    pointer-events: none;
+    display: none;
+  }
+
+  .btn-up    { grid-column: 2; grid-row: 1; }
+  .btn-down  { grid-column: 2; grid-row: 3; }
+  .btn-left  { grid-column: 1; grid-row: 2; }
+  .btn-right { grid-column: 3; grid-row: 2; }
+
+  /* ── Generic controls ── */
+  input[type="number"], input[type="text"] {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text);
+    padding: 4px 7px;
+    font-size: 12px;
+    outline: none;
+    flex: 1;
+    min-width: 0;
+  }
+  input[type="number"]:focus, input[type="text"]:focus { border-color: var(--accent); }
+
+  button {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text);
+    padding: 4px 10px;
+    font-size: 12px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.12s, border-color 0.12s;
+    flex-shrink: 0;
+  }
+  button:hover { background: var(--accent-dim); border-color: var(--accent); }
+  button:active { background: var(--accent); }
+  button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover { opacity: 0.85; }
+
+  button.fch-clear {
+    padding: 0 6px;
+    font-size: 13px;
+    line-height: 1;
+    color: var(--muted);
+    background: transparent;
+    border: none;
+    min-width: 20px;
+  }
+  button.fch-clear:hover { color: var(--text); background: transparent; }
+
+  /* ── Status bar ── */
+  .status-bar {
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    padding: 3px 14px;
+    color: var(--muted);
+    font-size: 11px;
+    font-family: monospace;
+    flex-shrink: 0;
+  }
+
+  /* ── Hover tooltip ── */
+  .hover-tooltip {
+    position: fixed;
+    background: rgba(10, 12, 22, 0.95);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 10px 14px;
+    font-family: monospace;
+    font-size: 13px;
+    line-height: 1.7;
+    pointer-events: none;
+    display: none;
+    z-index: 200;
+    min-width: 180px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+  }
+
+  .hover-tooltip .ht-coord {
+    font-size: 11px;
+    color: var(--muted);
+    margin-bottom: 4px;
+  }
+
+  .hover-tooltip .ht-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+  }
+
+  .hover-tooltip .ht-label { color: var(--muted); }
+  .hover-tooltip .ht-val   { color: var(--text); font-weight: 600; }
+
+  /* ── Coordinate Helper ── */
+  .coord-scale-btns { display: flex; gap: 4px; }
+  .coord-scale-btn {
+    flex: 1;
+    padding: 3px 0;
+    font-size: 11px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    color: var(--muted);
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .coord-scale-btn.active { background: var(--accent-dim); border-color: var(--accent); color: var(--accent); }
+  .coord-block-size { font-size: 11px; color: var(--muted); }
+  .coord-scale-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .coord-scale-track {
+    flex: 1;
+    height: 8px;
+    position: relative;
+    border-left: 2px solid var(--accent);
+    border-right: 2px solid var(--accent);
+    border-bottom: 2px solid var(--accent);
+    border-radius: 0 0 2px 2px;
+  }
+  .coord-scale-fill {
+    position: absolute;
+    left: 0; top: 0;
+    height: 100%;
+    background: var(--accent);
+    opacity: 0.3;
+    border-radius: 0 0 2px 2px;
+    width: 0;
+  }
+  .coord-scale-lbl { font-size: 11px; color: var(--accent); white-space: nowrap; font-weight: 600; }
+  .coord-hint      { font-size: 11px; color: var(--muted); font-style: italic; }
+  .coord-xyz { display: flex; flex-direction: column; gap: 3px; }
+  .coord-xy-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+  }
+  .coord-xy-lbl { color: var(--muted); }
+  .coord-xy-val { font-family: monospace; color: var(--text); font-weight: 600; }
+  .coord-tp {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 5px 8px;
+    font-family: monospace;
+    font-size: 11px;
+    color: var(--text);
+    cursor: pointer;
+    user-select: all;
+  }
+  .coord-tp:hover { border-color: var(--accent); }
+  .coord-tp-copied { border-color: #22c55e !important; color: #22c55e; }
+</style>
+</head>
+<body>
+
+<div class="layout">
+
+  <!-- ── Sidebar ── -->
+  <aside class="sidebar">
+    <h1>Terrain Explorer</h1>
+
+    <!-- Seed -->
+    <div class="section">
+      <div class="section-title">Seed</div>
+      <div class="seed-display" id="seed-display">—</div>
+      <div class="seed-row">
+        <input type="number" id="seed-input" placeholder="Enter seed…">
+        <button id="btn-set-seed" class="primary">Set</button>
+      </div>
+      <button id="btn-new-seed">Random</button>
+    </div>
+
+    <!-- Channel -->
+    <div class="section">
+      <div class="section-title">Coarse Channel</div>
+      <div class="channel-grid" id="channel-buttons"></div>
+    </div>
+
+    <!-- Filter -->
+    <div class="section">
+      <div class="filter-header">
+        <div class="section-title">Filter</div>
+        <label class="toggle-label">
+          <input type="checkbox" id="filter-enable">
+          Enable
+        </label>
+      </div>
+      <button id="btn-stats">Load Stats for Sliders</button>
+      <div id="filter-channels"></div>
+    </div>
+
+    <!-- Coordinate Helper -->
+    <div class="section">
+      <div class="section-title">Coordinate Helper</div>
+      <div class="coord-scale-btns" id="coord-scale-btns">
+        <button class="coord-scale-btn active" data-scale="1">1×</button>
+        <button class="coord-scale-btn" data-scale="2">2×</button>
+        <button class="coord-scale-btn" data-scale="4">4×</button>
+        <button class="coord-scale-btn" data-scale="8">8×</button>
+      </div>
+      <div class="coord-block-size" id="coord-block-size">—</div>
+      <div class="coord-scale-row">
+        <div class="coord-scale-track">
+          <div class="coord-scale-fill" id="coord-scale-fill"></div>
+        </div>
+        <span class="coord-scale-lbl" id="coord-scale-lbl">—</span>
+      </div>
+      <div id="coord-rows"><span class="coord-hint">Click detail map to see coordinates</span></div>
+    </div>
+  </aside>
+
+  <!-- ── Maps ── -->
+  <div class="map-area">
+
+    <!-- Coarse -->
+    <div class="map-panel">
+      <div class="panel-header">
+        <span class="panel-title">Coarse Map</span>
+        <button id="coarse-zoom-in">Zoom In</button>
+        <button id="coarse-zoom-out">Zoom Out</button>
+        <span class="coord-scale-lbl" id="coarse-zoom-label">100x100</span>
+        <span class="panel-info" id="coarse-info">click a tile to load detail</span>
+      </div>
+      <div class="nav-grid">
+        <button class="pan-btn btn-up"    id="coarse-up">↑</button>
+        <button class="pan-btn btn-left"  id="coarse-left">←</button>
+        <div class="map-container" id="coarse-container">
+          <img id="coarse-img" class="map-img" alt="coarse map">
+          <div class="tile-marker" id="tile-marker"></div>
+          <div class="spinner" id="coarse-spinner"></div>
+          <div class="map-placeholder" id="coarse-placeholder">Loading…</div>
+        </div>
+        <button class="pan-btn btn-right" id="coarse-right">→</button>
+        <button class="pan-btn btn-down"  id="coarse-down">↓</button>
+      </div>
+    </div>
+
+    <!-- Detail -->
+    <div class="map-panel">
+      <div class="panel-header">
+        <span class="panel-title">Detail Map</span>
+        <button class="active" id="mode-relief">Relief</button>
+        <button id="mode-elevation">Elevation</button>
+        <button id="mode-temperature">Temperature</button>
+        <span class="panel-info" id="detail-info">click coarse map to load</span>
+      </div>
+      <div class="nav-grid">
+        <button class="pan-btn btn-up"    id="detail-up">↑</button>
+        <button class="pan-btn btn-left"  id="detail-left">←</button>
+        <div class="map-container" id="detail-container">
+          <img id="detail-img" class="map-img" alt="detail map" style="display:none">
+          <div class="spinner" id="detail-spinner"></div>
+          <div class="map-placeholder" id="detail-placeholder">Click coarse map to generate</div>
+        </div>
+        <button class="pan-btn btn-right" id="detail-right">→</button>
+        <button class="pan-btn btn-down"  id="detail-down">↓</button>
+      </div>
+    </div>
+
+  </div><!-- .map-area -->
+</div><!-- .layout -->
+
+<div class="status-bar" id="status-bar">Connecting…</div>
+<div class="hover-tooltip" id="hover-tooltip"></div>
+
+<script>
+  const COARSE_PAN_STEP = 20;
+  const COARSE_WINDOW_MIN = 8;
+  const COARSE_WINDOW_MAX = 120;
+  const DETAIL_PAN_STEP = 256;
+  const DETAIL_SIZE = 1024;
+
+  const CHANNEL_META = [
+    { ch: 0, name: 'Elev',    unit: 'm',  step: 50,   defMin: -8000, defMax: 8000 },
+    { ch: 2, name: 'Temp',    unit: '°',  step: 1,    defMin: -30,   defMax: 40   },
+    { ch: 3, name: 'T std',   unit: '°',  step: 0.5,  defMin: 0,     defMax: 20   },
+    { ch: 4, name: 'Precip',  unit: '',   step: 10,   defMin: 0,     defMax: 2000 },
+    { ch: 5, name: 'P CV',    unit: '',   step: 1,    defMin: 0,     defMax: 200  },
+  ];
+
+  const state = {
+    seed: null,
+    channel: 0,
+    channels: [],
+    nativeResolution: null,
+    coordScale: 1,
+    coarseOffsetI: 0,
+    coarseOffsetJ: 0,
+    coarseWindow: 50,
+    coarseData: null,
+    detailRaw: null,
+    detailCI: null,
+    detailCJ: null,
+    detailPanI: 0,
+    detailPanJ: 0,
+    detailMode: 'relief',
+  };
+
+  // ── DOM refs ──
+  const seedDisplay     = document.getElementById('seed-display');
+  const seedInput       = document.getElementById('seed-input');
+  const btnSetSeed      = document.getElementById('btn-set-seed');
+  const btnNewSeed      = document.getElementById('btn-new-seed');
+  const channelButtons  = document.getElementById('channel-buttons');
+  const filterEnable    = document.getElementById('filter-enable');
+  const filterChannels  = document.getElementById('filter-channels');
+  const btnStats        = document.getElementById('btn-stats');
+  const coarseContainer = document.getElementById('coarse-container');
+  const coarseImg       = document.getElementById('coarse-img');
+  const coarseSpinner   = document.getElementById('coarse-spinner');
+  const coarsePlaceholder = document.getElementById('coarse-placeholder');
+  const coarseInfo      = document.getElementById('coarse-info');
+  const coarseZoomLabel = document.getElementById('coarse-zoom-label');
+  const tileMarker      = document.getElementById('tile-marker');
+  const detailImg       = document.getElementById('detail-img');
+  const detailSpinner   = document.getElementById('detail-spinner');
+  const detailPlaceholder = document.getElementById('detail-placeholder');
+  const detailInfo      = document.getElementById('detail-info');
+  const statusBar       = document.getElementById('status-bar');
+  const tooltip         = document.getElementById('hover-tooltip');
+  const coordRows       = document.getElementById('coord-rows');
+  const coordScaleFill  = document.getElementById('coord-scale-fill');
+  const coordScaleLbl   = document.getElementById('coord-scale-lbl');
+  const coordBlockSize  = document.getElementById('coord-block-size');
+
+  function clamp(value, min, max) {
+    return Math.min(Math.max(value, min), max);
+  }
+
+  // ── Build filter channel widgets ──
+  CHANNEL_META.forEach(({ ch, name, unit, step, defMin, defMax }) => {
+    const div = document.createElement('div');
+    div.className = 'fch';
+    div.id = `fch-${ch}`;
+    div.innerHTML = `
+      <div class="fch-header">
+        <span class="fch-name">${name}</span>
+        <button class="fch-clear" title="Clear">×</button>
+      </div>
+      <div class="dual-range">
+        <div class="track-bg"></div>
+        <div class="track-fill" id="fch-${ch}-fill"></div>
+        <input type="range" id="fch-${ch}-min" min="${defMin}" max="${defMax}" step="${step}" value="${defMin}">
+        <input type="range" id="fch-${ch}-max" min="${defMin}" max="${defMax}" step="${step}" value="${defMax}">
+      </div>
+      <div class="fch-vals">
+        <span id="fch-${ch}-min-val">—</span>
+        <span id="fch-${ch}-max-val">—</span>
+      </div>
+      <div class="fch-hint" id="fch-${ch}-hint">Click "Load Stats" for accurate ranges</div>
+    `;
+    filterChannels.appendChild(div);
+
+    const minEl  = document.getElementById(`fch-${ch}-min`);
+    const maxEl  = document.getElementById(`fch-${ch}-max`);
+    const fill   = document.getElementById(`fch-${ch}-fill`);
+    const minVal = document.getElementById(`fch-${ch}-min-val`);
+    const maxVal = document.getElementById(`fch-${ch}-max-val`);
+
+    function updateFill() {
+      const lo = parseFloat(minEl.value);
+      const hi = parseFloat(maxEl.value);
+      const rangeMin = parseFloat(minEl.min);
+      const rangeMax = parseFloat(minEl.max);
+      const span = rangeMax - rangeMin || 1;
+      fill.style.left  = ((lo - rangeMin) / span * 100) + '%';
+      fill.style.width = ((hi - lo) / span * 100) + '%';
+      const prec = step < 1 ? 2 : 0;
+      minVal.textContent = lo.toFixed(prec) + unit;
+      maxVal.textContent = hi.toFixed(prec) + unit;
+    }
+
+    minEl.addEventListener('input', () => {
+      if (parseFloat(minEl.value) > parseFloat(maxEl.value)) maxEl.value = minEl.value;
+      updateFill();
+      debouncedLoadCoarse();
+    });
+    maxEl.addEventListener('input', () => {
+      if (parseFloat(maxEl.value) < parseFloat(minEl.value)) minEl.value = maxEl.value;
+      updateFill();
+      debouncedLoadCoarse();
+    });
+    div.querySelector('.fch-clear').addEventListener('click', () => {
+      minEl.value = minEl.min;
+      maxEl.value = minEl.max;
+      updateFill();
+      debouncedLoadCoarse();
+    });
+
+    updateFill();
+  });
+
+  // ── Coordinate helper ──
+  function niceScaleKm(targetKm) {
+    const options = [0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000];
+    return options.reduce((best, v) => Math.abs(v - targetKm) < Math.abs(best - targetKm) ? v : best);
+  }
+
+  function updateCoordScale() {
+    const res = state.nativeResolution;
+    if (!res) return;
+    const scale = state.coordScale;
+    const mPerBlock = res / scale;
+    coordBlockSize.textContent = `1 block = ${mPerBlock % 1 === 0 ? mPerBlock : mPerBlock.toFixed(2)} m`;
+    const totalKm = DETAIL_SIZE * res / 1000;
+    const barKm = niceScaleKm(totalKm * 0.25);
+    coordScaleFill.style.width = (barKm / totalKm * 100).toFixed(1) + '%';
+    coordScaleLbl.textContent = barKm >= 1 ? `${barKm} km` : `${barKm * 1000} m`;
+  }
+
+  function updateCoarseZoomLabel() {
+    const size = state.coarseWindow * 2;
+    coarseZoomLabel.textContent = `${size}x${size}`;
+  }
+
+  function setCoarseWindow(nextWindow) {
+    const clamped = clamp(nextWindow, COARSE_WINDOW_MIN, COARSE_WINDOW_MAX);
+    if (clamped === state.coarseWindow) return;
+    state.coarseWindow = clamped;
+    updateCoarseZoomLabel();
+    loadCoarse();
+  }
+
+  let _lastDetailClick = null;
+
+  function showDetailCoords(row, col) {
+    const { detailCI: ci, detailCJ: cj, detailPanI: pi, detailPanJ: pj, detailRaw } = state;
+    if (ci === null || !detailRaw) return;
+    _lastDetailClick = { row, col };
+    const scale = state.coordScale;
+    const centerI = ci * 256 + pi;
+    const centerJ = cj * 256 + pj;
+    const i1x = centerI - detailRaw.h / 2 + row;
+    const j1x = centerJ - detailRaw.w / 2 + col;
+    const mcX = Math.round(j1x * scale);
+    const mcZ = Math.round(i1x * scale);
+    const tp = `/tp ${mcX} ~ ${mcZ}`;
+    coordRows.innerHTML = `
+      <div class="coord-xyz">
+        <div class="coord-xy-row"><span class="coord-xy-lbl">x (j)</span><span class="coord-xy-val">${mcX}</span></div>
+        <div class="coord-xy-row"><span class="coord-xy-lbl">z (i)</span><span class="coord-xy-val">${mcZ}</span></div>
+      </div>
+      <div class="coord-tp" id="coord-tp-btn" title="Click to copy">${tp}</div>`;
+    document.getElementById('coord-tp-btn').addEventListener('click', () => {
+      navigator.clipboard.writeText(tp).then(() => {
+        const btn = document.getElementById('coord-tp-btn');
+        btn.classList.add('coord-tp-copied');
+        btn.textContent = 'Copied!';
+        setTimeout(() => { btn.classList.remove('coord-tp-copied'); btn.textContent = tp; }, 1200);
+      });
+    });
+  }
+
+  // ── Coord scale buttons ──
+  document.querySelectorAll('.coord-scale-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      state.coordScale = parseInt(btn.dataset.scale);
+      document.querySelectorAll('.coord-scale-btn').forEach(b => b.classList.toggle('active', b === btn));
+      updateCoordScale();
+      if (_lastDetailClick) showDetailCoords(_lastDetailClick.row, _lastDetailClick.col);
+    });
+  });
+
+  // ── Debounce ──
+  let debounceTimer = null;
+  function debouncedLoadCoarse() {
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(loadCoarse, 350);
+  }
+
+  // ── URL builders ──
+  function coarseUrl() {
+    const { seed, channel, coarseOffsetI, coarseOffsetJ, coarseWindow } = state;
+    const ci0 = coarseOffsetI - coarseWindow, ci1 = coarseOffsetI + coarseWindow;
+    const cj0 = coarseOffsetJ - coarseWindow, cj1 = coarseOffsetJ + coarseWindow;
+    let url = `/api/coarse.png?channel=${channel}&ci0=${ci0}&ci1=${ci1}&cj0=${cj0}&cj1=${cj1}&_s=${seed}`;
+    if (filterEnable.checked) {
+      CHANNEL_META.forEach(({ ch }) => {
+        const minEl = document.getElementById(`fch-${ch}-min`);
+        const maxEl = document.getElementById(`fch-${ch}-max`);
+        const lo = parseFloat(minEl.value), hi = parseFloat(maxEl.value);
+        if (lo > parseFloat(minEl.min)) url += `&ch${ch}_min=${lo}`;
+        if (hi < parseFloat(maxEl.max)) url += `&ch${ch}_max=${hi}`;
+      });
+    }
+    return url;
+  }
+
+  function detailUrl() {
+    const { seed, detailCI: ci, detailCJ: cj, detailPanI: pi, detailPanJ: pj, detailMode: mode } = state;
+    return `/api/detail.png?ci=${ci}&cj=${cj}&detail_size=${DETAIL_SIZE}&pan_i=${pi}&pan_j=${pj}&mode=${mode}&_s=${seed}`;
+  }
+
+  // ── Load helpers ──
+  function loadCoarse() {
+    state.coarseData = null;
+    coarseImg.classList.add('loading');
+    coarseSpinner.classList.add('active');
+    coarsePlaceholder.style.display = 'none';
+    coarseImg.src = coarseUrl();
+  }
+
+  async function loadCoarseData() {
+    const { coarseOffsetI: oi, coarseOffsetJ: oj, coarseWindow: w, seed } = state;
+    const ci0 = oi - w, ci1 = oi + w, cj0 = oj - w, cj1 = oj + w;
+    try {
+      const res = await fetch(`/api/coarse_data.json?ci0=${ci0}&ci1=${ci1}&cj0=${cj0}&cj1=${cj1}&_s=${seed}`);
+      state.coarseData = await res.json();
+    } catch (_) {}
+  }
+
+  function loadDetail() {
+    if (state.detailCI === null) return;
+    state.detailRaw = null;
+    detailImg.style.display = 'block';
+    detailImg.classList.add('loading');
+    detailSpinner.classList.add('active');
+    detailPlaceholder.style.display = 'none';
+    detailImg.src = detailUrl();
+    detailInfo.textContent = `ci=${state.detailCI}, cj=${state.detailCJ} | pan=(${state.detailPanI},${state.detailPanJ})`;
+  }
+
+  async function loadDetailRaw() {
+    if (state.detailCI === null) return;
+    const { detailCI: ci, detailCJ: cj, detailPanI: pi, detailPanJ: pj, seed } = state;
+    try {
+      const res = await fetch(`/api/detail_raw?ci=${ci}&cj=${cj}&detail_size=${DETAIL_SIZE}&pan_i=${pi}&pan_j=${pj}&_s=${seed}`);
+      const h = parseInt(res.headers.get('X-Height'));
+      const w = parseInt(res.headers.get('X-Width'));
+      const hasTemp = res.headers.get('X-Has-Temp') === '1';
+      const buf = await res.arrayBuffer();
+      state.detailRaw = {
+        elev: new Int16Array(buf, 0, h * w),
+        temp: hasTemp ? new Float32Array(buf, h * w * 2, h * w) : null,
+        h, w,
+      };
+    } catch (_) {}
+  }
+
+  // ── Image events ──
+  coarseImg.onload = () => {
+    coarseImg.classList.remove('loading');
+    coarseSpinner.classList.remove('active');
+    const { coarseOffsetI: oi, coarseOffsetJ: oj, coarseWindow: w } = state;
+    coarseInfo.textContent = `ci=[${oi-w}…${oi+w}], cj=[${oj-w}…${oj+w}]`;
+    updateTileMarker();
+    loadCoarseData();
+  };
+  coarseImg.onerror = () => {
+    coarseImg.classList.remove('loading');
+    coarseSpinner.classList.remove('active');
+    statusBar.textContent = 'Error loading coarse map';
+  };
+  detailImg.onload = () => {
+    detailImg.classList.remove('loading');
+    detailSpinner.classList.remove('active');
+    loadDetailRaw();
+  };
+  detailImg.onerror = () => {
+    detailImg.classList.remove('loading');
+    detailSpinner.classList.remove('active');
+    statusBar.textContent = 'Error loading detail map';
+  };
+
+  // ── Tile marker ──
+  function updateTileMarker() {
+    if (state.detailCI === null) { tileMarker.style.display = 'none'; return; }
+    const { detailCI: dci, detailCJ: dcj, coarseOffsetI: oi, coarseOffsetJ: oj, coarseWindow: w } = state;
+    const ci0 = oi - w, ci1 = oi + w, cj0 = oj - w, cj1 = oj + w;
+    if (dci < ci0 || dci >= ci1 || dcj < cj0 || dcj >= cj1) { tileMarker.style.display = 'none'; return; }
+    const tI = ci1 - ci0, tJ = cj1 - cj0;
+    tileMarker.style.left   = ((dcj - cj0) / tJ * 100) + '%';
+    tileMarker.style.top    = ((dci - ci0) / tI * 100) + '%';
+    tileMarker.style.width  = (1 / tJ * 100) + '%';
+    tileMarker.style.height = (1 / tI * 100) + '%';
+    tileMarker.style.display = 'block';
+  }
+
+  // ── Tooltip helpers ──
+  function showTooltip(e, html) {
+    tooltip.innerHTML = html;
+    tooltip.style.display = 'block';
+    const x = e.clientX + 18;
+    const y = e.clientY - tooltip.offsetHeight / 2;
+    tooltip.style.left = Math.min(x, window.innerWidth  - tooltip.offsetWidth  - 8) + 'px';
+    tooltip.style.top  = Math.max(8, Math.min(y, window.innerHeight - tooltip.offsetHeight - 8)) + 'px';
+  }
+
+  function hideTooltip() { tooltip.style.display = 'none'; }
+
+  // ── Coarse hover ──
+  coarseImg.addEventListener('mousemove', (e) => {
+    if (!state.coarseData) return;
+    const { ci0, ci1, cj0, cj1, channels } = state.coarseData;
+    const rect = coarseImg.getBoundingClientRect();
+    const ci = Math.floor(ci0 + (e.clientY - rect.top)  / rect.height * (ci1 - ci0));
+    const cj = Math.floor(cj0 + (e.clientX - rect.left) / rect.width  * (cj1 - cj0));
+    const row = ci - ci0, col = cj - cj0;
+    if (row < 0 || row >= ci1 - ci0 || col < 0 || col >= cj1 - cj0) return;
+    let html = `<div class="ht-coord">ci=${ci}, cj=${cj}</div>`;
+    Object.entries(channels).forEach(([name, data]) => {
+      html += `<div class="ht-row"><span class="ht-label">${name}</span><span class="ht-val">${data[row][col].toFixed(1)}</span></div>`;
+    });
+    showTooltip(e, html);
+  });
+  coarseImg.addEventListener('mouseleave', hideTooltip);
+
+  // ── Coarse click → load detail ──
+  coarseImg.addEventListener('click', (e) => {
+    const { coarseOffsetI: oi, coarseOffsetJ: oj, coarseWindow: w } = state;
+    const ci0 = oi - w, ci1 = oi + w, cj0 = oj - w, cj1 = oj + w;
+    const rect = coarseImg.getBoundingClientRect();
+    state.detailCI = Math.floor(ci0 + (e.clientY - rect.top)  / rect.height * (ci1 - ci0));
+    state.detailCJ = Math.floor(cj0 + (e.clientX - rect.left) / rect.width  * (cj1 - cj0));
+    state.detailPanI = 0;
+    state.detailPanJ = 0;
+    updateTileMarker();
+    loadDetail();
+    statusBar.textContent = `Selected tile ci=${state.detailCI}, cj=${state.detailCJ}`;
+  });
+
+  // ── Detail hover ──
+  detailImg.addEventListener('mousemove', (e) => {
+    if (!state.detailRaw) return;
+    const { elev, temp, h, w } = state.detailRaw;
+    const rect = detailImg.getBoundingClientRect();
+    const col = Math.floor((e.clientX - rect.left) / rect.width  * w);
+    const row = Math.floor((e.clientY - rect.top)  / rect.height * h);
+    if (row < 0 || row >= h || col < 0 || col >= w) return;
+    const idx = row * w + col;
+    let html = `<div class="ht-row"><span class="ht-label">Elevation</span><span class="ht-val">${elev[idx]} m</span></div>`;
+    if (temp) html += `<div class="ht-row"><span class="ht-label">Temperature</span><span class="ht-val">${temp[idx].toFixed(2)}°</span></div>`;
+    showTooltip(e, html);
+  });
+  detailImg.addEventListener('mouseleave', hideTooltip);
+
+  detailImg.addEventListener('click', (e) => {
+    if (!state.detailRaw) return;
+    const { h, w } = state.detailRaw;
+    const rect = detailImg.getBoundingClientRect();
+    const col = Math.floor((e.clientX - rect.left) / rect.width  * w);
+    const row = Math.floor((e.clientY - rect.top)  / rect.height * h);
+    if (row < 0 || row >= h || col < 0 || col >= w) return;
+    showDetailCoords(row, col);
+  });
+
+  // ── Channel buttons ──
+  function buildChannelButtons(names) {
+    channelButtons.innerHTML = '';
+    names.forEach((name, i) => {
+      const btn = document.createElement('button');
+      btn.textContent = name;
+      if (i === state.channel) btn.classList.add('active');
+      btn.addEventListener('click', () => {
+        state.channel = i;
+        channelButtons.querySelectorAll('button').forEach((b, j) => b.classList.toggle('active', j === i));
+        loadCoarse();
+      });
+      channelButtons.appendChild(btn);
+    });
+  }
+
+  // ── Detail mode ──
+  ['relief', 'elevation', 'temperature'].forEach(mode => {
+    document.getElementById(`mode-${mode}`).addEventListener('click', () => {
+      state.detailMode = mode;
+      ['relief','elevation','temperature'].forEach(m =>
+        document.getElementById(`mode-${m}`).classList.toggle('active', m === mode));
+      loadDetail();
+    });
+  });
+
+  // ── Seed ──
+  btnSetSeed.addEventListener('click', async () => {
+    const v = seedInput.value.trim();
+    if (!/^-?\d+$/.test(v)) return;
+    const res = await fetch('/api/seed', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ seed: v }),
+    });
+    const data = await res.json();
+    state.seed = data.seed;
+    seedDisplay.textContent = data.seed;
+    seedInput.value = '';
+    resetDetail();
+    loadCoarse();
+    statusBar.textContent = `Seed set to ${data.seed}`;
+  });
+
+  btnNewSeed.addEventListener('click', async () => {
+    const res = await fetch('/api/new_seed', { method: 'POST' });
+    const data = await res.json();
+    state.seed = data.seed;
+    seedDisplay.textContent = data.seed;
+    resetDetail();
+    loadCoarse();
+    statusBar.textContent = `New seed: ${data.seed}`;
+  });
+
+  function resetDetail() {
+    state.detailCI = state.detailCJ = null;
+    state.detailPanI = state.detailPanJ = 0;
+    state.detailRaw = null;
+    detailImg.style.display = 'none';
+    detailPlaceholder.style.display = '';
+    detailInfo.textContent = 'click coarse map to load';
+    tileMarker.style.display = 'none';
+  }
+
+  // ── Filter toggle ──
+  filterEnable.addEventListener('change', loadCoarse);
+
+  // ── Stats ──
+  btnStats.addEventListener('click', async () => {
+    const { coarseOffsetI: oi, coarseOffsetJ: oj, coarseWindow: w } = state;
+    const ci0 = oi - w, ci1 = oi + w, cj0 = oj - w, cj1 = oj + w;
+    const res = await fetch(`/api/coarse_stats?ci0=${ci0}&ci1=${ci1}&cj0=${cj0}&cj1=${cj1}`);
+    const data = await res.json();
+    CHANNEL_META.forEach(({ ch, step }) => {
+      if (!data[ch]) return;
+      const minEl = document.getElementById(`fch-${ch}-min`);
+      const maxEl = document.getElementById(`fch-${ch}-max`);
+      const hint  = document.getElementById(`fch-${ch}-hint`);
+      minEl.min = minEl.value = data[ch].min;
+      minEl.max = data[ch].max;
+      minEl.step = step;
+      maxEl.min = data[ch].min;
+      maxEl.max = maxEl.value = data[ch].max;
+      maxEl.step = step;
+      if (hint) hint.style.display = 'none';
+      // trigger fill update
+      minEl.dispatchEvent(new Event('input'));
+    });
+    const parts = Object.values(data).map(s => `${s.name}: [${s.min}, ${s.max}]`);
+    statusBar.textContent = 'Stats — ' + parts.join('  |  ');
+  });
+
+  // ── Pan ──
+  document.getElementById('coarse-up').addEventListener('click',    () => { state.coarseOffsetI -= COARSE_PAN_STEP; loadCoarse(); });
+  document.getElementById('coarse-down').addEventListener('click',  () => { state.coarseOffsetI += COARSE_PAN_STEP; loadCoarse(); });
+  document.getElementById('coarse-left').addEventListener('click',  () => { state.coarseOffsetJ -= COARSE_PAN_STEP; loadCoarse(); });
+  document.getElementById('coarse-right').addEventListener('click', () => { state.coarseOffsetJ += COARSE_PAN_STEP; loadCoarse(); });
+  document.getElementById('coarse-zoom-in').addEventListener('click', () => setCoarseWindow(Math.round(state.coarseWindow * 0.8)));
+  document.getElementById('coarse-zoom-out').addEventListener('click', () => setCoarseWindow(Math.round(state.coarseWindow * 1.25)));
+
+  coarseContainer.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const factor = e.deltaY < 0 ? 0.85 : 1.15;
+    setCoarseWindow(Math.round(state.coarseWindow * factor));
+  }, { passive: false });
+
+  document.getElementById('detail-up').addEventListener('click',    () => { if (state.detailCI !== null) { state.detailPanI -= DETAIL_PAN_STEP; loadDetail(); } });
+  document.getElementById('detail-down').addEventListener('click',  () => { if (state.detailCI !== null) { state.detailPanI += DETAIL_PAN_STEP; loadDetail(); } });
+  document.getElementById('detail-left').addEventListener('click',  () => { if (state.detailCI !== null) { state.detailPanJ -= DETAIL_PAN_STEP; loadDetail(); } });
+  document.getElementById('detail-right').addEventListener('click', () => { if (state.detailCI !== null) { state.detailPanJ += DETAIL_PAN_STEP; loadDetail(); } });
+
+  // ── Init ──
+  async function init() {
+    try {
+      const res = await fetch('/api/status');
+      const data = await res.json();
+      state.seed = data.seed;
+      state.channels = data.channels;
+      state.nativeResolution = data.native_resolution || 90;
+      seedDisplay.textContent = data.seed;
+      buildChannelButtons(data.channels);
+      updateCoordScale();
+      updateCoarseZoomLabel();
+      statusBar.textContent = `Connected — seed ${data.seed}`;
+      loadCoarse();
+    } catch (e) {
+      statusBar.textContent = 'Failed to connect to server';
+    }
+  }
+
+  init();
+</script>
+</body>
+</html>

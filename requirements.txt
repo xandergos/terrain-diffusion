@@ -14,6 +14,7 @@ lpips>=0.1.4
 matplotlib>=3.9.2
 networkx>=3.2.1
 numpy>=2.1.3
+numba>=0.59.0
 optuna>=4.1.0
 Pillow>=11.0.0
 pyyaml>=6.0.1
@@ -28,6 +29,8 @@ torchvision>=0.19.1
 tifffile>=2024.9.20
 tqdm>=4.66.5
 wandb>=0.18.2
-infinite-tensor>=0.2.2
+infinite-tensor>=0.2.3
 torch-fidelity>=0.3.0
 pyfastnoiselite==0.0.6
+fastapi>=0.115.0
+uvicorn>=0.32.0
