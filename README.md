@@ -92,7 +92,7 @@ python -m terrain_diffusion azgaar-to-tiff "MyMap.json" azgaar-output/ --scale 1
 
 ### TIFF export
 
-Generate a high-resolution elevation GeoTIFF from a folder of conditioning TIFFs. **Use the directory produced by [Azgaar to TIFF](#azgaar-to-tiff)** as `tiff_dir` (same filenames; see below). The tool treats the input as the "coarse map" and lets Terrain Diffusion refine it, increasing resolution 256x. Use `--snr` to set refinement strength: 5 comma-separated values, one for each input. I found `0.2,0.2,1.0,0.2,1.0` to work well for Azgaar.
+Generate a high-resolution elevation GeoTIFF from a folder of conditioning TIFFs. Y. The input is a folder containing the TIFF files below, which are first refined by the model, and then resolution is increased 256x on both axes. Use `--snr` to set refinement strength: 5 comma-separated values, one for each input. I found `0.2,0.2,1.0,0.2,1.0` to work well for Azgaar.
 
 Expected files in the folder (missing files fall back to Perlin noise; at least one is required):
 
@@ -101,6 +101,8 @@ Expected files in the folder (missing files fall back to Perlin noise; at least 
 - `temperature_std.tif` — temperature variability (°C)
 - `precipitation.tif` — annual precipitation (mm)
 - `precipitation_cv.tif` — precipitation variability (%)
+
+ou may use the directory produced by [Azgaar to TIFF](#azgaar-to-tiff) as `tiff_dir`.
 
 ```
 python -m terrain_diffusion xandergos/terrain-diffusion-90m tiff-export azgaar-output/ output.tif --snr 0.2,0.2,1.0,0.2,1.0
