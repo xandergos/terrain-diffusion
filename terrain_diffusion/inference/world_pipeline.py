@@ -821,9 +821,9 @@ class WorldPipeline(ConfigMixin):
         self.rebuild()
 
     def _sample_raw_conditioning(self, ci0: int, ci1: int, cj0: int, cj1: int) -> np.ndarray:
-        """Perlin stack for ``[ci0:ci1) × [cj0:cj1)`` before finalize (args ``i1,j1,i2,j2``)."""
+        """Perlin stack for ``[ci0:ci1) × [cj0:cj1)`` before finalize."""
         return np.asarray(
-            self.synthetic_map_factory.sample_raw(ci0, cj0, ci1, cj1),
+            self.synthetic_map_factory.sample_raw(cj0, ci0, cj1, ci1),
             dtype=np.float32,
         )
 
@@ -898,7 +898,7 @@ class WorldPipeline(ConfigMixin):
             ``torch.float32`` shaped ``(5, ci1-ci0, cj1-cj0)``.
         """
         if not self._has_custom_conditioning_imports():
-            return self.synthetic_map_factory(ci0, cj0, ci1, cj1)
+            return self.synthetic_map_factory(cj0, ci0, cj1, ci1)
         cond = self._raw_conditioning_with_imports(ci0, ci1, cj0, cj1).copy()
         cond[0] = np.sign(cond[0]) * np.sqrt(np.abs(cond[0]))
         return torch.from_numpy(cond).float()
