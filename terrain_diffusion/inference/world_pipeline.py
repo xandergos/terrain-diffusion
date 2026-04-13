@@ -822,6 +822,7 @@ class WorldPipeline(ConfigMixin):
 
     def _sample_raw_conditioning(self, ci0: int, ci1: int, cj0: int, cj1: int) -> np.ndarray:
         """Perlin stack for ``[ci0:ci1) × [cj0:cj1)`` before finalize."""
+        # NOTE: The coordinates are INTENTIONALLY SWAPPED here (ci, cj → cj, ci).
         return np.asarray(
             self.synthetic_map_factory.sample_raw(cj0, ci0, cj1, ci1),
             dtype=np.float32,
