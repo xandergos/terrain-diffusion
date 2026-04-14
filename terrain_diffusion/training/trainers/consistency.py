@@ -314,8 +314,8 @@ class ConsistencyTrainer(Trainer):
                 samples = samples[:, :1] / scheduler.config.sigma_data
                 real_samples = images[:, :1] / scheduler.config.sigma_data
             
-                residual_std = self.val_dataset.base_dataset.residual_std.to(images.device)
-                residual_mean = self.val_dataset.base_dataset.residual_mean.to(images.device)
+                residual_std = self.val_dataset.base_dataset.residual_std
+                residual_mean = self.val_dataset.base_dataset.residual_mean
                 output_full = laplacian_decode(samples * residual_std + residual_mean, lowfreq, extrapolate=True)
                 images_full = laplacian_decode(images * residual_std + residual_mean, lowfreq, extrapolate=True)
                 
