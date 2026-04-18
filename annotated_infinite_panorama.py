@@ -27,7 +27,7 @@ import numpy as np
 import torch
 from PIL import Image
 from diffusers import DDIMScheduler, StableDiffusionPipeline
-from infinite_tensor import MemoryTileStore, TensorWindow
+from infinite_tensor import InfiniteTensor, MemoryTileStore, TensorWindow
 
 # -----------------------------------------------------------------------------
 # Tweakables
@@ -198,31 +198,31 @@ def main():
         img = (img / 2 + 0.5).clamp(0, 1)[0].cpu().float()
         return pack(img, pixel_weight)
 
-    latents = store.get_or_create(
-        f"phase{T - 1}",
+    latents = InfiniteTensor(
         shape=(LATENT_CHANNELS + 1, LATENT_TILE, None),
         f=initial_phase,
         output_window=latent_window,
-        cache_limit=None,
+        tile_store=store,
+        tensor_id=f"phase{T - 1}",
     )
     for i, timesteps in enumerate(phase_timesteps[1:], start=1):
-        latents = store.get_or_create(
-            f"phase{T - 1 - i}",
+        latents = InfiniteTensor(
             shape=(LATENT_CHANNELS + 1, LATENT_TILE, None),
             f=make_continuation_phase(timesteps),
             output_window=latent_window,
             args=(latents,),
             args_windows=(latent_window,),
-            cache_limit=None,
+            tile_store=store,
+            tensor_id=f"phase{T - 1 - i}",
         )
-    pixels = store.get_or_create(
-        "image",
+    pixels = InfiniteTensor(
         shape=(3 + 1, PIXEL_TILE, None),
         f=decode,
         output_window=pixel_window,
         args=(latents,),
         args_windows=(latent_decode_window,),
-        cache_limit=None,
+        tile_store=store,
+        tensor_id="image",
     )
 
     region = normalize(torch.as_tensor(pixels[:, :, 0:CROP_PIXEL_WIDTH]))

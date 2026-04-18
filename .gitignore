@@ -261,3 +261,5 @@ azgaar-output/
 extras/
 /*.tif
 /*.tiff
+terrain-diffusion-30m/
+terrain-diffusion-90m/

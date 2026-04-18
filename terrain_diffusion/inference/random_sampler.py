@@ -188,7 +188,7 @@ def run_sampler(
 
 
 @click.command()
-@click.argument("model_path", default="xandergos/terrain-diffusion-30m")
+@click.argument("model_path", default="xandergos/terrain-diffusion-90m")
 @click.option("--output-dir", default="results/random_images", help="Output directory for images")
 @click.option("--n-samples", type=int, default=100, help="Number of random samples to generate")
 @click.option("--detail-size", type=int, default=1024, help="Size of each detail patch in native pixels")

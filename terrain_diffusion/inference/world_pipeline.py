@@ -9,7 +9,7 @@ import atexit
 import h5py
 import torch
 from diffusers.configuration_utils import ConfigMixin, register_to_config
-from infinite_tensor import HDF5TileStore, TensorWindow, MemoryTileStore
+from infinite_tensor import HDF5TileStore, InfiniteTensor, TensorWindow, MemoryTileStore
 from terrain_diffusion.inference.synthetic_map import make_synthetic_map_factory
 from terrain_diffusion.data.laplacian_encoder import laplacian_decode, laplacian_denoise
 from terrain_diffusion.models.edm_unet import EDMUnet2D
@@ -397,15 +397,6 @@ class WorldPipeline(ConfigMixin):
                 return bs
         return self._batch_sizes[-1]  # fallback to max
     
-    def _common_tile_kwargs(self) -> dict:
-        """Get common kwargs for tile_store.get_or_create()."""
-        if self.caching_strategy != 'direct':
-            return {}
-        kwargs = {'cache_method': 'direct'}
-        if self.cache_limit is not None:
-            kwargs['cache_limit'] = self.cache_limit
-        return kwargs
-    
     def _apply_dtype_and_compile(self):
         """Apply eval mode, dtype conversion and torch.compile to models."""
         models = [
@@ -675,11 +666,11 @@ class WorldPipeline(ConfigMixin):
     def _init_tile_store(self, hdf5_file, mode, compression, compression_opts):
         """Initialize the tile store."""
         if self.caching_strategy == 'direct':
-            self.tile_store = MemoryTileStore()
+            self.tile_store = MemoryTileStore(cache_size_bytes=self.cache_limit)
         else:
             self.tile_store = HDF5TileStore(
-                hdf5_file, mode=mode, compression=compression, 
-                compression_opts=compression_opts, tile_cache_size=100
+                hdf5_file, mode=mode, compression=compression,
+                compression_opts=compression_opts, cache_size_tiles=100
             )
     
     def _init_conditioning(self):
@@ -707,8 +698,10 @@ class WorldPipeline(ConfigMixin):
         """Clear the cache for all tensors in the pipeline."""
         if self.tile_store is None:
             return
-            
-        self.tile_store.clear_direct_caches()
+
+        for tensor in (self.coarse, self.latents, self.residual):
+            if tensor is not None:
+                tensor.clear_cache()
     
     def close(self):
         """Release resources associated with this pipeline."""
@@ -734,7 +727,7 @@ class WorldPipeline(ConfigMixin):
             return
         
         if self.caching_strategy == 'direct':
-            self.tile_store = MemoryTileStore()
+            self._init_tile_store(None, None, None, None)
         else:
             if hasattr(self.tile_store, 'close'):
                 self.tile_store.close()
@@ -990,12 +983,12 @@ class WorldPipeline(ConfigMixin):
             size=(7, TILE_SIZE // coarse_pool, TILE_SIZE // coarse_pool), 
             stride=(7, TILE_STRIDE // coarse_pool, TILE_STRIDE // coarse_pool)
         )
-        return self.tile_store.get_or_create(
-            "base_coarse_map",
+        return InfiniteTensor(
             shape=(7, None, None),
             f=f,
             output_window=output_window,
-            **self._common_tile_kwargs()
+            tile_store=self.tile_store,
+            tensor_id="base_coarse_map",
         )
 
     # =========================================================================
@@ -1167,20 +1160,19 @@ class WorldPipeline(ConfigMixin):
                         HISTOGRAM_RAW, COND_INPUT_MEAN, COND_INPUT_STD, seed_offset=5820 + i,
                     )
                 return outputs
-            return self.tile_store.get_or_create(
-                "latent_map_T1",
+            return InfiniteTensor(
                 shape=(6, None, None),
                 f=f_T1,
                 output_window=output_window,
                 args=(self.coarse,),
                 args_windows=(coarse_window,),
                 batch_size=self.latents_batch_size,
-                **self._common_tile_kwargs()
+                tile_store=self.tile_store,
+                tensor_id="latent_map_T1",
             )
 
         # T=2: current two-stage behavior
-        tensor = self.tile_store.get_or_create(
-            "init_latent_map",
+        tensor = InfiniteTensor(
             shape=(6, None, None),
             f=lambda ctxs, conds: self._latent_inference(
                 ctxs, None, conds, t_init, scheduler, weight_window, HISTOGRAM_RAW, COND_INPUT_MEAN, COND_INPUT_STD, seed_offset=5819
@@ -1189,13 +1181,13 @@ class WorldPipeline(ConfigMixin):
             args=(self.coarse,),
             args_windows=(coarse_window,),
             batch_size=self.latents_batch_size,
-            **self._common_tile_kwargs()
+            tile_store=self.tile_store,
+            tensor_id="init_latent_map",
         )
-        
+
         if not self.onestep_latent:
             for i, t in enumerate(T_INTER):
-                tensor = self.tile_store.get_or_create(
-                    f"step_latent_map_{i}",
+                tensor = InfiniteTensor(
                     shape=(6, None, None),
                     f=lambda ctxs, samples, conds, t=t, i=i: self._latent_inference(
                         ctxs, samples, conds, t, scheduler, weight_window, HISTOGRAM_RAW, COND_INPUT_MEAN, COND_INPUT_STD, seed_offset=5820+i
@@ -1204,7 +1196,8 @@ class WorldPipeline(ConfigMixin):
                     args=(tensor, self.coarse,),
                     args_windows=(output_window, coarse_window,),
                     batch_size=self.latents_batch_size,
-                    **self._common_tile_kwargs()
+                    tile_store=self.tile_store,
+                    tensor_id=f"step_latent_map_{i}",
                 )
         
         return tensor
@@ -1266,14 +1259,14 @@ class WorldPipeline(ConfigMixin):
         output_window = TensorWindow(size=(2, TILE_SIZE, TILE_SIZE), stride=(2, TILE_STRIDE, TILE_STRIDE))
         input_window = TensorWindow(size=(6, TILE_SIZE//lc, TILE_SIZE//lc), stride=(6, TILE_STRIDE//lc, TILE_STRIDE//lc))
         
-        return self.tile_store.get_or_create(
-            "init_residual_map",
+        return InfiniteTensor(
             shape=(2, None, None),
             f=f,
             output_window=output_window,
             args=(self.latents,),
             args_windows=(input_window,),
-            **self._common_tile_kwargs()
+            tile_store=self.tile_store,
+            tensor_id="init_residual_map",
         )
 
     # =========================================================================
