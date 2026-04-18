@@ -23,6 +23,22 @@ Fabric mod that replaces Minecraft's world generator.
 
 [https://github.com/xandergos/terrain-diffusion-mc](https://github.com/xandergos/terrain-diffusion-mc)
 
+## InfiniteDiffusion Panorama
+
+If you want to understand or reproduce the core **InfiniteDiffusion** algorithm, see [`annotated_infinite_panorama.py`](annotated_infinite_panorama.py). It is a self-contained, heavily annotated demo that generates an infinite-width panorama using Stable Diffusion v1.5 and [`infinite-tensor`](https://github.com/xandergos/infinite-tensor), with no dependency on the rest of this repository.
+
+**Install:**
+```bash
+pip install torch diffusers transformers accelerate infinite-tensor pillow numpy
+```
+
+**Run:**
+```bash
+python annotated_infinite_panorama.py
+```
+
+This saves `output.png` (a 2048-pixel-wide crop of an unbounded panorama) next to the script. Edit the constants at the top of the file (`PROMPT`, `CROP_PIXEL_WIDTH`, `INTERMEDIATE_TIMESTEPS`, etc.) to experiment.
+
 ## Installation
 
 ```bash
