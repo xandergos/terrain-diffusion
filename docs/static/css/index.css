@@ -2,6 +2,10 @@ body {
   font-family: 'Noto Sans', sans-serif;
 }
 
+.content p {
+  font-size: 1.15rem;
+}
+
 
 .footer .icon-link {
     font-size: 25px;
@@ -184,4 +188,82 @@ body {
 
 .results-carousel .item img {
   cursor: zoom-in;
+}
+
+/* ========== Responsive Fixes ========== */
+
+/* Prevent horizontal overflow from wide carousel/table content */
+html, body {
+  overflow-x: hidden;
+  max-width: 100%;
+}
+
+/* Justified text produces rivers of whitespace on narrow columns; only
+   left-align on narrow viewports where the column is too tight to justify
+   cleanly. Desktop keeps the justified look. */
+@media (max-width: 768px) {
+  .has-text-justified {
+    text-align: left !important;
+  }
+}
+
+/* Fluid type scaling keeps things legible on phones without hurting desktop. */
+.publication-title.title.is-1 {
+  font-size: clamp(1.6rem, 4.5vw, 3rem) !important;
+  line-height: 1.25 !important;
+}
+
+.author-name {
+  font-size: clamp(1.25rem, 2.2vw, 1.75rem) !important;
+}
+
+.author-affiliation {
+  font-size: clamp(1rem, 1.6vw, 1.25rem) !important;
+}
+
+.venue-badge {
+  font-size: clamp(0.9rem, 1.3vw, 1.1rem) !important;
+}
+
+.content p {
+  font-size: clamp(1rem, 1.4vw, 1.15rem);
+}
+
+/* InfiniteDiffusion comparison carousel: the comparison panoramas are very
+   wide, and scaling them down on narrow viewports makes them unreadable.
+   Instead, preserve a minimum image width and let the carousel item crop the
+   excess (centered crop). */
+#infinitediffusion-carousel .item {
+  display: flex;
+  justify-content: center;
+  overflow: hidden;
+}
+
+#infinitediffusion-carousel .item img {
+  min-width: 900px;
+  width: 100%;
+  max-width: none;
+  display: block;
+}
+
+/* Narrow viewports: tighten padding and shrink the comparison table so all
+   columns remain visible without horizontal scrolling. */
+@media (max-width: 768px) {
+  /* Tighten vertical rhythm; horizontal padding stays at 0.75rem so that
+     .section, .hero-body, and the columns/column pair all resolve to the
+     same left edge (0.75rem from screen edge). Adding extra container
+     padding breaks this because some sections have nested containers. */
+  .hero-body {
+    padding: 1.5rem 0.75rem !important;
+  }
+  .section {
+    padding: 2rem 0.75rem !important;
+  }
+  .comparison-table {
+    font-size: 0.8rem !important;
+  }
+  .comparison-table td,
+  .comparison-table th {
+    padding: 0.45rem 0.5rem !important;
+  }
 }

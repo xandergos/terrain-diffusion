@@ -41,6 +41,26 @@ $(document).ready(function() {
 		// Initialize all div with carousel class
     var carousels = bulmaCarousel.attach('.carousel', options);
 
+    // InfiniteDiffusion carousel: force one image per slide at every breakpoint
+    // (bulma-carousel's default breakpoints otherwise bump this to 2 or 3 on
+    // wider screens).
+    var infiniteEl = document.querySelector('#infinitediffusion-carousel');
+    if (infiniteEl) {
+      new bulmaCarousel(infiniteEl, {
+        slidesToScroll: 1,
+        slidesToShow: 1,
+        loop: true,
+        infinite: true,
+        autoplay: false,
+        breakpoints: [
+          { changePoint: 480, slidesToShow: 1, slidesToScroll: 1 },
+          { changePoint: 640, slidesToShow: 1, slidesToScroll: 1 },
+          { changePoint: 768, slidesToShow: 1, slidesToScroll: 1 },
+          { changePoint: 1024, slidesToShow: 1, slidesToScroll: 1 },
+        ],
+      });
+    }
+
     // Loop on each carousel initialized
     for(var i = 0; i < carousels.length; i++) {
     	// Add listener to  event

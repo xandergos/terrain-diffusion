@@ -3,10 +3,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="description"
-        content="Terrain Diffusion: A Diffusion-Based Successor to Perlin Noise in Infinite, Real-Time Terrain Generation">
-  <meta name="keywords" content="Terrain Generation, Diffusion Models, Procedural Generation, Perlin Noise">
+        content="InfiniteDiffusion: Bridging Learned Fidelity and Procedural Utility for Open-World Terrain Generation">
+  <meta name="keywords" content="Terrain Generation, InfiniteDiffusion, Infinity, Infinity Diffusion, Infinite Diffusion, Diffusion Models, Procedural Generation, Perlin Noise">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Terrain Diffusion</title>
+  <title>InfiniteDiffusion</title>
 
   <link href="https://fonts.googleapis.com/css?family=Google+Sans|Noto+Sans|Castoro"
         rel="stylesheet">
@@ -34,15 +34,16 @@
       <div class="columns is-centered">
         <div class="column has-text-centered">
           <img src="./static/world_combined.jpeg" alt="Terrain Diffusion world visualization" style="width: 100%; max-width: 900px; margin-bottom: 1.5rem; border-radius: 12px;">
-          <h1 class="title is-1 publication-title">Terrain Diffusion: A Diffusion-Based Successor to Perlin Noise in Infinite, Real-Time Terrain Generation</h1>
-          <div class="is-size-5 publication-authors">
-            <span class="author-block">
-              <a href="mailto:alexander.goslin@gmail.com">Alexander Goslin</a>
+          <h1 class="title is-1 publication-title">InfiniteDiffusion: Bridging Learned Fidelity and Procedural Utility for Open-World Terrain Generation</h1>
+          <div style="margin-bottom: 1rem;">
+            <span class="venue-badge" style="display: inline-block; background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%); color: #e8c84a; font-weight: 700; font-size: 1.1rem; letter-spacing: 0.08em; padding: 0.45em 1.2em; border-radius: 2em; border: 2px solid #e8c84a; text-transform: uppercase;">
+              SIGGRAPH 2026
             </span>
           </div>
-
-          <div class="is-size-6 publication-authors">
-            <span class="author-block">alexander.goslin@gmail.com</span>
+          <div style="margin-top: 0.75rem; margin-bottom: 0.75rem; line-height: 1.5;">
+            <p class="author-name" style="font-size: 1.75rem; font-weight: 600; margin-bottom: 0.2rem;">Alexander Goslin</p>
+            <p class="author-affiliation" style="font-size: 1.25rem; color: #666; margin-bottom: 0.2rem;">Independent Researcher</p>
+            <p style="font-size: 1.1rem;"><a href="mailto:alexander.goslin@gmail.com" style="color: hsl(204, 86%, 53%);">alexander.goslin@gmail.com</a></p>
           </div>
 
           <div class="column has-text-centered">
@@ -54,7 +55,7 @@
                   <span class="icon">
                       <i class="ai ai-arxiv"></i>
                   </span>
-                  <span>arXiv</span>
+                  <span>Paper</span>
                 </a>
               </span>
               <!-- Code Link. -->
@@ -65,6 +66,28 @@
                       <i class="fab fa-github"></i>
                   </span>
                   <span>Code</span>
+                </a>
+              </span>
+              <!-- Blog Post Link. -->
+              <span class="link-block">
+                <a href="http://alexandergoslin.me/"
+                   class="external-link button is-normal is-rounded is-dark">
+                  <span class="icon">
+                      <i class="fas fa-globe"></i>
+                  </span>
+                  <span>My Website</span>
+                </a>
+              </span>
+              <!-- X / Twitter Link. -->
+              <span class="link-block">
+                <a href="https://x.com/xandurglar"
+                   class="external-link button is-normal is-rounded is-dark">
+                  <span class="icon">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
+                    </svg>
+                  </span>
+                  <span>Follow Me</span>
                 </a>
               </span>
             </div>
@@ -78,17 +101,130 @@
 <section class="section">
   <div class="container is-max-desktop">
     <!-- Abstract. -->
-    <div class="columns is-centered has-text-centered">
-      <div class="column is-four-fifths">
-        <h2 class="title is-3">Abstract</h2>
-        <div class="content has-text-justified">
-          <p>
-            For decades, procedural worlds have been built on procedural noise functions such as Perlin noise, which are fast and infinite, yet fundamentally limited in realism and large-scale coherence. We introduce Terrain Diffusion, an AI-era successor to Perlin noise that bridges the fidelity of diffusion models with the properties that made procedural noise indispensable: seamless unbounded extent, seed-consistency, and constant-time random access. At its core is InfiniteDiffusion, a novel algorithm for infinite generation, enabling seamless, real-time synthesis of boundless landscapes. A hierarchical stack of diffusion models couples planetary context with local detail, while a compact Laplacian encoding stabilizes outputs across Earth-scale dynamic ranges. An open-source infinite-tensor framework supports constant-memory manipulation of unbounded tensors, and few-step consistency distillation enables efficient generation. Together, these components establish diffusion models as a practical foundation for procedural world generation, capable of synthesizing entire planets coherently, controllably, and without limits.
-          </p>
-        </div>
+    <div style="max-width: 48rem; margin: 0 auto;">
+      <h2 class="title is-3 has-text-centered">Abstract</h2>
+      <div class="content has-text-justified">
+        <p>
+          For decades, procedural worlds have been built on procedural noise functions such as Perlin noise, which are fast and infinite, 
+          yet fundamentally limited in realism and large-scale coherence. Conversely, diffusion models offer unprecedented fidelity but 
+          remain generally confined to bounded canvases. We introduce InfiniteDiffusion, a training-free algorithm that reformulates diffusion 
+          sampling for lazy and unbounded generation, bridging the fidelity of diffusion models with the properties that made procedural noise indispensable: 
+          seamless infinite extent, seed-consistency, and constant-time random access. To demonstrate the utility of this approach, we present Terrain Diffusion, 
+          a framework for learned procedural terrain generation with a procedural noise-like interface. Our framework outpaces orbital velocity by 
+          9 times on a consumer GPU, enabling realistic terrain generation at interactive rates. 
+          We integrate a hierarchical stack of diffusion models to couple planetary context with local detail, a compact Laplacian encoding to 
+          stabilize outputs across Earth-scale dynamic ranges, and an open-source infinite-tensor framework for constant-memory manipulation of 
+          unbounded tensors. Together, these components position diffusion models as a practical foundation for the next generation of infinite 
+          virtual worlds.
+        </p>
       </div>
     </div>
     <!--/ Abstract. -->
+  </div>
+</section>
+
+<!-- InfiniteDiffusion Section -->
+<section class="hero is-small">
+  <div class="hero-body">
+    <div class="container">
+      <h2 class="title is-3 has-text-centered">InfiniteDiffusion</h2>
+      <div class="container is-max-desktop">
+        <div class="content has-text-justified" style="margin-bottom: 2rem;">
+          <p>
+            Until now, content generation has faced a fundamental trilemma: <strong>infinite extent, stateless generation, and learned realism</strong> - pick any two. 
+            Diffusion models achieve realism but are bounded. 
+            Classical procedural noise is infinite and stateless, but cannot learn.
+            Auto-regressive outpainting allows learned unbounded generation, but requires a shared global state that precludes determinism and random access.
+          </p>
+          <p>
+            <strong>InfiniteDiffusion breaks this trilemma</strong>, transforming any diffusion model into an 
+            infinite, logically stateless array, indexed only by seed and coordinates, supporting O(1) random access, 
+            full determinism, and embarrassing parallelism. It internally uses only a bounded LRU cache as a performance optimization. No persistent or external state.
+          </p>
+          <p>
+            InfiniteDiffusion achieves this by generalizing MultiDiffusion for infinite or larger-than-memory domains, 
+            reformulating the diffusion process as a lazy computation that <strong>generates only the region you request, when you request it</strong>.
+          </p>
+          <p>
+            Each image below compares <strong>MultiDiffusion</strong> (top), which operates over a pre-defined, eagerly-generated, and bounded canvas, with <strong>InfiniteDiffusion</strong> (bottom), which imposes no such bounds.
+          </p>
+        </div>
+      </div>
+      <div id="infinitediffusion-carousel" class="single-carousel results-carousel">
+        <div class="item">
+          <img src="./static/infinite_diffusion/prompt_00_run_2_comparison.jpg" alt="InfiniteDiffusion comparison 1">
+        </div>
+        <div class="item">
+          <img src="./static/infinite_diffusion/prompt_01_run_2_comparison.jpg" alt="InfiniteDiffusion comparison 2">
+        </div>
+        <div class="item">
+          <img src="./static/infinite_diffusion/prompt_02_run_2_comparison.jpg" alt="InfiniteDiffusion comparison 3">
+        </div>
+        <div class="item">
+          <img src="./static/infinite_diffusion/prompt_03_run_1_comparison.jpg" alt="InfiniteDiffusion comparison 4">
+        </div>
+        <div class="item">
+          <img src="./static/infinite_diffusion/prompt_04_run_2_comparison.jpg" alt="InfiniteDiffusion comparison 5">
+        </div>
+        <div class="item">
+          <img src="./static/infinite_diffusion/prompt_06_run_2_comparison.jpg" alt="InfiniteDiffusion comparison 6">
+        </div>
+        <div class="item">
+          <img src="./static/infinite_diffusion/prompt_07_run_2_comparison.jpg" alt="InfiniteDiffusion comparison 7">
+        </div>
+      </div>
+      <div class="container is-max-desktop" style="margin-top: 2.5rem;">
+        <div class="content has-text-justified">
+          <h3 class="title is-5" style="margin-bottom: 0.75rem;">Vs. Auto-Regression</h3>
+          <p>
+            The only competing paradigm for unbounded or lazy generation is auto-regression, which carries fundamental limitations that InfiniteDiffusion avoids entirely:
+          </p>
+          <div style="overflow-x: auto; margin: 1.25rem 0 0.5rem;">
+            <table class="comparison-table" style="width: 100%; border-collapse: collapse; font-size: 0.97rem; text-align: center;">
+              <thead>
+                <tr style="border-bottom: 2px solid #dbdbdb;">
+                  <th style="padding: 0.6rem 1rem; text-align: left; font-weight: 700; color: #363636;"></th>
+                  <th style="padding: 0.6rem 1rem; font-weight: 700; color: #363636;">Auto-Regression</th>
+                  <th style="padding: 0.6rem 1rem; font-weight: 700; color: hsl(204, 86%, 40%);">InfiniteDiffusion</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr style="border-bottom: 1px solid #ededed;">
+                  <td style="padding: 0.55rem 1rem; text-align: left; font-weight: 600; color: #4a4a4a;">Random Access</td>
+                  <td style="padding: 0.55rem 1rem; color: #888;">O(n)</td>
+                  <td style="padding: 0.55rem 1rem; color: hsl(204, 86%, 40%); font-weight: 600;">O(1)</td>
+                </tr>
+                <tr style="border-bottom: 1px solid #ededed; background: #fafafa;">
+                  <td style="padding: 0.55rem 1rem; text-align: left; font-weight: 600; color: #4a4a4a;">Determinism</td>
+                  <td style="padding: 0.55rem 1rem; color: #888;">No; Order-dependent</td>
+                  <td style="padding: 0.55rem 1rem; color: hsl(204, 86%, 40%); font-weight: 600;">Yes; Order-invariant</td>
+                </tr>
+                <tr style="border-bottom: 1px solid #ededed;">
+                  <td style="padding: 0.55rem 1rem; text-align: left; font-weight: 600; color: #4a4a4a;">Errors</td>
+                  <td style="padding: 0.55rem 1rem; color: #888;">Compound</td>
+                  <td style="padding: 0.55rem 1rem; color: hsl(204, 86%, 40%); font-weight: 600;">No compounding</td>
+                </tr>
+                <tr style="border-bottom: 1px solid #ededed; background: #fafafa;">
+                  <td style="padding: 0.55rem 1rem; text-align: left; font-weight: 600; color: #4a4a4a;">Parallelization</td>
+                  <td style="padding: 0.55rem 1rem; color: #888;">Sequential</td>
+                  <td style="padding: 0.55rem 1rem; color: hsl(204, 86%, 40%); font-weight: 600;">Embarrassingly parallel</td>
+                </tr>
+                <tr style="border-bottom: 1px solid #ededed;">
+                  <td style="padding: 0.55rem 1rem; text-align: left; font-weight: 600; color: #4a4a4a;">State</td>
+                  <td style="padding: 0.55rem 1rem; color: #888;">Global</td>
+                  <td style="padding: 0.55rem 1rem; color: hsl(204, 86%, 40%); font-weight: 600;">Functionally Stateless</td>
+                </tr>
+                <tr style="background: #fafafa;">
+                  <td style="padding: 0.55rem 1rem; text-align: left; font-weight: 600; color: #4a4a4a;">Training-free</td>
+                  <td style="padding: 0.55rem 1rem; color: #888;">No</td>
+                  <td style="padding: 0.55rem 1rem; color: hsl(204, 86%, 40%); font-weight: 600;">Yes</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </section>
 
@@ -96,7 +232,27 @@
 <section class="hero is-light is-small">
   <div class="hero-body">
     <div class="container">
-      <h2 class="title is-3 has-text-centered">Terrain Generation</h2>
+      <h2 class="title is-3 has-text-centered">Terrain Diffusion</h2>
+      <div class="container is-max-desktop">
+        <div class="content has-text-justified" style="margin-bottom: 2rem;">
+          <p>
+            <strong>Terrain Diffusion is the first learned procedural terrain generator.</strong> I introduced a technique
+            that enables diffusion models to generate outputs spanning massive dynamic ranges, from -10000m in the Mariana 
+            trench to nearly 9000m at Mt Everest, all in one world. But vertical scale alone is not enough. By utilizing a cascade of diffusion models, 
+            Terrain Diffusion <strong>generates features spanning hundreds of real-world kilometers</strong>, with continents spanning millions of square kilometers. 
+            Each 1024x1024 relief map of terrain below spans 100km in width. And it <strong>runs locally on consumer hardware</strong>.
+          </p>
+          <p>
+            <strong>Built on InfiniteDiffusion, Terrain Diffusion inherits all of its properties:</strong> It's functionally stateless, 
+            trivially integrates into any game engine, and has almost no practical limitations. 
+            To demonstrate this, it was shipped as an open-source
+            <a href="https://github.com/xandergos/terrain-diffusion-mc" style="color: hsl(204, 86%, 53%);"><u>Minecraft mod</u></a> 
+            with no external dependencies. Worlds can be 
+            shared by seed, players can teleport millions of miles instantly, and it runs in multiplayer.
+            It is also demonstrated in Unity, where the player is able to comfortably fly around the world at 3 times orbital velocity on consumer hardware.
+          </p>
+        </div>
+      </div>
       <div id="terrain-carousel" class="carousel results-carousel">
         <div class="item">
           <img src="./static/terrain/1.jpg" alt="Terrain sample 1">
@@ -159,81 +315,49 @@
           <img src="./static/terrain/20.jpg" alt="Terrain sample 20">
         </div>
       </div>
-    </div>
-  </div>
-</section>
-
-<!-- Minecraft Results Carousel -->
-<section class="hero is-small">
-  <div class="hero-body">
-    <div class="container">
-      <h2 class="title is-3 has-text-centered">Minecraft Integration</h2>
-      <div id="minecraft-carousel" class="carousel results-carousel">
+      <div id="minecraft-carousel" class="carousel results-carousel" style="margin-top: 2rem;">
         <div class="item">
-          <img src="./static/minecraft_pics/12.jpg" alt="Minecraft sample 11">
+          <img src="./static/minecraft_pics/1.jpg" alt="Minecraft sample 11">
         </div>
         <div class="item">
-          <img src="./static/minecraft_pics/13.jpg" alt="Minecraft sample 13">
+          <img src="./static/minecraft_pics/2.jpg" alt="Minecraft sample 13">
         </div>
         <div class="item">
-          <img src="./static/minecraft_pics/1.jpg" alt="Minecraft sample 1">
+          <img src="./static/minecraft_pics/3.jpg" alt="Minecraft sample 1">
         </div>
         <div class="item">
-          <img src="./static/minecraft_pics/3.jpg" alt="Minecraft sample 3">
+          <img src="./static/minecraft_pics/4.jpg" alt="Minecraft sample 3">
         </div>
         <div class="item">
           <img src="./static/minecraft_pics/5.jpg" alt="Minecraft sample 5">
         </div>
         <div class="item">
-          <img src="./static/minecraft_pics/4.jpg" alt="Minecraft sample 4">
+          <img src="./static/minecraft_pics/6.jpg" alt="Minecraft sample 4">
         </div>
         <div class="item">
-          <img src="./static/minecraft_pics/0.jpg" alt="Minecraft sample 0">
+          <img src="./static/minecraft_pics/7.jpg" alt="Minecraft sample 0">
         </div>
         <div class="item">
-          <img src="./static/minecraft_pics/16.jpg" alt="Minecraft sample 16">
+          <img src="./static/minecraft_pics/9.jpg" alt="Minecraft sample 6">
         </div>
         <div class="item">
-          <img src="./static/minecraft_pics/6.jpg" alt="Minecraft sample 6">
+          <img src="./static/minecraft_pics/10.jpg" alt="Minecraft sample 18">
         </div>
         <div class="item">
-          <img src="./static/minecraft_pics/18.jpg" alt="Minecraft sample 18">
-        </div>
-        <div class="item">
-          <img src="./static/minecraft_pics/7.jpg" alt="Minecraft sample 7">
-        </div>
-        <div class="item">
-          <img src="./static/minecraft_pics/8.jpg" alt="Minecraft sample 8">
-        </div>
-        <div class="item">
-          <img src="./static/minecraft_pics/9.jpg" alt="Minecraft sample 9">
-        </div>
-        <div class="item">
-          <img src="./static/minecraft_pics/10.jpg" alt="Minecraft sample 10">
-        </div>
-        <div class="item">
-          <img src="./static/minecraft_pics/17.jpg" alt="Minecraft sample 17">
-        </div>
-        <div class="item">
-          <img src="./static/minecraft_pics/11.jpg" alt="Minecraft sample 11">
-        </div>
-        <div class="item">
-          <img src="./static/minecraft_pics/14.jpg" alt="Minecraft sample 14">
-        </div>
-        <div class="item">
-          <img src="./static/minecraft_pics/15.jpg" alt="Minecraft sample 15">
-        </div>
-        <div class="item">
-          <img src="./static/minecraft_pics/19.jpg" alt="Minecraft sample 19">
-        </div>
-        <div class="item">
-          <img src="./static/minecraft_pics/20.jpg" alt="Minecraft sample 20">
+          <img src="./static/minecraft_pics/11.jpg" alt="Minecraft sample 7">
         </div>
       </div>
       <div class="columns is-centered" style="margin-top: 2rem;">
-        <div class="column is-8">
+        <div class="column is-6">
+          <p class="has-text-centered" style="font-weight: 600; margin-bottom: 0.75rem;">Technical Demo (Unity + Minecraft)</p>
           <div style="position: relative; padding-bottom: 56.25%; height: 0; overflow: hidden;">
-            <iframe src="https://www.youtube.com/embed/hJoaCZ7wZ5s?si=jqHmuHtDaEmSF_iO" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen style="position: absolute; top: 0; left: 0; width: 100%; height: 100%;"></iframe>
+            <iframe src="https://www.youtube.com/embed/EwvN6MklrWw?si=Ma-c4T6CQ1585WuE" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen style="position: absolute; top: 0; left: 0; width: 100%; height: 100%;"></iframe>
+          </div>
+        </div>
+        <div class="column is-6">
+          <p class="has-text-centered" style="font-weight: 600; margin-bottom: 0.75rem;">(Cinematic) Mod Showcase by <a href="https://www.youtube.com/@AsianHalfSquat" style="color: hsl(204, 86%, 53%);">AsianHalfSquat</a></p>
+          <div style="position: relative; padding-bottom: 56.25%; height: 0; overflow: hidden;">
+            <iframe src="https://www.youtube.com/embed/irE4tcDtUIg?si=IlEuDdJ02LzeIYHl" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen style="position: absolute; top: 0; left: 0; width: 100%; height: 100%;"></iframe>
           </div>
         </div>
       </div>
@@ -244,25 +368,25 @@
 <section class="section" id="BibTeX">
   <div class="container is-max-desktop content">
     <h2 class="title">BibTeX</h2>
-    <pre><code>@misc{2512.08309,
-      Author = {Alexander Goslin},
-      Title = {Terrain Diffusion: A Diffusion-Based Successor to Perlin Noise in Infinite, Real-Time Terrain Generation},
-      Year = {2025},
-      Eprint = {arXiv:2512.08309},
-}</code></pre>
+    <pre><code>
+      @inproceedings{goslin2026infinitediffusion,
+        author    = {Goslin, Alexander},
+        title     = {InfiniteDiffusion: Bridging Learned Fidelity and Procedural Utility for Open-World Terrain Generation},
+        booktitle = {Special Interest Group on Computer Graphics and Interactive Techniques Conference Conference Papers},
+        year      = {2026},
+        pages     = {10 pages},
+        publisher = {ACM},
+        address   = {New York, NY, USA},
+        doi       = {10.1145/3799902.3811080},
+        url       = {https://doi.org/10.1145/3799902.3811080},
+        series    = {SIGGRAPH Conference Papers '26}
+      }</code></pre>
   </div>
 </section>
 
 <footer class="footer">
   <div class="container">
     <div class="content has-text-centered">
-      <a href="https://x.com/xandurglar" style="display: inline-flex; align-items: center; gap: 0.35rem; color: inherit;">
-        Follow me on
-        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" style="vertical-align: middle;">
-          <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
-        </svg>
-      </a>
-    </div>
     <div class="columns is-centered">
       <div class="column is-8">
         <div class="content">
