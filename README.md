@@ -169,11 +169,17 @@ You can also do some shenanigans with the coarse model's output directly. For ex
 # Citation
 
 ```bibtex
-@misc{2512.08309,
-      Author = {Alexander Goslin},
-      Title = {Terrain Diffusion: A Diffusion-Based Successor to Perlin Noise in Infinite, Real-Time Terrain Generation},
-      Year = {2025},
-      Eprint = {arXiv:2512.08309},
+@inproceedings{goslin2026infinitediffusion,
+      author    = {Goslin, Alexander},
+      title     = {InfiniteDiffusion: Bridging Learned Fidelity and Procedural Utility for Open-World Terrain Generation},
+      booktitle = {Special Interest Group on Computer Graphics and Interactive Techniques Conference Conference Papers},
+      year      = {2026},
+      pages     = {10 pages},
+      publisher = {ACM},
+      address   = {New York, NY, USA},
+      doi       = {10.1145/3799902.3811080},
+      url       = {https://doi.org/10.1145/3799902.3811080},
+      series    = {SIGGRAPH Conference Papers '26}
 }
 ```
 
