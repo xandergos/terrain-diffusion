@@ -51,7 +51,7 @@ Add two new datasets to the HDF5 file per subchunk:
 
 | Dataset | Shape | Description |
 |---------|-------|-------------|
-| `water` | `(H, W)` float32 | Soft water probability mask (0-1). Derived from Copernicus Land Cover "permanent water bodies" class at 100m, reprojected to 30m, followed by Gaussian blur (sigma ~1-2px). |
+| `water` | `(H, W)` float32 | Soft water probability mask (0-1). Derived from JRC Global Surface Water (primary, native 30m) fused with Copernicus Land Cover class 80 (secondary, fills lake/reservoir gaps). Gaussian blur applied. |
 | `landcover` | `(H, W, N)` float32, optional | Soft class probabilities per pixel. Reserved for future use. Derived from Copernicus Land Cover 100m classification. |
 
 Per-channel normalization stats are computed for water (mean, std).
@@ -99,20 +99,24 @@ Water is NOT processed through the Laplacian pyramid. The water channel is loade
 
 ### New Download Data Sources
 
-| Source | Product | Resolution | Purpose |
-|--------|---------|------------|---------|
-| Copernicus Land Cover | Proba-V-C3 Global 2019 | 100m | Water mask labels (permanent water bodies) + future land cover |
-| JRC Global Surface Water | Occurrence / Seasonality | 30m | Alternative water labels, better for narrow rivers |
+| Source | Product | Resolution | Role |
+|--------|---------|------------|------|
+| JRC Global Surface Water | Occurrence (1984-2021) | 30m | **Primary** water label. Detects surface water at native 30m including narrow rivers and streams. Occasional gaps in arid regions and dense canopy. |
+| Copernicus Land Cover | Proba-V-C3 Global 2019, class 80 | 100m | **Secondary** — fills lakes/large-water-body gaps in JRC. Not used for rivers: bilinear upsampling from 100m to 30m erases sub-300m channels (rivers narrower than 3 source pixels). |
+
+**Fusion strategy:** JRC Occurrence ≥ 50% → water = 1. For pixels where JRC = 0 but Copernicus class 80 = 1, set water = 1 (fills large lake/reservoir gaps). This avoids upsampling narrow Copernicus rivers while catching water bodies JRC may miss.
 
 ### Preprocessing (`build_base_dataset.py`)
 
 For each elevation/climate tile:
 
-1. Load Copernicus land cover TIFF for the same spatial extent
-2. Extract "permanent water bodies" class (class 80) → binary mask
-3. Reproject to match elevation grid resolution (30m) and CRS
-4. Apply Gaussian blur (sigma 1-2 pixels) to soften hard edges
-5. Store as `water` dataset in HDF5 subchunk
+1. Load JRC Occurrence TIFF for the same spatial extent → percentage (0-100)
+2. Threshold at 50%: ≥50% occurrence → water = 1
+3. Load Copernicus land cover TIFF, extract class 80 (permanent water bodies)
+4. Fuse: `water = JRC_mask | (Copernicus_water & ~JRC_mask)` — JRC primary, Copernicus fills gaps
+5. Reproject fused mask to match elevation grid resolution (30m) and CRS
+6. Apply Gaussian blur (sigma 1-2 pixels) to soften hard edges
+7. Store as `water` dataset in HDF5 subchunk
 
 ### Stats Calculation
 
@@ -152,7 +156,7 @@ Compute mean and standard deviation for the water channel (in addition to existi
 - **Water at tile boundaries:** Weighted blending handles continuity.
 - **Consistency distillation:** Consistency model training updated for 2-channel output.
 - **Water channel scaling:** 0-1 probability, no signed-square-root transform.
-- **Copernicus at 100m → 30m:** Nearest-neighbor upsampling; Gaussian blur mitigates aliasing.
+- **JRC gaps in arid/canopy regions:** Copernicus class 80 fills large water body gaps. Remaining gaps (shaded streams, intermittent rivers) are acceptable — the model learns to interpolate from terrain structure.
 - **Model variant:** Initially 30m only. 90m requires separate training with same architecture.
 - **Per-channel ELBO monitoring:** During decoder training, log per-channel losses. Water loss relative to elevation loss should decrease over time. If it plateaus early, increase water loss weight.
 
