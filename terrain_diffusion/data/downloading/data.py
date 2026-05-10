@@ -13,6 +13,7 @@ from tqdm import tqdm
 
 from terrain_diffusion.data.downloading.world_grid import create_equal_area_grid
 
+
 def initialize_ee():
     """
     Initialize the Earth Engine API. Assumes you have already authenticated.
@@ -227,11 +228,11 @@ def download_data_cli(
 
     print(f"Found {len(filtered_cells)} cells with >{land_threshold}% land coverage")
 
-    # Ask for confirmation
-    confirmation = input("Do you want to proceed with the download? (y/n): ")
-    if confirmation.lower() != "y":
-        print("Download cancelled")
-        return []
+    # # Ask for confirmation
+    # confirmation = input("Do you want to proceed with the download? (y/n): ")
+    # if confirmation.lower() != "y":
+    #     print("Download cancelled")
+    #     return []
 
     # Randomize download order (seeded for reproducibility)
     random.seed(42)
@@ -269,6 +270,7 @@ def download_data_cli(
 
     print(f"Downloaded {len(downloaded_files)} files to {output_dir}")
     return downloaded_files
+
 
 if __name__ == "__main__":
     download_data_cli()

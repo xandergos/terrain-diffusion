@@ -5,13 +5,13 @@
 The full 30m pipeline lives at `xandergos/terrain-diffusion-30m` and contains three subfolders.
 Individual models are also published separately:
 
-| Model | HF repo | Role in water plan |
-|---|---|---|
-| Coarse | `xandergos/TerrainDiffusion-Diffusion-Coarse-128A` | **Reuse unchanged (MVP + Phase 2)** |
-| Base (consistency) | `xandergos/TerrainDiffusion-Consistency-Base-192x3` | **Reuse unchanged (all phases)** |
-| Base (diffusion) | `xandergos/TerrainDiffusion-Diffusion-Base-192x3` | Reuse unchanged |
+| Model                 | HF repo                                               | Role in water plan                                              |
+| --------------------- | ----------------------------------------------------- | --------------------------------------------------------------- |
+| Coarse                | `xandergos/TerrainDiffusion-Diffusion-Coarse-128A`    | **Reuse unchanged (MVP + Phase 2)**                             |
+| Base (consistency)    | `xandergos/TerrainDiffusion-Consistency-Base-192x3`   | **Reuse unchanged (all phases)**                                |
+| Base (diffusion)      | `xandergos/TerrainDiffusion-Diffusion-Base-192x3`     | Reuse unchanged                                                 |
 | Decoder (consistency) | `xandergos/TerrainDiffusion-Consistency-Decoder-64x3` | **Warm-start body weights only** — first/last conv change shape |
-| Autoencoder | (embedded in the pipeline, not published standalone) | **Reuse unchanged** |
+| Autoencoder           | (embedded in the pipeline, not published standalone)  | **Reuse unchanged**                                             |
 
 The **encoded dataset** (`dataset.h5` with `latent`, `residual`, `lowfreq`, `climate`) is fully reused.
 Only the `water` channel is appended to it.
@@ -26,33 +26,35 @@ The decoder sees: `[noisy_2ch, 4_upsampled_latents]` → 6 input channels, 2 out
 
 ### 1.0 Implementation status
 
-| Task | Status |
-|---|---|
-| `process_water_mask()` — JRC loading, 255 no-data → 0, ≥50 threshold, Gaussian blur | ✅ Done |
+| Task                                                                                                       | Status  |
+| ---------------------------------------------------------------------------------------------------------- | ------- |
+| `process_water_mask()` — JRC loading, 255 no-data → 0, ≥50 threshold, Gaussian blur                        | ✅ Done |
 | `process_single_file_base()` — `water_folder` param, calls `process_water_mask()`, returns water per chunk | ✅ Done |
-| `ElevationDataset` — `water_folder` param wired through to `process_single_file_base` | ✅ Done |
-| `build_base_dataset.py` — `--water-folder` CLI option, stores `water` in HDF5, adds to stats loop | ✅ Done |
-| `util_scripts/download_water_30m.sh` — one-liner to download JRC tiles with matching grid | ✅ Done |
-| `h5_decoder_terrain_dataset.py` — 2-channel output, `water_mean`/`water_std`, per-channel stats | Pending |
-| `configs/diffusion_decoder/diffusion_decoder_64-3_30m.cfg` — `in_channels=6`, `out_channels=2` | Pending |
-| `world_pipeline.py` — 2-ch noise, 2-ch decoder output, weight blending, `_compute_water()`, `get()` water | Pending |
-| Decoder model training — diffusion + consistency distillation | Pending |
-| Tests — `test_water_preprocessing.py`, `test_water_dataset.py`, `test_water_smoke.py` | Pending |
+| `ElevationDataset` — `water_folder` param wired through to `process_single_file_base`                      | ✅ Done |
+| `build_base_dataset.py` — `--water-folder` CLI option, stores `water` in HDF5, adds to stats loop          | ✅ Done |
+| `util_scripts/download_water_30m.sh` — one-liner to download JRC tiles with matching grid                  | ✅ Done |
+| `h5_decoder_terrain_dataset.py` — 2-channel output, `water_mean`/`water_std`, per-channel stats            | Pending |
+| `configs/diffusion_decoder/diffusion_decoder_64-3_30m.cfg` — `in_channels=6`, `out_channels=2`             | Pending |
+| `world_pipeline.py` — 2-ch noise, 2-ch decoder output, weight blending, `_compute_water()`, `get()` water  | Pending |
+| Decoder model training — diffusion + consistency distillation                                              | Pending |
+| Tests — `test_water_preprocessing.py`, `test_water_dataset.py`, `test_water_smoke.py`                      | Pending |
+| Store `bbox` attrs on HDF5 datasets — `build_base_dataset.py` writes `lon_min, lat_min, lon_max, lat_max` per chunk; `make_synthetic_h5` in tests includes them; validation test in `test_water_dataset.py` | Pending |
 
 ### 1.1 Files to change
 
-| File | Change | Status |
-|---|---|---|
-| `terrain_diffusion/data/preprocessing/elevation_dataset.py` | `process_water_mask()`: load JRC, 255 mask, threshold, Gaussian blur. `process_single_file_base`: `water_folder` param, return water per chunk | ✅ Done |
-| `terrain_diffusion/data/preprocessing/build_base_dataset.py` | `--water-folder` CLI option; `water` in stored datasets + stats loop | ✅ Done |
-| `util_scripts/download_water_30m.sh` | One-liner download script matching DEM tile grid | ✅ Done |
-| `terrain_diffusion/training/datasets/h5_decoder_terrain_dataset.py` | Load `water` alongside `residual`; stack as 2-channel `image`; fix `calculate_stats` to track per-channel; add `water_mean`/`water_std` constructor params | Pending |
-| `configs/diffusion_decoder/diffusion_decoder_64-3_30m.cfg` | `in_channels=6`, `out_channels=2`; add `water_mean`, `water_std`, `water_sigma_data` | Pending |
-| `terrain_diffusion/inference/world_pipeline.py` | `_decoder_inference`: 2-ch noise, split output; `_build_decoder_stage`: output window `(3, ...)` (2 signal + 1 weight); `_compute_elev`: use ch 0 only; add `_compute_water`; `get()`: include `water` in return dict | Pending |
+| File                                                                | Change                                                                                                                                                                                                                | Status  |
+| ------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `terrain_diffusion/data/preprocessing/elevation_dataset.py`         | `process_water_mask()`: load JRC, 255 mask, threshold, Gaussian blur. `process_single_file_base`: `water_folder` param, return water per chunk                                                                        | ✅ Done |
+| `terrain_diffusion/data/preprocessing/build_base_dataset.py`        | `--water-folder` CLI option; `water` in stored datasets + stats loop                                                                                                                                                  | ✅ Done |
+| `util_scripts/download_water_30m.sh`                                | One-liner download script matching DEM tile grid                                                                                                                                                                      | ✅ Done |
+| `terrain_diffusion/training/datasets/h5_decoder_terrain_dataset.py` | Load `water` alongside `residual`; stack as 2-channel `image`; fix `calculate_stats` to track per-channel; add `water_mean`/`water_std` constructor params                                                            | Pending |
+| `configs/diffusion_decoder/diffusion_decoder_64-3_30m.cfg`          | `in_channels=6`, `out_channels=2`; add `water_mean`, `water_std`, `water_sigma_data`                                                                                                                                  | Pending |
+| `terrain_diffusion/inference/world_pipeline.py`                     | `_decoder_inference`: 2-ch noise, split output; `_build_decoder_stage`: output window `(3, ...)` (2 signal + 1 weight); `_compute_elev`: use ch 0 only; add `_compute_water`; `get()`: include `water` in return dict | Pending |
 
 ### 1.2 Data pipeline
 
 #### Step 1 — Download JRC tiles
+
 Use the same tile grid as your existing DEM data (same `--output_size` and `--output_resolution`)
 so geographic bounds align:
 
@@ -69,6 +71,7 @@ This exports JRC occurrence at native 30m resolution (hardcoded `native_scale=30
 whose bounding boxes match your existing DEM tiles.
 
 #### Step 2 — Append water to existing HDF5
+
 The `--append-water` flag (new) iterates over existing chunk/subchunk groups,
 skips everything that already has a `water` dataset,
 and adds water using the same bounds recovered from `chunk_id` + `resolution`:
@@ -90,6 +93,7 @@ and skips the Laplacian encode / climate steps entirely.
 ### 1.3 Training
 
 **Dataset reuse:**
+
 - `dataset.h5` — reuse as-is, only `water` is appended
 - Coarse model — not loaded during decoder training
 - Base model — not loaded during decoder training
@@ -131,6 +135,7 @@ python -m pytest tests/test_water_smoke.py           # model shape
 ```
 
 #### Test 1 — JRC preprocessing (no GPU, no data)
+
 File: `tests/test_water_preprocessing.py`
 
 ```python
@@ -179,6 +184,7 @@ def test_all_water_tile():
 ```
 
 #### Test 2 — Dataset shape (no GPU, needs synthetic HDF5)
+
 File: `tests/test_water_dataset.py`
 
 ```python
@@ -244,9 +250,46 @@ def test_cond_img_shape():
         )
         item = ds[0]
         assert item['cond_img'].shape == (4, 64, 64)  # 4 latent channels
+
+def test_bbox_attributes_present_and_valid():
+    """Every dataset must carry lon_min, lat_min, lon_max, lat_max attrs.
+
+    Validates:
+      - All four keys exist
+      - lon_min < lon_max, lat_min < lat_max
+      - Values are within Earth bounds (-180..180, -90..90)
+      - Water bbox matches residual bbox for the same chunk (no misalignment)
+    """
+    with tempfile.NamedTemporaryFile(suffix='.h5') as tmp:
+        make_synthetic_h5(tmp.name)
+        with h5py.File(tmp.name, 'r') as f:
+            for res_key in f:
+                for chunk_id in f[res_key]:
+                    for subchunk_id in f[res_key][chunk_id]:
+                        sg = f[res_key][chunk_id][subchunk_id]
+                        bbox_res = None
+                        for ds_name in sg:
+                            dset = sg[ds_name]
+                            assert 'lon_min' in dset.attrs, f"Missing lon_min in {ds_name}"
+                            assert 'lat_min' in dset.attrs, f"Missing lat_min in {ds_name}"
+                            assert 'lon_max' in dset.attrs, f"Missing lon_max in {ds_name}"
+                            assert 'lat_max' in dset.attrs, f"Missing lat_max in {ds_name}"
+                            lon_min = dset.attrs['lon_min']
+                            lat_min = dset.attrs['lat_min']
+                            lon_max = dset.attrs['lon_max']
+                            lat_max = dset.attrs['lat_max']
+                            assert -180 <= lon_min < lon_max <= 180, f"Bad lon: ({lon_min}, {lon_max})"
+                            assert -90 <= lat_min < lat_max <= 90, f"Bad lat: ({lat_min}, {lat_max})"
+                            if ds_name == 'residual':
+                                bbox_res = (lon_min, lat_min, lon_max, lat_max)
+                            elif ds_name == 'water' and bbox_res is not None:
+                                bbox_water = (lon_min, lat_min, lon_max, lat_max)
+                                assert bbox_water == bbox_res, \
+                                    f"Mismatched bbox: residual {bbox_res} vs water {bbox_water}"
 ```
 
 #### Test 3 — Model shape smoke test (no GPU)
+
 File: `tests/test_water_smoke.py`
 
 ```python
@@ -293,17 +336,21 @@ def test_decoder_gradient_step():
 ### 1.5 Visualization
 
 #### A — During training: per-channel loss logging
+
 Add to `DiffusionTrainer.train_step` (after computing loss):
+
 ```python
 with torch.no_grad():
     per_ch = (1 / (logvar.exp() * sigma_data**2) * (pred_v_t - v_t)**2 + logvar)
     logs['loss_elev'] = per_ch[:, 0].mean().item()
     logs['loss_water'] = per_ch[:, 1].mean().item()
 ```
+
 Watch `loss_water` decrease over training. If it plateaus while `loss_elev` improves,
 increase water loss weight (see `logvar_linear` initialization or add explicit channel weight).
 
 #### B — Dataset inspection (before training)
+
 Run this one-off script to verify JRC data was fused correctly:
 
 ```python
@@ -358,11 +405,13 @@ plt.savefig('debug/water_inference.png', dpi=150)
 ```
 
 **What to look for:**
+
 - Water follows valleys (not random patches) → model learned terrain→water
 - No water on mountain peaks or open ocean (ocean handled by negative elevation)
 - Continuity at tile boundaries (blending handles this automatically)
 
 **Red flags:**
+
 - All-zero water output → check normalization or model initialization
 - Water ignoring terrain structure → train longer or add coarse water (Phase 2)
 - Artifacts at tile seams → `decoder_tile_stride` too aggressive
@@ -379,12 +428,12 @@ improving long-range coherence (rivers continuing across tiles).
 
 ### 2.1 Files to change
 
-| File | Change |
-|---|---|
-| `terrain_diffusion/training/datasets/coarse_dataset.py` | Add water channel 6 (coarse-pooled from HDF5 `water` data) to `CoarseDataset.__getitem__` → `image` shape `(7, H, W)` |
-| `configs/diffusion_coarse/diffusion_coarse_water.cfg` | `out_channels=7`; `in_channels=11` (5 Perlin + 6 cond channels) |
-| `terrain_diffusion/inference/world_pipeline.py` | `_coarse_inference`: change noise from 6 → 7 channels; output `(8, ...)` (7 signal + 1 weight); `_build_coarse_stage`: `shape=(8, ...)`, `output_window=(8, ...)`; `_latent_inference`/`_build_latent_stage`: coarse_window now reads 8 channels; `_decoder_inference`: concatenate coarse water (upsampled, ch 6) to decoder input → 7 input channels |
-| `configs/diffusion_decoder/diffusion_decoder_64-3_30m_v2.cfg` | `in_channels=7` (noisy_2ch + 4_latents + 1_coarse_water) |
+| File                                                          | Change                                                                                                                                                                                                                                                                                                                                                 |
+| ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `terrain_diffusion/training/datasets/coarse_dataset.py`       | Add water channel 6 (coarse-pooled from HDF5 `water` data) to `CoarseDataset.__getitem__` → `image` shape `(7, H, W)`                                                                                                                                                                                                                                  |
+| `configs/diffusion_coarse/diffusion_coarse_water.cfg`         | `out_channels=7`; `in_channels=11` (5 Perlin + 6 cond channels)                                                                                                                                                                                                                                                                                        |
+| `terrain_diffusion/inference/world_pipeline.py`               | `_coarse_inference`: change noise from 6 → 7 channels; output `(8, ...)` (7 signal + 1 weight); `_build_coarse_stage`: `shape=(8, ...)`, `output_window=(8, ...)`; `_latent_inference`/`_build_latent_stage`: coarse_window now reads 8 channels; `_decoder_inference`: concatenate coarse water (upsampled, ch 6) to decoder input → 7 input channels |
+| `configs/diffusion_decoder/diffusion_decoder_64-3_30m_v2.cfg` | `in_channels=7` (noisy_2ch + 4_latents + 1_coarse_water)                                                                                                                                                                                                                                                                                               |
 
 ### 2.2 Datasets
 
@@ -472,10 +521,10 @@ If elevation quality is fine, skip entirely.
 
 ## Risk register
 
-| Risk | Severity | Mitigation |
-|---|---|---|
-| JRC 255 no-data classified as water | High | Mask before threshold (already implemented in code) |
-| Water channel drives loss to ignore elevation | Medium | Log per-channel loss; add explicit channel weight if needed |
-| Tile seam artifacts in water mask | Low | Already handled by weight-window blending in `_build_decoder_stage` |
-| Water never learned (model outputs zeros) | Medium | Check normalization; try raw 0–1 instead of mean/std normalize |
-| Training significantly slower (2× output channels) | Low | Crop size 128 already fits in 24GB |
+| Risk                                               | Severity | Mitigation                                                          |
+| -------------------------------------------------- | -------- | ------------------------------------------------------------------- |
+| JRC 255 no-data classified as water                | High     | Mask before threshold (already implemented in code)                 |
+| Water channel drives loss to ignore elevation      | Medium   | Log per-channel loss; add explicit channel weight if needed         |
+| Tile seam artifacts in water mask                  | Low      | Already handled by weight-window blending in `_build_decoder_stage` |
+| Water never learned (model outputs zeros)          | Medium   | Check normalization; try raw 0–1 instead of mean/std normalize      |
+| Training significantly slower (2× output channels) | Low      | Crop size 128 already fits in 24GB                                  |
