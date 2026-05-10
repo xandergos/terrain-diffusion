@@ -166,3 +166,50 @@ Compute mean and standard deviation for the water channel (in addition to existi
 2. Water mask does not degrade elevation quality (metrics within 5% of baseline).
 3. Perlin-generated conditioning produces water masks on arbitrary seeds without external data.
 4. CLI can export water mask as a separate GeoTIFF.
+
+## Implementation Status
+
+| Task | Status |
+|------|--------|
+| Add `jrc` image option to `terrain_diffusion/data/downloading/data.py` with native 30m scale | ✅ Done (2026-05-10) |
+| Preprocessing: JRC + Copernicus fusion in `build_base_dataset.py` | Pending |
+| HDF5 schema: add `water` dataset | Pending |
+| Decoder dataset: 2-channel output | Pending |
+| Decoder model: 7-in / 2-out channels | Pending |
+| Coarse model: 7-channel output | Pending |
+| Base model: extended conditioning | Pending |
+| Inference pipeline: 2-channel decoder output | Pending |
+| CLI `--output-water` flag | Pending |
+
+## Pre-Training Validation (No GPU / Full Training Needed)
+
+These tests validate structural correctness in under 10 seconds — no data download, no GPU, no training loop.
+
+### 1. Model Shape Smoke Tests
+
+Instantiate each modified model with new channel counts and run a forward pass with random data. Catches channel-count bugs, shape mismatches, and conditioning wiring errors.
+
+- **Coarse model** — `out_channels=7`, forward pass → `(B, 7, 16, 16)`
+- **Decoder model** — `in_channels=7, out_channels=2`, forward pass → `(B, 2, 512, 512)`
+- **Base model** — unchanged output (5 channels), verify still works with extended conditioning dims
+
+### 2. Single Gradient Step
+
+The highest-signal test: modify one config (e.g. `diffusion_decoder_64-3.cfg`) to reflect water-aware channel counts, feed one batch from a synthetic HDF5, and run `trainer.train_step()`. Verifies end-to-end data flow: dataset → model forward → loss → backward → optimizer step. No real training needed — just structural validation.
+
+### 3. Synthetic HDF5 Dataset Test
+
+Create a minimal HDF5 stub with `residual`, `latent`, `lowfreq`, and `water` datasets. Instantiate `H5DecoderTerrainDataset` and verify:
+
+- `__getitem__` returns `image` with shape `(2, H, W)` (residual + water channels)
+- Per-channel normalization stats compute correctly (mean/std for both channels)
+- Augmentations (rot/flip) apply consistently across both channels
+
+### 4. Water Mask Fusion Unit Test
+
+Test the JRC + Copernicus preprocessing logic in isolation with small numpy arrays:
+
+- JRC ≥ 50% threshold → water=1
+- Copernicus class 80 fills gaps where JRC = 0
+- Gaussian blur produces [0,1] range without hard edges
+- Edge cases: all-zero tiles, all-water tiles, tiles where JRC and Copernicus disagree
