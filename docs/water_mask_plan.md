@@ -24,15 +24,31 @@ Only the `water` channel is appended to it.
 Coarse and base models are untouched.
 The decoder sees: `[noisy_2ch, 4_upsampled_latents]` → 6 input channels, 2 output channels.
 
+### 1.0 Implementation status
+
+| Task | Status |
+|---|---|
+| `process_water_mask()` — JRC loading, 255 no-data → 0, ≥50 threshold, Gaussian blur | ✅ Done |
+| `process_single_file_base()` — `water_folder` param, calls `process_water_mask()`, returns water per chunk | ✅ Done |
+| `ElevationDataset` — `water_folder` param wired through to `process_single_file_base` | ✅ Done |
+| `build_base_dataset.py` — `--water-folder` CLI option, stores `water` in HDF5, adds to stats loop | ✅ Done |
+| `util_scripts/download_water_30m.sh` — one-liner to download JRC tiles with matching grid | ✅ Done |
+| `h5_decoder_terrain_dataset.py` — 2-channel output, `water_mean`/`water_std`, per-channel stats | Pending |
+| `configs/diffusion_decoder/diffusion_decoder_64-3_30m.cfg` — `in_channels=6`, `out_channels=2` | Pending |
+| `world_pipeline.py` — 2-ch noise, 2-ch decoder output, weight blending, `_compute_water()`, `get()` water | Pending |
+| Decoder model training — diffusion + consistency distillation | Pending |
+| Tests — `test_water_preprocessing.py`, `test_water_dataset.py`, `test_water_smoke.py` | Pending |
+
 ### 1.1 Files to change
 
-| File | Change |
-|---|---|
-| `terrain_diffusion/data/preprocessing/elevation_dataset.py` | `process_single_file_base`: add `water_folder` param, load JRC, 255 mask, threshold, Gaussian blur, return water per chunk |
-| `terrain_diffusion/data/preprocessing/build_base_dataset.py` | Add `--water-folder` CLI option; add `water` to stored datasets and to stats loop; add `--append-water` flag to skip re-processing elevation |
-| `terrain_diffusion/training/datasets/h5_decoder_terrain_dataset.py` | Load `water` alongside `residual`; stack as 2-channel `image`; fix `calculate_stats` to track per-channel; add `water_mean`/`water_std` constructor params |
-| `configs/diffusion_decoder/diffusion_decoder_64-3_30m.cfg` | `in_channels=6`, `out_channels=2`; add `water_mean`, `water_std`, `water_sigma_data` |
-| `terrain_diffusion/inference/world_pipeline.py` | `_decoder_inference`: 2-ch noise, split output; `_build_decoder_stage`: output window `(3, ...)` (2 signal + 1 weight); `_compute_elev`: use ch 0 only; add `_compute_water`; `get()`: include `water` in return dict |
+| File | Change | Status |
+|---|---|---|
+| `terrain_diffusion/data/preprocessing/elevation_dataset.py` | `process_water_mask()`: load JRC, 255 mask, threshold, Gaussian blur. `process_single_file_base`: `water_folder` param, return water per chunk | ✅ Done |
+| `terrain_diffusion/data/preprocessing/build_base_dataset.py` | `--water-folder` CLI option; `water` in stored datasets + stats loop | ✅ Done |
+| `util_scripts/download_water_30m.sh` | One-liner download script matching DEM tile grid | ✅ Done |
+| `terrain_diffusion/training/datasets/h5_decoder_terrain_dataset.py` | Load `water` alongside `residual`; stack as 2-channel `image`; fix `calculate_stats` to track per-channel; add `water_mean`/`water_std` constructor params | Pending |
+| `configs/diffusion_decoder/diffusion_decoder_64-3_30m.cfg` | `in_channels=6`, `out_channels=2`; add `water_mean`, `water_std`, `water_sigma_data` | Pending |
+| `terrain_diffusion/inference/world_pipeline.py` | `_decoder_inference`: 2-ch noise, split output; `_build_decoder_stage`: output window `(3, ...)` (2 signal + 1 weight); `_compute_elev`: use ch 0 only; add `_compute_water`; `get()`: include `water` in return dict | Pending |
 
 ### 1.2 Data pipeline
 
