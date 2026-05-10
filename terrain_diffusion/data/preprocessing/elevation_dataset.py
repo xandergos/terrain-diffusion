@@ -160,6 +160,47 @@ def extract_mask_from_tiffs(
     else:
         raise ValueError(f"Input path must be either a TIFF file or a directory containing TIFFs. Got {tiff_path}")
     
+def process_water_mask(jrc_folder, bounds, target_size, blur_sigma=2.0, jrc_threshold=50):
+    """
+    Load JRC occurrence data for the given bounds and produce a soft water mask.
+
+    JRC occurrence values are 0-100 (percentage of time observed as water).
+    Value 255 is the JRC no-data sentinel (outside Landsat coverage) and must
+    be zeroed before thresholding — otherwise ~30% of high-latitude / canopy
+    pixels would be wrongly classified as permanent water.
+
+    Args:
+        jrc_folder: Path to folder containing JRC GeoTIFF tiles.
+        bounds: (lon_min, lat_min, lon_max, lat_max) in WGS84.
+        target_size: Output (H, W) to resize the mask to.
+        blur_sigma: Gaussian blur sigma in pixels (default 2.0).
+        jrc_threshold: Occurrence % at or above which a pixel is water (default 50).
+
+    Returns:
+        np.ndarray float32 of shape (target_size, target_size) with values in [0, 1].
+        Returns None if the JRC data is unavailable for these bounds.
+    """
+    import scipy.ndimage
+    try:
+        jrc_raw = extract_mask_from_tiffs(jrc_folder, bounds).astype(np.float32)
+    except (ValueError, Exception):
+        return None
+
+    # JRC no-data sentinel: 255 means "no Landsat observation", not water.
+    jrc_raw[jrc_raw == 255] = 0
+
+    # Hard threshold → binary mask, then blur for soft edges.
+    water_binary = (jrc_raw >= jrc_threshold).astype(np.float32)
+
+    if water_binary.shape != (target_size, target_size):
+        water_binary = skimage.transform.resize(
+            water_binary, (target_size, target_size), order=0, preserve_range=True
+        ).astype(np.float32)
+
+    water_soft = scipy.ndimage.gaussian_filter(water_binary, sigma=blur_sigma)
+    return np.clip(water_soft, 0.0, 1.0)
+
+
 def process_single_file_base(
     chunk_id, 
     bounds,
@@ -170,6 +211,7 @@ def process_single_file_base(
     lowres_sigma,
     num_chunks=1,
     climate_folder=None,
+    water_folder=None,
     edge_margin=0,
     data_source='merit',
 ):
@@ -264,6 +306,14 @@ def process_single_file_base(
             climate = climate[..., edge_margin:-edge_margin, edge_margin:-edge_margin]
     else:
         climate = None
+
+    # Water mask: load JRC occurrence at full highres resolution.
+    # JRC no-data (255) is zeroed before thresholding inside process_water_mask.
+    if water_folder is not None:
+        effective_highres = highres_size - highres_margin * 2
+        water = process_water_mask(water_folder, bounds, target_size=effective_highres)
+    else:
+        water = None
     
     size_ratio = highres_size // lowres_size
     highres_dem = np.sign(highres_dem) * np.sqrt(np.abs(highres_dem))
@@ -287,12 +337,17 @@ def process_single_file_base(
             lowres_end_w = min(lowres_start_w + lowres_chunk_size, lowres_size)
             
             pct_land = np.mean(lowfreq[..., lowres_start_h:lowres_end_h, lowres_start_w:lowres_end_w] > 0)
+
+            water_chunk = None
+            if water is not None:
+                water_chunk = water[highres_start_h:highres_end_h, highres_start_w:highres_end_w]
             
             chunks_data.append({
                 'residual': residual[..., highres_start_h:highres_end_h, highres_start_w:highres_end_w],
                 'lowfreq': lowfreq[..., lowres_start_h:lowres_end_h, lowres_start_w:lowres_end_w],
                 'climate': climate[..., lowres_start_h:lowres_end_h, lowres_start_w:lowres_end_w] if climate is not None else None,
                 'lowres_exact': lowres_exact[..., lowres_start_h:lowres_end_h, lowres_start_w:lowres_end_w],
+                'water': water_chunk,
                 'pct_land': pct_land,
                 'chunk_id': chunk_id,
                 'subchunk_id': f'chunk_{chunk_h}_{chunk_w}'
@@ -313,7 +368,8 @@ class ElevationDataset(torch.utils.data.Dataset):
                  climate_folder=None,
                  skip_chunk_ids=None,
                  edge_margin=0,
-                 data_source='merit'):
+                 data_source='merit',
+                 water_folder=None):
         self.grid_cells = create_equal_area_grid((highres_size*resolution, highres_size*resolution))
         self.chunk_ids = [str(i) for i in range(len(self.grid_cells))]
         
@@ -324,6 +380,7 @@ class ElevationDataset(torch.utils.data.Dataset):
         self.lowres_sigma = lowres_sigma
         self.num_chunks = num_chunks
         self.climate_folder = climate_folder
+        self.water_folder = water_folder
         if skip_chunk_ids is not None:
             skip_chunk_ids = set(str(x) for x in skip_chunk_ids)
             self.chunk_ids = [f for f in self.chunk_ids if str(f) not in skip_chunk_ids]
@@ -344,5 +401,6 @@ class ElevationDataset(torch.utils.data.Dataset):
                                         self.lowres_sigma,
                                         self.num_chunks, 
                                         self.climate_folder,
+                                        self.water_folder,
                                         self.edge_margin,
                                         self.data_source)

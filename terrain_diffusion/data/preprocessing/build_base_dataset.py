@@ -32,6 +32,7 @@ from terrain_diffusion.data.preprocessing.calculate_stds import calculate_stats_
 @click.option('--res-group', type=int, default=90, help='Resolution group of the input images. Only used for labeling.')
 @click.option('--num-chunks', type=int, default=1, help='Number of chunks to divide the image into for processing')
 @click.option('--climate-folder', type=str, default=None, help='Path to the folder containing climate data (optional)')
+@click.option('--water-folder', type=str, default=None, help='Path to the folder containing JRC water occurrence TIFFs (optional). Occurrence values 0-100; 255 treated as no-data.')
 @click.option('-o', '--output-file', type=str, default='dataset.h5', help='Path to the output HDF5 file')
 @click.option('--num-workers', type=int, default=mp.cpu_count()-1, help='Number of parallel workers for processing')
 @click.option('--overwrite', is_flag=True, help='Overwrite existing datasets in the output file')
@@ -50,6 +51,7 @@ def process_base_dataset(
     res_group,
     num_chunks,
     climate_folder,
+    water_folder,
     output_file,
     num_workers,
     overwrite,
@@ -115,7 +117,8 @@ def process_base_dataset(
             climate_folder,
             skip_chunk_ids,
             edge_margin,
-            data_source
+            data_source,
+            water_folder=water_folder,
         )
         dataloader = torch.utils.data.DataLoader(dataset, batch_size=None, shuffle=False, num_workers=num_workers, prefetch_factor=prefetch)
         
@@ -133,7 +136,8 @@ def process_base_dataset(
                     ('residual', chunk['residual']),
                     ('lowfreq', chunk['lowfreq']),
                     ('lowres_exact', chunk['lowres_exact']),
-                    ('climate', chunk['climate'])
+                    ('climate', chunk['climate']),
+                    ('water', chunk.get('water')),
                 ]:
                     if data_type == 'residual':
                         chunk_shape = (128, 128)
@@ -141,10 +145,14 @@ def process_base_dataset(
                         chunk_shape = (32, 32)
                     elif data_type == 'climate':
                         chunk_shape = (1, 32, 32)
+                    elif data_type == 'water':
+                        chunk_shape = (128, 128)
                     
                     if data is None:
                         continue
-                    dset = subchunk_group.create_dataset(data_type, data=data.numpy(), compression='lzf', chunks=chunk_shape)
+                    # data may be a numpy array (water) or a torch tensor (others)
+                    raw = data.numpy() if hasattr(data, 'numpy') else data
+                    dset = subchunk_group.create_dataset(data_type, data=raw, compression='lzf', chunks=chunk_shape)
                     dset.attrs.update({
                         'pct_land': chunk['pct_land'],
                         'resolution': resolution,
@@ -154,8 +162,10 @@ def process_base_dataset(
                     })
                     f.flush()
         
-        # Calculate stats for residual and climate datasets
+        # Calculate stats for residual, climate, and water datasets
         datasets_to_process = ['residual', 'climate']
+        if water_folder is not None:
+            datasets_to_process.append('water')
         for dataset_name in datasets_to_process:
             means, stds = calculate_stats_welford(res_group, dataset_name, min_stat_landcover_pct)
             

@@ -1,4 +1,4 @@
-# Setup and training from scratch *(not recommended)*
+# Setup and training from scratch _(not recommended)_
 
 All steps can be completed with 24GB of GPU RAM
 
@@ -18,12 +18,12 @@ Download the "30 Arc-Second Resolution GeoTIFF" [here](https://www.ncei.noaa.gov
 
 #### 3. Download WorldClim data
 
-Download `bio 10m` and `bio 30s` [here](https://www.worldclim.org/data/worldclim21.html). Extract all into `data/global`.
+Download `bio 10m` and `bio 30s` [here](942056). Extract all into `data/global`.
 
 ### Create Base Dataset
 
 After all data has been downloaded, run:
-```./util_scripts/create_base_dataset.sh```
+`./util_scripts/create_base_dataset.sh`
 
 ### Train AutoEncoder
 
@@ -121,7 +121,6 @@ python -m terrain_diffusion.training.save_model -c checkpoints/consistency_decod
 ```
 
 Move the output folder (Probably `checkpoints/consistency_decoder-64x3/latest_checkpoint/saved_model`) to `checkpoints/models/consistency_decoder-64x3`
-
 
 ### Train Diffusion Base
 
