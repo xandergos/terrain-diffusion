@@ -66,7 +66,7 @@ def tiled_gaussian_noise(seed, x0, width, channels=LATENT_CHANNELS, height=LATEN
         tile_x0 = tx * tile
         ox0 = max(x0, tile_x0)
         ox1 = min(x0 + width, tile_x0 + tile)
-        ss = np.random.SeedSequence(np.array([seed, tx], dtype=np.uint32))
+        ss = np.random.SeedSequence(np.array([seed, tx & 0xFFFFFFFF], dtype=np.uint32))
         rng = np.random.Generator(np.random.PCG64DXSM(ss))
         tile_noise = rng.standard_normal((channels, height, tile), dtype=np.float32)
         out[:, :, ox0 - x0:ox1 - x0] = tile_noise[:, :, ox0 - tile_x0:ox1 - tile_x0]
