@@ -112,7 +112,7 @@ def get_relief_map(
         dy, dx = np.gradient(src)
         dy, dx = dy/(15 * resolution/90), dx/(15 * resolution/90)
         slope_rad = np.pi / 2.0 - np.arctan(np.hypot(dx, dy))
-        aspect_rad = np.arctan2(dy, -dx)
+        aspect_rad = np.arctan2(-dy, dx)
         az_rad = np.deg2rad(azimuth_deg)
         alt_rad = np.deg2rad(altitude_deg)
         hs = (
