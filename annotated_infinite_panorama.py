@@ -1,3 +1,15 @@
+# /// script
+# requires-python = ">=3.14"
+# dependencies = [
+#     "accelerate>=1.14.0",
+#     "diffusers>=0.39.0",
+#     "infinite-tensor>=0.3.0",
+#     "numpy>=2.5.1",
+#     "pillow>=12.3.0",
+#     "torch>=2.13.0",
+#     "transformers>=5.14.1",
+# ]
+# ///
 """Self-contained demo: generate an infinite-width panorama with Stable
 Diffusion v1.5 and the infinite-tensor framework.
 
@@ -42,6 +54,17 @@ PIXEL_STRIDE = 384             # Overlap stride in pixel space (tile = 512).
 NUM_INFERENCE_STEPS = 50
 GUIDANCE_SCALE = 7.5
 SEED = 0
+
+# Device selection: prefer CUDA, then Apple Metal (MPS), then CPU.
+# Macs have no CUDA -> MPS gives GPU acceleration via Metal; CPU is the fallback.
+if torch.cuda.is_available():
+    DEVICE = "cuda"
+elif torch.backends.mps.is_available():
+    DEVICE = "mps"
+else:
+    DEVICE = "cpu"
+# float16 is well-supported on CUDA and MPS; CPU requires float32.
+DTYPE = torch.float32 if DEVICE == "cpu" else torch.float16
 
 # SDv1.5 constants.
 LATENT_TILE = 64
@@ -107,8 +130,8 @@ def build_timestep_ranges(all_timesteps, thresholds):
 # -----------------------------------------------------------------------------
 def main():
     pipe = StableDiffusionPipeline.from_pretrained(
-        "runwayml/stable-diffusion-v1-5", torch_dtype=torch.float16,
-    ).to("cuda")
+        "runwayml/stable-diffusion-v1-5", torch_dtype=DTYPE,
+    ).to(DEVICE)
     pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
     pipe.scheduler.set_timesteps(NUM_INFERENCE_STEPS)
 
@@ -177,21 +200,21 @@ def main():
         """Phase T-1: sample pure noise at this window column, denoise the highest-t range."""
         x = ctx[2] * LATENT_STRIDE
         noise = torch.as_tensor(tiled_gaussian_noise(SEED, x, LATENT_TILE)) * init_sigma
-        noise = noise.to(pipe.device, dtype=torch.float16).unsqueeze(0)
+        noise = noise.to(pipe.device, dtype=DTYPE).unsqueeze(0)
         latent = denoise(noise, phase_timesteps[0])[0].cpu().float()
         return pack(latent, latent_weight)
 
     def make_continuation_phase(timesteps):
         """Phases T-2..0: read blended tile from previous phase, denoise further."""
         def phase(ctx, prev):
-            latent = normalize(prev).to(pipe.device, dtype=torch.float16).unsqueeze(0)
+            latent = normalize(prev).to(pipe.device, dtype=DTYPE).unsqueeze(0)
             latent = denoise(latent, timesteps)[0].cpu().float()
             return pack(latent, latent_weight)
         return phase
 
     def decode(ctx, prev):
         """VAE-decode the fully denoised (phase 0) latent tile; re-weight for pixel blending."""
-        latent = normalize(prev).to(pipe.device, dtype=torch.float16).unsqueeze(0)
+        latent = normalize(prev).to(pipe.device, dtype=DTYPE).unsqueeze(0)
         latent = latent / pipe.vae.config.scaling_factor
         with torch.no_grad():
             img = pipe.vae.decode(latent).sample
